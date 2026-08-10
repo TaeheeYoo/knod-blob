@@ -92,15 +92,9 @@
 #define XDP_DROP	1
 #define XDP_PASS	2
 
-// The JIT's own scalars.  These follow the ISA rather than the program, and
-// the two generations disagree; unifying them would retire this.
-#if KNOD_ISA == 10
-# define DONE_MASK	32
-# define INITIAL_EXEC	104
-#else
-# define DONE_MASK	34
-# define INITIAL_EXEC	100
-#endif
+// The JIT's own scalars.
+#define DONE_MASK	KNOD_BLOB_DONE_MASK_SREG
+#define INITIAL_EXEC	KNOD_BLOB_INITIAL_EXEC_SREG
 
 // struct knod_blob_map_desc
 #define DESC_KEY_SIZE		KNOD_BLOB_DESC_KEY_SIZE

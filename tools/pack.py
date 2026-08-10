@@ -13,7 +13,7 @@ import subprocess
 import sys
 
 MAGIC = 0x4B4E4442  # 'KNDB'
-ABI_VERSION = 1
+ABI_VERSION = 2
 LINK_SPLICE = 0
 
 HDR = "<8I"          # magic .. reserved
