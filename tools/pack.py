@@ -32,7 +32,8 @@ KIND = {
     "update_hash": 7,
     "delete_hash": 8,
     "prologue": 9,
-    "epilogue": 10,
+    "epilogue_pre": 10,
+    "epilogue_post": 11,
 }
 
 

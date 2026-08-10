@@ -20,6 +20,10 @@ kernel checks the offsets it publishes against its structures at build time.
 
 - `src/prologue.S` — works out which packet a lane is for and hands the program
   its context, the packet bounds, and the buffer descriptor to write back to.
+- `src/epilogue.S` — tells the host what the program decided and where the
+  packet ended up, and claims a delivery slot for one it let through.  Two
+  pieces, because the JIT puts the packet-cache writeback between them and how
+  long that is follows the program.
 
 ## Checking it
 
