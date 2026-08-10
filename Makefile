@@ -9,7 +9,8 @@ LLVM_OBJCOPY	?= llvm-objcopy
 ASM_CPP		?= clang -x assembler-with-cpp -E
 
 SRC		:= $(wildcard src/*.S)
-DEPS		:= $(SRC) src/common.inc
+ABI_HDR		:= include/uapi/linux/knod_blob.h
+DEPS		:= $(SRC) src/common.inc $(ABI_HDR)
 BUILD		:= build
 FIRMWARE_DIR	?= /lib/firmware/knod
 
@@ -43,7 +44,7 @@ $(BUILD)/all.$(1).text: $(BUILD)/all.$(1).o
 	$(LLVM_OBJCOPY) -O binary --only-section=.text $$< $$@
 
 $(BUILD)/knod-bpf-gfx$(1).bin: $(BUILD)/all.$(1).text $(BUILD)/all.$(1).o \
-			       tools/pack.py
+			       tools/pack.py $(ABI_HDR)
 	python3 tools/pack.py --isa $(1) --wave 64 \
 		--text $$< --obj $(BUILD)/all.$(1).o -o $$@
 

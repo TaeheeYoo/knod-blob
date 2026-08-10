@@ -8,12 +8,13 @@ loader expects.  The layout is described in include/knod_blob_abi.h.
 """
 
 import argparse
+import re
 import struct
 import subprocess
 import sys
 
-MAGIC = 0x4B4E4442  # 'KNDB'
-ABI_VERSION = 2
+HEADER = "include/uapi/linux/knod_blob.h"
+
 LINK_SPLICE = 0
 
 HDR = "<8I"          # magic .. reserved
@@ -21,20 +22,37 @@ ENTRY = "<6I"        # kind .. reserved
 HDR_SIZE = struct.calcsize(HDR)
 ENTRY_SIZE = struct.calcsize(ENTRY)
 
-KIND = {
-    "lookup_array": 0,
-    "update_array": 1,
-    "delete_array": 2,
-    "lookup_percpu_array": 3,
-    "update_percpu_array": 4,
-    "delete_percpu_array": 5,
-    "lookup_hash": 6,
-    "update_hash": 7,
-    "delete_hash": 8,
-    "prologue": 9,
-    "epilogue_pre": 10,
-    "epilogue_post": 11,
-}
+def contract(path):
+    """MAGIC, the ABI version and the routine kinds, as the header spells them.
+
+    Copying them here instead would leave four numbers to keep in step by hand,
+    and getting one wrong is not a build error on either side: the kernel takes
+    a blob whose magic and version still match and splices whatever the entry
+    says, so a kind that has shifted by one names a different routine.
+    """
+    text = open(path).read()
+
+    def define(name):
+        got = re.search(rf"^#define\s+{name}\s+(\S+)", text, re.M)
+        if not got:
+            sys.exit(f"{path}: no {name}")
+        return int(got.group(1), 0)
+
+    body = re.search(r"enum knod_blob_kind \{(.*?)\n\};", text, re.S)
+    if not body:
+        sys.exit(f"{path}: no enum knod_blob_kind")
+
+    kinds, nxt = {}, 0
+    for name, val in re.findall(r"^\s*(KNOD_BLOB_\w+)\s*(?:=\s*(\d+))?\s*,",
+                                body.group(1), re.M):
+        nxt = int(val) if val else nxt
+        if not name.endswith("_MAX"):
+            kinds[name[len("KNOD_BLOB_"):].lower()] = nxt
+        nxt += 1
+
+    return define("KNOD_BLOB_MAGIC"), define("KNOD_BLOB_ABI_VERSION"), kinds
+
+
 
 
 def symbols(obj):
@@ -52,16 +70,16 @@ def symbols(obj):
     return syms
 
 
-def parse_name(name):
+def parse_name(name, kinds):
     """knod_lookup_hash_k3 -> (kind, key_chunks). k<N> is optional."""
     body = name[len("knod_"):]
     chunks = 0
     if "_k" in body:
         body, _, n = body.rpartition("_k")
         chunks = int(n)
-    if body not in KIND:
+    if body not in kinds:
         raise SystemExit(f"{name}: unknown routine kind '{body}'")
-    return KIND[body], chunks
+    return kinds[body], chunks
 
 
 def main():
@@ -72,6 +90,8 @@ def main():
     ap.add_argument("--obj", required=True, help="object to read symbols from")
     ap.add_argument("-o", "--output", required=True)
     args = ap.parse_args()
+
+    magic, abi, kinds = contract(HEADER)
 
     code = open(args.text, "rb").read()
     syms = symbols(args.obj)
@@ -87,14 +107,14 @@ def main():
             raise SystemExit(f"{name}: zero size, is .size missing?")
         if size % 4:
             raise SystemExit(f"{name}: size {size} is not a multiple of 4")
-        kind, chunks = parse_name(name)
+        kind, chunks = parse_name(name, kinds)
         # exec_save_pairs is not derivable from the object; the routines
         # declare it through a knod_<name>_xsave absolute symbol.
         pairs = syms.get(name + "_xsave", (0, 0))[0]
         entries.append((kind, chunks, off, size, pairs))
 
     code_off = HDR_SIZE + ENTRY_SIZE * len(entries)
-    blob = struct.pack(HDR, MAGIC, ABI_VERSION, args.isa, LINK_SPLICE,
+    blob = struct.pack(HDR, magic, abi, args.isa, LINK_SPLICE,
                        args.wave, len(entries), HDR_SIZE, 0)
     for kind, chunks, off, size, pairs in entries:
         blob += struct.pack(ENTRY, kind, chunks, code_off + off, size, pairs, 0)
@@ -104,7 +124,7 @@ def main():
     print(f"{args.output}: isa gfx{args.isa}, {len(entries)} entries, "
           f"{len(blob)} bytes")
     for kind, chunks, off, size, pairs in entries:
-        name = next(k for k, v in KIND.items() if v == kind)
+        name = next(k for k, v in kinds.items() if v == kind)
         suffix = f" k{chunks}" if chunks else ""
         print(f"  {name}{suffix:<4} off={code_off + off:<6} size={size:<5} "
               f"xsave={pairs}")
