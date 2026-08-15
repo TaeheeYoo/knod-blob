@@ -74,9 +74,9 @@ def parse_name(name, kinds):
     """knod_lookup_hash_k3 -> (kind, key_chunks). k<N> is optional."""
     body = name[len("knod_"):]
     chunks = 0
-    if "_k" in body:
-        body, _, n = body.rpartition("_k")
-        chunks = int(n)
+    m = re.search(r"_k(\d+)$", body)
+    if m:
+        body, chunks = body[:m.start()], int(m.group(1))
     if body not in kinds:
         raise SystemExit(f"{name}: unknown routine kind '{body}'")
     return kinds[body], chunks
