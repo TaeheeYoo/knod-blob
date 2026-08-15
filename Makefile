@@ -8,9 +8,14 @@ LLVM_OBJCOPY	?= llvm-objcopy
 # Not CPP: make defines that as $(CC) -E, which cannot preprocess assembly.
 ASM_CPP		?= clang -x assembler-with-cpp -E
 
-SRC		:= $(wildcard src/*.S)
+# One container per feature, because the core has to bring up a queue before
+# any feature module is loaded and so cannot read the BPF JIT's blob.
+FEATURES	:= core bpf
+SRC_core	:= src/default.S
+SRC_bpf		:= $(filter-out $(SRC_core),$(wildcard src/*.S))
+
 ABI_HDR		:= include/uapi/linux/knod_blob.h
-DEPS		:= $(SRC) src/common.inc $(ABI_HDR)
+DEPS		:= $(wildcard src/*.S) src/common.inc $(ABI_HDR)
 BUILD		:= build
 FIRMWARE_DIR	?= /lib/firmware/knod
 
@@ -24,36 +29,38 @@ ATTR_9		:=
 ATTR_10		:= --mattr=+wavefrontsize64
 ATTR_11		:= --mattr=+wavefrontsize64
 
-BLOBS		:= $(foreach i,$(ISAS),$(BUILD)/knod-bpf-gfx$(i).bin)
+BLOBS		:= $(foreach f,$(FEATURES),\
+		     $(foreach i,$(ISAS),$(BUILD)/knod-$(f)-gfx$(i).bin))
 
 all: $(BLOBS)
 
-# One set of rules per ISA.  A pattern rule cannot express this because the
-# cpu and attributes are looked up by the ISA number, not the stem.
+# One set of rules per feature and ISA.  A pattern rule cannot express this
+# because the cpu and attributes are looked up by the ISA number, not the stem.
 define isa_rules
-$(BUILD)/all.$(1).s: $(DEPS) | $(BUILD)
-	cat $(SRC) > $(BUILD)/all.$(1).cat.S
+$(BUILD)/$(1).$(2).s: $(DEPS) | $(BUILD)
+	cat $(SRC_$(1)) > $(BUILD)/$(1).$(2).cat.S
 	$(ASM_CPP) -Isrc -Iinclude/uapi -DKNOD_BLOB_LINK=0 -D__ASSEMBLY__ \
-		-DKNOD_ISA=$(1) $(BUILD)/all.$(1).cat.S -o $$@
+		-DKNOD_ISA=$(2) $(BUILD)/$(1).$(2).cat.S -o $$@
 
-$(BUILD)/all.$(1).o: $(BUILD)/all.$(1).s
-	$(LLVM_MC) -triple=amdgcn-amd-amdhsa -mcpu=$(CPU_$(1)) $(ATTR_$(1)) \
+$(BUILD)/$(1).$(2).o: $(BUILD)/$(1).$(2).s
+	$(LLVM_MC) -triple=amdgcn-amd-amdhsa -mcpu=$(CPU_$(2)) $(ATTR_$(2)) \
 		-filetype=obj $$< -o $$@
 
-$(BUILD)/all.$(1).text: $(BUILD)/all.$(1).o
+$(BUILD)/$(1).$(2).text: $(BUILD)/$(1).$(2).o
 	$(LLVM_OBJCOPY) -O binary --only-section=.text $$< $$@
 
-$(BUILD)/knod-bpf-gfx$(1).bin: $(BUILD)/all.$(1).text $(BUILD)/all.$(1).o \
-			       tools/pack.py $(ABI_HDR)
-	python3 tools/pack.py --isa $(1) --wave 64 \
-		--text $$< --obj $(BUILD)/all.$(1).o -o $$@
+$(BUILD)/knod-$(1)-gfx$(2).bin: $(BUILD)/$(1).$(2).text $(BUILD)/$(1).$(2).o \
+				tools/pack.py $(ABI_HDR)
+	python3 tools/pack.py --isa $(2) --wave 64 \
+		--text $$< --obj $(BUILD)/$(1).$(2).o -o $$@
 
-dis-$(1): $(BUILD)/all.$(1).o
-	llvm-objdump -d --mcpu=$(CPU_$(1)) $(ATTR_$(1)) $$<
-.PHONY: dis-$(1)
+dis-$(1)-$(2): $(BUILD)/$(1).$(2).o
+	llvm-objdump -d --mcpu=$(CPU_$(2)) $(ATTR_$(2)) $$<
+.PHONY: dis-$(1)-$(2)
 endef
 
-$(foreach i,$(ISAS),$(eval $(call isa_rules,$(i))))
+$(foreach f,$(FEATURES),\
+  $(foreach i,$(ISAS),$(eval $(call isa_rules,$(f),$(i)))))
 
 $(BUILD):
 	mkdir -p $@
