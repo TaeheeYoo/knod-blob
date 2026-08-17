@@ -6,6 +6,8 @@
 // that generator.  Names, macros and the reasons behind any of it come next;
 // what is here is only known to be the same shader.
 
+
+	// Phase 0 - Parse ESP header + SA table lookup
 	s_dcache_inv
 	s_waitcnt lgkmcnt(0)
 	s_mov_b32 s44, 0x10203
@@ -69,6 +71,8 @@
 .L004:
 	s_sub_u32 s26, s23, 1
 .L005:
+
+	// Phase 1 - Save pre-crypto state + load extra sub[] fields
 	v_mov_b32_e32 v30, s26
 	v_mov_b32_e32 v31, v5
 	v_mov_b32_e32 v32, v6
@@ -82,9 +86,13 @@
 	s_waitcnt vmcnt(0)
 	v_perm_b32 v38, v38, v38, s44
 	global_store_dword v[3:4], v38, off offset:28
+
+	// Phase 2 - Branch on miss/bypass - skip crypto entirely
 	v_readfirstlane_b32 s26, v30
 	s_cmp_ge_u32 s26, 0x100
 	s_cbranch_scc1 .L025
+
+	// Phase 3 - Load SA entry fields for the matched slot
 	s_mul_i32 s27, s26, 0x68
 	s_add_u32 s24, s24, s27
 	s_addc_u32 s25, s25, 0
@@ -103,12 +111,16 @@
 	v_readfirstlane_b32 s36, v7
 	v_readfirstlane_b32 s39, v14
 	v_readfirstlane_b32 s55, v15
+
+	// Phase 4 - Build AES-GCM nonce
 	v_add_co_u32_e32 v12, vcc, v42, v33
 	v_addc_co_u32_e32 v13, vcc, 0, v34, vcc
 	global_load_dwordx2 v[14:15], v[12:13], off offset:8
 	s_waitcnt vmcnt(0)
 	v_readfirstlane_b32 s37, v14
 	v_readfirstlane_b32 s38, v15
+
+	// Phase 5 - Compute ciphertext bounds
 	v_readfirstlane_b32 s28, v42
 	s_add_u32 s28, 32, s28
 	v_readfirstlane_b32 s50, v35
@@ -116,6 +128,8 @@
 	s_add_u32 s51, 15, s50
 	s_lshr_b32 s51, s51, 4
 	s_add_u32 s54, 2, s51
+
+	// Phase 6 - Cooperative T-table load (VRAM -> LDS)
 	s_mov_b32 s32, 0xff
 	v_lshlrev_b32_e32 v9, 2, v0
 	v_mov_b32_e32 v12, s34
@@ -136,6 +150,8 @@
 	ds_write_b32 v10, v17
 	s_waitcnt lgkmcnt(0)
 	s_barrier
+
+	// Phase 7 - AES-CTR decrypt
 	v_cmp_gt_u32_e32 vcc, s51, v0
 	s_and_saveexec_b64 s[48:49], vcc
 	s_cbranch_execz .L007
@@ -560,6 +576,8 @@
 	v_addc_co_u32_e32 v13, vcc, 0, v37, vcc
 	global_store_dwordx4 v[12:13], v[23:26], off
 .L007:
+
+	// Phase 7.5 - Compute AES(K, J0) for ICV finalization
 	s_mov_b32 s24, s34
 	s_mov_b32 s25, s35
 	s_or_b64 exec, s[48:49], s[48:49]
@@ -969,6 +987,8 @@
 	v_mov_b32_e32 v21, v3
 	v_mov_b32_e32 v22, v4
 	s_barrier
+
+	// Phase 8 - Parallel GHASH
 	v_sub_u32_e32 v9, s54, v0
 	v_add_u32_e32 v9, -1, v9
 	v_max_i32_e32 v9, 0, v9
@@ -1228,6 +1248,8 @@
 	v_mov_b32_e32 v9, 0
 	ds_read_b128 v[1:4], v9
 	s_waitcnt lgkmcnt(0)
+
+	// Phase 9 - ICV verify (thread 0 only)
 	v_cmp_eq_u32_e32 vcc, 0, v0
 	s_and_saveexec_b64 s[48:49], vcc
 	s_cbranch_execz .L024
@@ -1255,6 +1277,8 @@
 	s_cbranch_vccz .L022
 	v_mov_b32_e32 v30, -3
 .L022:
+
+	// Phase 10 - ESP trailer strip + write verdict (thread 0)
 	v_readfirstlane_b32 s27, v30
 	s_cmp_ge_u32 s27, 0x100
 	s_cbranch_scc1 .L023
@@ -1315,6 +1339,8 @@
 	global_store_dwordx2 v[12:13], v[14:15], off
 	s_waitcnt vmcnt(0)
 .L024:
+
+	// Phase 11 - Miss/bypass path verdict - thread 0 only
 	s_branch .L026
 .L025:
 	v_cmp_eq_u32_e32 vcc, 0, v0
@@ -1327,6 +1353,8 @@
 	global_store_dwordx2 v[12:13], v[14:15], off
 	s_waitcnt vmcnt(0)
 .L026:
+
+	// Phase 12 - GPU-initiated SDMA dispatch (thread 0 only)
 	s_load_dwordx2 s[24:25], s[8:9], 0x10
 	s_load_dwordx2 s[26:27], s[8:9], 0x20
 	s_waitcnt lgkmcnt(0)
