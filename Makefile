@@ -10,9 +10,10 @@ ASM_CPP		?= clang -x assembler-with-cpp -E
 
 # One container per feature, because the core has to bring up a queue before
 # any feature module is loaded and so cannot read the BPF JIT's blob.
-FEATURES	:= core bpf
+FEATURES	:= core bpf ipsec
 SRC_core	:= src/default.S
-SRC_bpf		:= $(filter-out $(SRC_core),$(wildcard src/*.S))
+SRC_ipsec	:= src/ipsec.S
+SRC_bpf		:= $(filter-out $(SRC_core) $(SRC_ipsec),$(wildcard src/*.S))
 
 ABI_HDR		:= include/uapi/linux/knod_blob.h
 DEPS		:= $(wildcard src/*.S) src/common.inc $(ABI_HDR)
