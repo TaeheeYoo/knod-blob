@@ -26,10 +26,9 @@ knod_ipsec_fused:
 
 #if KNOD_ISA == 9
 # include "ipsec/gfx9.inc"
-#elif KNOD_ISA == 10
-# include "ipsec/gfx10.inc"
-#elif KNOD_ISA == 11
-# include "ipsec/gfx11.inc"
+#elif KNOD_ISA >= 10
+# include "ipsec/rdna.inc"
+# include "ipsec/rdna_body.inc"
 #else
 # error "no IPsec shader for this generation"
 #endif

@@ -7,7 +7,8 @@
 // what is here is only known to be the same shader.
 
 
-	// Phase 0 - Parse ESP header + SA table lookup
+	// Phase 0: Parse ESP header + SA table lookup
+	// s_dcache_inv: flush K$ so s_load reads fresh round keys.
 	s_dcache_inv
 	s_waitcnt lgkmcnt(0)
 	s_mov_b32 s[SR_BSWAP], 0x10203
@@ -72,7 +73,9 @@
 	s_sub_u32 s26, s23, 1
 .L005:
 
-	// Phase 1 - Save pre-crypto state + load extra sub[] fields
+	// Phase 1: Save pre-crypto state + load extra sub[] fields
+	// Move IPsec-specific values to v30+ so v1-v22 and s18-s49 are
+	// free for AES-GCM helpers from aesgcm_shader.h.
 	v_mov_b32_e32 v[VR_SAVE_SLOT], s26
 	v_mov_b32_e32 v[VR_SAVE_BD_LO], v5
 	v_mov_b32_e32 v[VR_SAVE_BD_HI], v6
@@ -87,12 +90,15 @@
 	v_perm_b32 v[VR_SAVE_SEQ], v[VR_SAVE_SEQ], v[VR_SAVE_SEQ], s[SR_BSWAP]
 	global_store_dword v[3:4], v[VR_SAVE_SEQ], off offset:28
 
-	// Phase 2 - Branch on miss/bypass - skip crypto entirely
+	// Phase 2: Branch on miss/bypass - skip crypto entirely
 	v_readfirstlane_b32 s26, v[VR_SAVE_SLOT]
 	s_cmp_ge_u32 s26, 0x100
 	s_cbranch_scc1 .L025
 
-	// Phase 3 - Load SA entry fields for the matched slot
+	// Phase 3: Load SA entry fields for the matched slot
+	// entry_addr = sa_table_addr + slot_idx * SA_ENTRY_SIZE
+	// Load: key_gpu_addr, salt, nr_rounds, t_tables_gpu_addr,
+	//       htable_gpu_addr
 	s_mul_i32 s27, s26, 0x68
 	s_add_u32 s24, s24, s27
 	s_addc_u32 s25, s25, 0
@@ -112,7 +118,12 @@
 	v_readfirstlane_b32 s[SR_NR_ROUNDS], v14
 	v_readfirstlane_b32 s[SR_SA_MODE], v15
 
-	// Phase 4 - Build AES-GCM nonce
+	// Phase 4: Build AES-GCM nonce
+	// nonce[12] = salt[4] || IV[8]
+	// salt is already in s[SR_IV0]. Load IV from pkt + esp_hdr_off + 8.
+	// Recompute ESP base from saved pkt_addr + VR_SAVE_ESP_OFF since
+	// v[11:12] were clobbered by Phase 3 SA loads (VR_GA_LO=12).
+	// IV goes to s[SR_IV1] (bytes 4-7) and s[SR_IV2] (bytes 8-11).
 	v_add_co_u32_e32 v12, vcc, v[VR_SAVE_ESP_OFF], v[VR_SAVE_PKT_LO]
 	v_addc_co_u32_e32 v13, vcc, 0, v[VR_SAVE_PKT_HI], vcc
 	global_load_dwordx2 v[14:15], v[12:13], off offset:8
@@ -120,7 +131,11 @@
 	v_readfirstlane_b32 s[SR_IV1], v14
 	v_readfirstlane_b32 s[SR_IV2], v15
 
-	// Phase 5 - Compute ciphertext bounds
+	// Phase 5: Compute ciphertext bounds
+	// ctext_off = esp_hdr_off + 16 (SPI+seq+IV)
+	// ctext_len = pkt_len - ctext_off - ICV_LEN
+	// nblocks = (ctext_len + 15) >> 4
+	// s28 is free here (last used in version gate) - use as scratch.
 	v_readfirstlane_b32 s28, v[VR_SAVE_ESP_OFF]
 	s_add_u32 s28, 32, s28
 	v_readfirstlane_b32 s[SR_CTEXT_LEN], v[VR_SAVE_PKTLEN]
@@ -129,7 +144,9 @@
 	s_lshr_b32 s[SR_NBLOCKS_GCM], s[SR_NBLOCKS_GCM], 4
 	s_add_u32 s[SR_TOTAL_GHASH_BLK], 2, s[SR_NBLOCKS_GCM]
 
-	// Phase 6 - Cooperative T-table load (VRAM -> LDS)
+	// Phase 6: Cooperative T-table load (VRAM -> LDS)
+	// All 256 threads load from SA's t_tables_gpu_addr. Each thread
+	// loads one u32 per table (4 tables x 256 entries = 4KB).
 	s_mov_b32 s[SR_MASK], 0xff
 	v_lshlrev_b32_e32 v9, 2, v[VR_TID]
 	v_mov_b32_e32 v12, s[SR_T_ADDR]
@@ -151,7 +168,11 @@
 	s_waitcnt lgkmcnt(0)
 	s_barrier
 
-	// Phase 7 - AES-CTR decrypt
+	// Phase 7: AES-CTR decrypt
+	// Each thread handles block_id = tid. Only threads with tid <
+	// nblocks are active. Counter = nonce[12] || bswap32(tid+2).
+	// AES-encrypt the counter -> keystream. XOR with ciphertext ->
+	// plaintext. Store to out_addr + tid*16.
 	v_cmp_gt_u32_e32 vcc, s[SR_NBLOCKS_GCM], v[VR_TID]
 	s_and_saveexec_b64 s[48:49], vcc
 	s_cbranch_execz .L007
@@ -577,7 +598,9 @@
 	global_store_dwordx4 v[12:13], v[VR_PREFETCH0:VR_PREFETCH3], off
 .L007:
 
-	// Phase 7.5 - Compute AES(K, J0) for ICV finalization
+	// Phase 7.5: Compute AES(K, J0) for ICV finalization
+	// J0 = nonce[12] || 0x00000001 (BE). Only thread 0 needs this
+	// but all active lanes can compute it; we just save the result.
 	s_mov_b32 s24, s[SR_T_ADDR]
 	s_mov_b32 s25, s35
 	s_or_b64 exec, s[48:49], s[48:49]
@@ -988,7 +1011,15 @@
 	v_mov_b32_e32 v[VR_J0_3], v4
 	s_barrier
 
-	// Phase 8 - Parallel GHASH
+	// Phase 8: Parallel GHASH
+	// GHASH input blocks (total_blocks = nblocks + 2):
+	//   tid 0            -> AAD: SPI(4B,BE)||seq(4B,BE)||0s (16B)
+	//   tid 1..nblocks   -> ciphertext block (tid-1)
+	//   tid nblocks+1    -> len: AAD_bitlen(64b)||ctext_bitlen(64b)
+	//   tid > nblocks+1  -> zero (does not participate)
+	// Each thread loads its block -> v[VR_DATA0:VR_DATA3] (big-endian
+	// for GF multiply), loads H^(total-tid) -> v[VR_D0:VR_D3], runs
+	// GF multiply -> v[VR_S0:VR_S3], then tree-reduces via LDS XOR.
 	v_sub_u32_e32 v9, s[SR_TOTAL_GHASH_BLK], v[VR_TID]
 	v_add_u32_e32 v9, -1, v9
 	v_max_i32_e32 v9, 0, v9
@@ -1249,7 +1280,9 @@
 	ds_read_b128 v[1:4], v9
 	s_waitcnt lgkmcnt(0)
 
-	// Phase 9 - ICV verify (thread 0 only)
+	// Phase 9: ICV verify (thread 0 only)
+	// computed_tag = bswap(GHASH) XOR AES(K, J0)
+	// received_tag = last 16 bytes of ESP packet
 	v_cmp_eq_u32_e32 vcc, 0, v[VR_TID]
 	s_and_saveexec_b64 s[48:49], vcc
 	s_cbranch_execz .L024
@@ -1278,7 +1311,10 @@
 	v_mov_b32_e32 v[VR_SAVE_SLOT], -3
 .L022:
 
-	// Phase 10 - ESP trailer strip + write verdict (thread 0)
+	// Phase 10: ESP trailer strip + write verdict (thread 0)
+	// Decrypted tail: pad_len at out + ctext_len - 2
+	//                 next_hdr at out + ctext_len - 1
+	// inner_len = ctext_len - pad_len - 2
 	v_readfirstlane_b32 s27, v[VR_SAVE_SLOT]
 	s_cmp_ge_u32 s27, 0x100
 	s_cbranch_scc1 .L023
@@ -1340,7 +1376,9 @@
 	s_waitcnt vmcnt(0)
 .L024:
 
-	// Phase 11 - Miss/bypass path verdict - thread 0 only
+	// Phase 11: Miss/bypass path verdict - thread 0 only
+	// If we skipped crypto (Phase 2 branch), write the miss/bypass
+	// sentinel that's still in v[VR_SAVE_SLOT].
 	s_branch .L026
 .L025:
 	v_cmp_eq_u32_e32 vcc, 0, v[VR_TID]
@@ -1354,7 +1392,16 @@
 	s_waitcnt vmcnt(0)
 .L026:
 
-	// Phase 12 - GPU-initiated SDMA dispatch (thread 0 only)
+	// Phase 12: GPU-initiated SDMA dispatch (thread 0 only)
+	// Identical logic to GFX9 Phase 12.  See ipsec_fused_gfx9.h
+	// for the full protocol description.
+	// GPU writes SDMA COPY_LINEAR packets only.  FENCE, wptr update,
+	// and doorbell are left to the CPU.
+	// GFX10 differences:
+	//  - v_add_nc_u32 / v_sub_nc_u32 (no-carry variants)
+	//  - v_add_co_ci_u32_e32 for carry-in addition
+	//  - s_or_b64 for 64-bit zero test (no s_or_b32 helper)
+	//  - GFX10 global offset is 12-bit signed (all offsets <=56 OK)
 	s_load_dwordx2 s[24:25], s[8:9], 0x10
 	s_load_dwordx2 s[26:27], s[8:9], 0x20
 	s_waitcnt lgkmcnt(0)
