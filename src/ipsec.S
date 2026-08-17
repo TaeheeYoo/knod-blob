@@ -16,6 +16,7 @@
 // that follows, one piece at a time, each checked against what is here now.
 
 #include "common.inc"
+#include "ipsec.inc"
 
 	.text
 
