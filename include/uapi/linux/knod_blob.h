@@ -68,6 +68,14 @@ enum knod_blob_kind {
 	 * What the BPF feature runs with no program attached.
 	 */
 	KNOD_BLOB_PASS_KERNEL,
+	/* The inbound ESP pipeline, whole: parse, SA lookup, AES-CTR decrypt,
+	 * GHASH, ICV verify, verdict.  Not spliced into anything either.
+	 */
+	KNOD_BLOB_IPSEC_FUSED,
+	/* Stages of that pipeline on their own, for measuring what each costs.
+	 * key_chunks says which, matching enum knod_ipsec_bench_kernel.
+	 */
+	KNOD_BLOB_IPSEC_BENCH,
 	KNOD_BLOB_KIND_MAX,
 };
 
