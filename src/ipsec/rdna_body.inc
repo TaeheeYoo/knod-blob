@@ -29,17 +29,17 @@
 	s_lshr_b32 s28, s28, 20
 	s_and_b32 s28, 15, s28
 	s_cmp_eq_u32 s28, 4
-	s_cbranch_scc1 .L001
+	s_cbranch_scc1 .Lf001
 	s_cmp_eq_u32 s28, 6
-	s_cbranch_scc1 .L000
+	s_cbranch_scc1 .Lf000
 	s_mov_b32 s26, -2
-	s_branch .L005
-.L000:
+	s_branch .Lf005
+.Lf000:
 	v_mov_b32_e32 v[VR_SAVE_ESP_OFF], 54
-	s_branch .L002
-.L001:
+	s_branch .Lf002
+.Lf001:
 	v_mov_b32_e32 v[VR_SAVE_ESP_OFF], 34
-.L002:
+.Lf002:
 	v_add_co_u32 v11, vcc, v[VR_SAVE_ESP_OFF], v9
 	v_add_co_ci_u32_e32 v12, vcc, 0, v10, vcc
 	GLOBAL_LOAD_DWORDX2 v[20:21], v[11:12], off offset:(0 + ESP_BIAS)
@@ -57,7 +57,7 @@
 	s_mov_b32 s26, -1
 	v_mov_b32_e32 v16, s24
 	v_mov_b32_e32 v17, s25
-.L003:
+.Lf003:
 	GLOBAL_LOAD_DWORD v20, v[16:17], off
 	s_waitcnt vmcnt(0)
 	v_readfirstlane_b32 s27, v20
@@ -66,13 +66,13 @@
 	s_add_u32 s23, 1, s23
 	s_nop 0
 	s_cmp_eq_u32 s27, s22
-	s_cbranch_scc1 .L004
+	s_cbranch_scc1 .Lf004
 	s_cmp_lt_u32 s23, 0x100
-	s_cbranch_scc1 .L003
-	s_branch .L005
-.L004:
+	s_cbranch_scc1 .Lf003
+	s_branch .Lf005
+.Lf004:
 	s_sub_u32 s26, s23, 1
-.L005:
+.Lf005:
 
 	// Phase 1: Save pre-crypto state + load extra sub[] fields
 	// Move IPsec-specific values to v30+ so v1-v22 and s18-s49 are
@@ -95,7 +95,7 @@
 	// Phase 2: Branch on miss/bypass - skip crypto entirely
 	v_readfirstlane_b32 s26, v[VR_SAVE_SLOT]
 	s_cmp_ge_u32 s26, 0x100
-	s_cbranch_scc1 .L025
+	s_cbranch_scc1 .Lf025
 
 	// Phase 3: Load SA entry fields for the matched slot
 	// entry_addr = sa_table_addr + slot_idx * SA_ENTRY_SIZE
@@ -181,7 +181,7 @@
 	// plaintext. Store to out_addr + tid*16.
 	v_cmp_gt_u32_e32 vcc, s[SR_NBLOCKS_GCM], v[VR_TID]
 	s_and_saveexec_b64 s[48:49], vcc
-	s_cbranch_execz .L007
+	s_cbranch_execz .Lf007
 	s_mov_b32 s[SR_T_ADDR], s24
 	s_mov_b32 s35, s25
 	v_lshlrev_b32_e32 v11, 4, v[VR_TID]
@@ -210,7 +210,7 @@
 	s_add_u32 s27, -1, s27
 	s_mov_b32 s[SR_LOOP_CTR], 0
 	S_LOAD_DWORDX4 s[28:31], s[24:25], null
-.L006:
+.Lf006:
 	s_waitcnt lgkmcnt(0)
 	s_add_u32 s24, 16, s24
 	s_addc_u32 s25, 0, s25
@@ -397,7 +397,7 @@
 	v_xor_b32_e32 v4, s59, v4
 	s_add_u32 s[SR_LOOP_CTR], 1, s[SR_LOOP_CTR]
 	s_cmp_lt_u32 s[SR_LOOP_CTR], s27
-	s_cbranch_scc1 .L006
+	s_cbranch_scc1 .Lf006
 	s_waitcnt lgkmcnt(0)
 	s_add_u32 s24, 16, s24
 	s_addc_u32 s25, 0, s25
@@ -607,7 +607,7 @@
 	v_add_co_u32 v12, vcc, v11, v[VR_SAVE_OUT_LO]
 	v_add_co_ci_u32_e32 v13, vcc, 0, v[VR_SAVE_OUT_HI], vcc
 	GLOBAL_STORE_DWORDX4 v[12:13], v[VR_PREFETCH0:VR_PREFETCH3], off glc slc
-.L007:
+.Lf007:
 
 	// Phase 7.5: Compute AES(K, J0) for ICV finalization
 	// J0 = nonce[12] || 0x00000001 (BE). Only thread 0 needs this
@@ -631,7 +631,7 @@
 	s_add_u32 s27, -1, s27
 	s_mov_b32 s[SR_LOOP_CTR], 0
 	S_LOAD_DWORDX4 s[28:31], s[24:25], null
-.L008:
+.Lf008:
 	s_waitcnt lgkmcnt(0)
 	s_add_u32 s24, 16, s24
 	s_addc_u32 s25, 0, s25
@@ -818,7 +818,7 @@
 	v_xor_b32_e32 v4, s59, v4
 	s_add_u32 s[SR_LOOP_CTR], 1, s[SR_LOOP_CTR]
 	s_cmp_lt_u32 s[SR_LOOP_CTR], s27
-	s_cbranch_scc1 .L008
+	s_cbranch_scc1 .Lf008
 	s_waitcnt lgkmcnt(0)
 	s_add_u32 s24, 16, s24
 	s_addc_u32 s25, 0, s25
@@ -1046,15 +1046,15 @@
 	v_mov_b32_e32 v17, 0
 	v_cmp_eq_u32_e32 vcc, 0, v[VR_TID]
 	s_and_saveexec_b64 s[40:41], vcc
-	s_cbranch_execz .L009
+	s_cbranch_execz .Lf009
 	v_mov_b32_e32 v14, v[VR_SAVE_SPI]
 	v_mov_b32_e32 v15, v[VR_SAVE_SEQ]
-.L009:
+.Lf009:
 	s_mov_b64 exec, s[40:41]
 	v_add_nc_u32_e32 v9, -1, v[VR_TID]
 	v_cmp_gt_u32_e32 vcc, s[SR_NBLOCKS_GCM], v9
 	s_and_saveexec_b64 s[40:41], vcc
-	s_cbranch_execz .L010
+	s_cbranch_execz .Lf010
 	v_lshlrev_b32_e32 v9, 4, v9
 	v_add_co_u32 v12, vcc, v[VR_SAVE_ESP_OFF], v[VR_SAVE_PKT_LO]
 	v_add_co_ci_u32_e32 v13, vcc, 0, v[VR_SAVE_PKT_HI], vcc
@@ -1080,16 +1080,16 @@
 	v_perm_b32 v15, v15, v15, s[SR_BSWAP]
 	v_perm_b32 v16, v16, v16, s[SR_BSWAP]
 	v_perm_b32 v17, v17, v17, s[SR_BSWAP]
-.L010:
+.Lf010:
 	s_mov_b64 exec, s[40:41]
 	s_add_u32 s42, 1, s[SR_NBLOCKS_GCM]
 	v_cmp_eq_u32_e32 vcc, s42, v[VR_TID]
 	s_and_saveexec_b64 s[40:41], vcc
-	s_cbranch_execz .L011
+	s_cbranch_execz .Lf011
 	v_mov_b32_e32 v15, 64
 	v_mov_b32_e32 v17, s[SR_CTEXT_LEN]
 	v_lshlrev_b32_e32 v17, 3, v17
-.L011:
+.Lf011:
 	s_mov_b64 exec, s[40:41]
 	s_waitcnt vmcnt(0)
 	v_perm_b32 v5, v5, v5, s[SR_BSWAP]
@@ -1102,14 +1102,14 @@
 	v_mov_b32_e32 v4, 0
 	v_cmp_gt_u32_e32 vcc, s[SR_TOTAL_GHASH_BLK], v[VR_TID]
 	s_and_saveexec_b64 s[40:41], vcc
-	s_cbranch_execz .L013
+	s_cbranch_execz .Lf013
 	v_mov_b32_e32 v1, 0
 	v_mov_b32_e32 v2, 0
 	v_mov_b32_e32 v3, 0
 	v_mov_b32_e32 v4, 0
 	v_mov_b32_e32 v10, 0xe1000000
 	s_mov_b32 s[SR_LOOP_CTR], 0
-.L012:
+.Lf012:
 	v_cmp_gt_i32_e32 vcc, 0, v14
 	v_cndmask_b32_e32 v18, 0, v5, vcc
 	v_xor_b32_e32 v1, v1, v18
@@ -1133,8 +1133,8 @@
 	v_lshlrev_b32_e32 v17, 1, v17
 	s_add_u32 s[SR_LOOP_CTR], 1, s[SR_LOOP_CTR]
 	s_cmp_lt_u32 s[SR_LOOP_CTR], 0x80
-	s_cbranch_scc1 .L012
-.L013:
+	s_cbranch_scc1 .Lf012
+.Lf013:
 	s_mov_b64 exec, s[40:41]
 	v_lshlrev_b32_e32 v10, 4, v[VR_TID]
 	DS_WRITE_B128 v10, v[1:4]
@@ -1143,7 +1143,7 @@
 	v_and_b32_e32 v9, 1, v[VR_TID]
 	v_cmp_eq_u32_e32 vcc, 0, v9
 	s_and_saveexec_b64 s[40:41], vcc
-	s_cbranch_execz .L014
+	s_cbranch_execz .Lf014
 	v_add_nc_u32_e32 v9, 1, v[VR_TID]
 	v_lshlrev_b32_e32 v9, 4, v9
 	v_lshlrev_b32_e32 v10, 4, v[VR_TID]
@@ -1156,13 +1156,13 @@
 	v_xor_b32_e32 v4, v4, v8
 	DS_WRITE_B128 v10, v[1:4]
 	s_waitcnt lgkmcnt(0)
-.L014:
+.Lf014:
 	s_mov_b64 exec, s[40:41]
 	s_barrier
 	v_and_b32_e32 v9, 2, v[VR_TID]
 	v_cmp_eq_u32_e32 vcc, 0, v9
 	s_and_saveexec_b64 s[40:41], vcc
-	s_cbranch_execz .L015
+	s_cbranch_execz .Lf015
 	v_add_nc_u32_e32 v9, 2, v[VR_TID]
 	v_lshlrev_b32_e32 v9, 4, v9
 	v_lshlrev_b32_e32 v10, 4, v[VR_TID]
@@ -1175,13 +1175,13 @@
 	v_xor_b32_e32 v4, v4, v8
 	DS_WRITE_B128 v10, v[1:4]
 	s_waitcnt lgkmcnt(0)
-.L015:
+.Lf015:
 	s_mov_b64 exec, s[40:41]
 	s_barrier
 	v_and_b32_e32 v9, 4, v[VR_TID]
 	v_cmp_eq_u32_e32 vcc, 0, v9
 	s_and_saveexec_b64 s[40:41], vcc
-	s_cbranch_execz .L016
+	s_cbranch_execz .Lf016
 	v_add_nc_u32_e32 v9, 4, v[VR_TID]
 	v_lshlrev_b32_e32 v9, 4, v9
 	v_lshlrev_b32_e32 v10, 4, v[VR_TID]
@@ -1194,13 +1194,13 @@
 	v_xor_b32_e32 v4, v4, v8
 	DS_WRITE_B128 v10, v[1:4]
 	s_waitcnt lgkmcnt(0)
-.L016:
+.Lf016:
 	s_mov_b64 exec, s[40:41]
 	s_barrier
 	v_and_b32_e32 v9, 8, v[VR_TID]
 	v_cmp_eq_u32_e32 vcc, 0, v9
 	s_and_saveexec_b64 s[40:41], vcc
-	s_cbranch_execz .L017
+	s_cbranch_execz .Lf017
 	v_add_nc_u32_e32 v9, 8, v[VR_TID]
 	v_lshlrev_b32_e32 v9, 4, v9
 	v_lshlrev_b32_e32 v10, 4, v[VR_TID]
@@ -1213,13 +1213,13 @@
 	v_xor_b32_e32 v4, v4, v8
 	DS_WRITE_B128 v10, v[1:4]
 	s_waitcnt lgkmcnt(0)
-.L017:
+.Lf017:
 	s_mov_b64 exec, s[40:41]
 	s_barrier
 	v_and_b32_e32 v9, 16, v[VR_TID]
 	v_cmp_eq_u32_e32 vcc, 0, v9
 	s_and_saveexec_b64 s[40:41], vcc
-	s_cbranch_execz .L018
+	s_cbranch_execz .Lf018
 	v_add_nc_u32_e32 v9, 16, v[VR_TID]
 	v_lshlrev_b32_e32 v9, 4, v9
 	v_lshlrev_b32_e32 v10, 4, v[VR_TID]
@@ -1232,13 +1232,13 @@
 	v_xor_b32_e32 v4, v4, v8
 	DS_WRITE_B128 v10, v[1:4]
 	s_waitcnt lgkmcnt(0)
-.L018:
+.Lf018:
 	s_mov_b64 exec, s[40:41]
 	s_barrier
 	v_and_b32_e32 v9, 32, v[VR_TID]
 	v_cmp_eq_u32_e32 vcc, 0, v9
 	s_and_saveexec_b64 s[40:41], vcc
-	s_cbranch_execz .L019
+	s_cbranch_execz .Lf019
 	v_add_nc_u32_e32 v9, 32, v[VR_TID]
 	v_lshlrev_b32_e32 v9, 4, v9
 	v_lshlrev_b32_e32 v10, 4, v[VR_TID]
@@ -1251,13 +1251,13 @@
 	v_xor_b32_e32 v4, v4, v8
 	DS_WRITE_B128 v10, v[1:4]
 	s_waitcnt lgkmcnt(0)
-.L019:
+.Lf019:
 	s_mov_b64 exec, s[40:41]
 	s_barrier
 	v_and_b32_e32 v9, 64, v[VR_TID]
 	v_cmp_eq_u32_e32 vcc, 0, v9
 	s_and_saveexec_b64 s[40:41], vcc
-	s_cbranch_execz .L020
+	s_cbranch_execz .Lf020
 	v_add_nc_u32_e32 v9, 64, v[VR_TID]
 	v_lshlrev_b32_e32 v9, 4, v9
 	v_lshlrev_b32_e32 v10, 4, v[VR_TID]
@@ -1270,13 +1270,13 @@
 	v_xor_b32_e32 v4, v4, v8
 	DS_WRITE_B128 v10, v[1:4]
 	s_waitcnt lgkmcnt(0)
-.L020:
+.Lf020:
 	s_mov_b64 exec, s[40:41]
 	s_barrier
 	v_and_b32_e32 v9, 0x80, v[VR_TID]
 	v_cmp_eq_u32_e32 vcc, 0, v9
 	s_and_saveexec_b64 s[40:41], vcc
-	s_cbranch_execz .L021
+	s_cbranch_execz .Lf021
 	v_add_nc_u32_e32 v9, 0x80, v[VR_TID]
 	v_lshlrev_b32_e32 v9, 4, v9
 	v_lshlrev_b32_e32 v10, 4, v[VR_TID]
@@ -1289,7 +1289,7 @@
 	v_xor_b32_e32 v4, v4, v8
 	DS_WRITE_B128 v10, v[1:4]
 	s_waitcnt lgkmcnt(0)
-.L021:
+.Lf021:
 	s_mov_b64 exec, s[40:41]
 	s_barrier
 	v_mov_b32_e32 v9, 0
@@ -1301,7 +1301,7 @@
 	// received_tag = last 16 bytes of ESP packet
 	v_cmp_eq_u32_e32 vcc, 0, v[VR_TID]
 	s_and_saveexec_b64 s[48:49], vcc
-	s_cbranch_execz .L024
+	s_cbranch_execz .Lf024
 	v_perm_b32 v1, v1, v1, s[SR_BSWAP]
 	v_perm_b32 v2, v2, v2, s[SR_BSWAP]
 	v_perm_b32 v3, v3, v3, s[SR_BSWAP]
@@ -1328,9 +1328,9 @@
 	v_or_b32_e32 v14, v14, v16
 	v_or_b32_e32 v14, v14, v17
 	v_cmp_ne_u32_e32 vcc, 0, v14
-	s_cbranch_vccz .L022
+	s_cbranch_vccz .Lf022
 	v_mov_b32_e32 v[VR_SAVE_SLOT], -3
-.L022:
+.Lf022:
 
 	// Phase 10: ESP trailer strip + write verdict (thread 0)
 	// Decrypted tail: pad_len at out + ctext_len - 2
@@ -1338,7 +1338,7 @@
 	// inner_len = ctext_len - pad_len - 2
 	v_readfirstlane_b32 s27, v[VR_SAVE_SLOT]
 	s_cmp_ge_u32 s27, 0x100
-	s_cbranch_scc1 .L023
+	s_cbranch_scc1 .Lf023
 	v_mov_b32_e32 v9, s[SR_CTEXT_LEN]
 	v_add_nc_u32_e32 v9, -4, v9
 	v_add_co_u32 v12, vcc, v9, v[VR_SAVE_OUT_LO]
@@ -1360,7 +1360,7 @@
 	v_add_co_ci_u32_e32 v13, vcc, 0, v[VR_SAVE_BD_HI], vcc
 	GLOBAL_STORE_SHORT v[12:13], v9, off glc slc
 	s_cmp_eq_u32 s[SR_SA_MODE], 0
-	s_cbranch_scc0 .L023
+	s_cbranch_scc0 .Lf023
 	v_add_co_u32 v12, vcc, 14, v[VR_SAVE_PKT_LO]
 	v_add_co_ci_u32_e32 v13, vcc, 0, v[VR_SAVE_PKT_HI], vcc
 	GLOBAL_LOAD_USHORT v14, v[12:13], off
@@ -1388,30 +1388,30 @@
 	GLOBAL_STORE_SHORT v[12:13], v21, off offset:14 glc slc
 	GLOBAL_STORE_SHORT v[12:13], v[VR_J0_3], off offset:16 glc slc
 	GLOBAL_STORE_SHORT v[12:13], v[VR_PREFETCH0], off offset:18 glc slc
-.L023:
+.Lf023:
 	v_add_co_u32 v12, vcc, 8, v[VR_SAVE_BD_LO]
 	v_add_co_ci_u32_e32 v13, vcc, 0, v[VR_SAVE_BD_HI], vcc
 	v_mov_b32_e32 v14, 0x100
 	v_mov_b32_e32 v15, v[VR_SAVE_SLOT]
 	GLOBAL_STORE_DWORDX2 v[12:13], v[14:15], off glc slc
 	s_waitcnt vmcnt(0)
-.L024:
+.Lf024:
 
 	// Phase 11: Miss/bypass path verdict - thread 0 only
 	// If we skipped crypto (Phase 2 branch), write the miss/bypass
 	// sentinel that's still in v[VR_SAVE_SLOT].
-	s_branch .L026
-.L025:
+	s_branch .Lf026
+.Lf025:
 	v_cmp_eq_u32_e32 vcc, 0, v[VR_TID]
 	s_and_saveexec_b64 s[48:49], vcc
-	s_cbranch_execz .L026
+	s_cbranch_execz .Lf026
 	v_add_co_u32 v12, vcc, 8, v[VR_SAVE_BD_LO]
 	v_add_co_ci_u32_e32 v13, vcc, 0, v[VR_SAVE_BD_HI], vcc
 	v_mov_b32_e32 v14, 0x100
 	v_mov_b32_e32 v15, v[VR_SAVE_SLOT]
 	GLOBAL_STORE_DWORDX2 v[12:13], v[14:15], off glc slc
 	s_waitcnt vmcnt(0)
-.L026:
+.Lf026:
 
 	// Phase 12: GPU-initiated SDMA dispatch (thread 0 only)
 	// Identical logic to GFX9 Phase 12.  See ipsec_fused_gfx9.h
@@ -1427,7 +1427,7 @@
 	S_LOAD_DWORDX2 s[26:27], s[8:9], 0x20
 	s_waitcnt lgkmcnt(0)
 	s_or_b64 s[28:29], s[26:27], s[26:27]
-	s_cbranch_scc0 .L028
+	s_cbranch_scc0 .Lf028
 	v_mov_b32_e32 v1, s26
 	v_mov_b32_e32 v2, s27
 	GLOBAL_LOAD_DWORDX4 v[3:6], v[1:2], off offset:28
@@ -1435,7 +1435,7 @@
 	v_readfirstlane_b32 s28, v5
 	v_readfirstlane_b32 s29, v[VR_SAVE_SLOT]
 	s_cmp_ge_u32 s29, -2
-	s_cbranch_scc0 .L027
+	s_cbranch_scc0 .Lf027
 	v_mov_b32_e32 v7, 1
 	GLOBAL_ATOMIC_ADD v7, v[1:2], v7, off glc
 	s_waitcnt vmcnt(0)
@@ -1461,14 +1461,14 @@
 	GLOBAL_STORE_DWORD v[9:10], v15, off offset:20 glc slc
 	GLOBAL_STORE_DWORD v[9:10], v16, off offset:24 glc slc
 	s_waitcnt vmcnt(0)
-.L027:
+.Lf027:
 	v_mov_b32_e32 v7, 1
 	GLOBAL_ATOMIC_ADD v7, v[1:2], v7, off offset:4 glc
 	s_waitcnt vmcnt(0)
 	v_add_nc_u32_e32 v7, 1, v7
 	v_readfirstlane_b32 s29, v7
 	s_cmp_eq_u32 s29, s28
-	s_cbranch_scc0 .L028
+	s_cbranch_scc0 .Lf028
 	v_mov_b32_e32 v7, 0
 	GLOBAL_ATOMIC_ADD v7, v[1:2], v7, off glc
 	s_waitcnt vmcnt(0)
@@ -1476,7 +1476,7 @@
 	v_mov_b32_e32 v7, 1
 	GLOBAL_STORE_DWORD v[1:2], v7, off offset:48 glc slc
 	s_waitcnt vmcnt(0)
-.L028:
+.Lf028:
 	s_endpgm
 	s_code_end
 	s_code_end

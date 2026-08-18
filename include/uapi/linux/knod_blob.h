@@ -72,6 +72,10 @@ enum knod_blob_kind {
 	 * GHASH, ICV verify, verdict.  Not spliced into anything either.
 	 */
 	KNOD_BLOB_IPSEC_FUSED,
+	/* Stages of that pipeline on their own, for measuring what each costs.
+	 * key_chunks says which, matching enum knod_ipsec_bench_kernel.
+	 */
+	KNOD_BLOB_IPSEC_BENCH,
 	KNOD_BLOB_KIND_MAX,
 };
 

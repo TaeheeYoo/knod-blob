@@ -34,3 +34,31 @@ knod_ipsec_fused:
 #endif
 
 	.size knod_ipsec_fused, . - knod_ipsec_fused
+
+/*
+ * The stages on their own, for finding out where the time goes.  Only gfx11
+ * has them; they were written to answer that question on RDNA3 and nobody has
+ * needed them elsewhere.  One kind with the stage in key_chunks rather than
+ * three kinds, since they are measurement rather than pipeline.
+ */
+#if KNOD_ISA >= 11
+
+	.globl knod_ipsec_bench_k0
+	.p2align 2
+knod_ipsec_bench_k0:
+# include "ipsec/bench_base.inc"
+	.size knod_ipsec_bench_k0, . - knod_ipsec_bench_k0
+
+	.globl knod_ipsec_bench_k1
+	.p2align 2
+knod_ipsec_bench_k1:
+# include "ipsec/bench_ctr.inc"
+	.size knod_ipsec_bench_k1, . - knod_ipsec_bench_k1
+
+	.globl knod_ipsec_bench_k2
+	.p2align 2
+knod_ipsec_bench_k2:
+# include "ipsec/bench_ghash.inc"
+	.size knod_ipsec_bench_k2, . - knod_ipsec_bench_k2
+
+#endif
