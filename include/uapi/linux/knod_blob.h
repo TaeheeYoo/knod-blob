@@ -19,7 +19,7 @@
 #include <linux/types.h>
 
 #define KNOD_BLOB_MAGIC		0x4b4e4442	/* 'KNDB' */
-#define KNOD_BLOB_ABI_VERSION	3
+#define KNOD_BLOB_ABI_VERSION	4
 
 /*
  * How a routine is reached.  SPLICE is what the JIT does: the bytes are copied
@@ -93,6 +93,17 @@ enum knod_blob_kind {
 #define KNOD_BLOB_KEY_CHUNKS_MAX	14
 
 /*
+ * Where a hash element keeps its key and its value, both padded to eight
+ * bytes: RDNA3 faults on a misaligned atomic and a program may update a value
+ * with one.  Here rather than in the descriptor because a routine is
+ * assembled against these as immediate offsets.  "RDNA3" ISA 3.3.3:
+ * https://docs.amd.com/v/u/en-US/rdna3-shader-instruction-set-architecture-feb-2023_0
+ */
+#define KNOD_BLOB_ELEM_KV_OFF		8
+#define KNOD_BLOB_ELEM_VALUE_OFF(key_chunks)				\
+	(KNOD_BLOB_ELEM_KV_OFF + (((key_chunks) * 4 + 7) & ~7))
+
+/*
  * Register binding, splice linkage.
  *
  * The JIT keeps BPF r0-r10 in v0-v21 and everything a routine touches lives
@@ -148,6 +159,25 @@ enum knod_blob_kind {
  */
 #define KNOD_BLOB_DONE_MASK_SREG	34
 #define KNOD_BLOB_INITIAL_EXEC_SREG	100
+
+/*
+ * Where the IPsec shader reads an inbound ESP packet, for a plain IPv4 frame
+ * with no VLAN and no options, and what it writes back.  The host builds the
+ * packets the KAT and the benchmark feed it, so both sides have to agree; one
+ * definition rather than one on each side of the firmware boundary.
+ */
+#define KNOD_BLOB_ESP_SPI_OFF		34	/* ETH(14) + IPv4(20) */
+#define KNOD_BLOB_ESP_SEQ_OFF		38
+#define KNOD_BLOB_ESP_IV_OFF		42
+#define KNOD_BLOB_ESP_CTEXT_OFF		50	/* SPI(4) + seq(4) + IV(8) */
+#define KNOD_BLOB_ESP_ICV_LEN		16
+
+/* Verdicts, in the high half of bd->act.  Below these is the SA slot the
+ * packet matched, so they count down from the top.
+ */
+#define KNOD_BLOB_VERDICT_SA_MISS	0xFFFFFFFFu
+#define KNOD_BLOB_VERDICT_BYPASS	0xFFFFFFFEu
+#define KNOD_BLOB_VERDICT_ICV_FAIL	0xFFFFFFFDu
 
 /*
  * EXEC contract, both linkages.

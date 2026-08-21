@@ -38,7 +38,7 @@
 #define KNOD_BPF_HASH_NEXT_END		0x7FFFFFFF
 #define KNOD_BPF_HASH_NEXT_MASK		0x7FFFFFFF
 #define ELEM_OFF_NEXT			0
-#define ELEM_OFF_KV			4
+#define ELEM_OFF_KV			KNOD_BLOB_ELEM_KV_OFF
 
 	.text
 
@@ -132,7 +132,7 @@ knod_lookup_hash_k\n:
 	// Matching lanes take the value and leave the walk.
 	s_and_saveexec_b64 s[XSAVE2:XSAVE2+1], s[XSAVE1:XSAVE1+1]
 	s_cbranch_execz .Lmiss\n
-	v_add_co_u32 v[RET], vcc, ELEM_OFF_KV + \n * 4, v[EADDR]
+	v_add_co_u32 v[RET], vcc, KNOD_BLOB_ELEM_VALUE_OFF(\n), v[EADDR]
 	V_ADD_CI_U32 v[RET+1], vcc, 0, v[EADDR+1], vcc
 .Lmiss\n:
 	// exec = lanes still walking = (those that were walking) - (matched)
