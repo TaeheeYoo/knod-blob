@@ -28,13 +28,15 @@
  * copy through s_swappc_b64, which would let routines be compiled from C
  * rather than written in assembly, at the cost of the JIT having to spill
  * around a calling convention.  Only the register binding differs.
+ *
+ * Macros rather than an enum because the assembly selects on these, and a name
+ * the preprocessor cannot see is not an error to it - it is zero, which is a
+ * value one of these has.
  */
-#ifndef __ASSEMBLY__
+#define KNOD_BLOB_LINK_SPLICE	0
+#define KNOD_BLOB_LINK_CALL	1
 
-enum knod_blob_link {
-	KNOD_BLOB_LINK_SPLICE = 0,
-	KNOD_BLOB_LINK_CALL = 1,
-};
+#ifndef __ASSEMBLY__
 
 /*
  * Which routine an entry holds.  Array maps index straight into storage, so
