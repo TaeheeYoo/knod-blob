@@ -23,10 +23,9 @@
 #define HC		(M0 + 2)
 #define HT		(M0 + 3)
 
-// What is left of the window, plus the two argument pairs: a lookup is given
-// no value, and it has no further use for the key pointer once the key is
-// loaded.
-#define EBASE		KEY		// element storage base
+// What is left of the window, plus the two pairs below it that a lookup has
+// no use for: it is given no value, and the key now arrives in registers.
+#define EBASE		22		// element storage base
 #define EADDR		VAL		// the element being examined
 #define NEND		(KNOD_BLOB_SPLICE_TMP_VREG + 28)
 #define CHAIN		(KNOD_BLOB_SPLICE_TMP_VREG + 29)
@@ -60,29 +59,28 @@ knod_lookup_hash_k\n:
 	s_load_dwordx2 s[S0:S0+1], s[DESC:DESC+1], DESC_BUCKET
 	s_load_dwordx2 s[S2:S2+1], s[DESC:DESC+1], DESC_ELEMS
 
-	// Copy the key in; the same registers are the compare operands later.
-	.set _i, 0
-	.rept \n
-	global_load_dword v[K0 + _i], v[KEY:KEY+1], off offset:(_i * 4)
-	.set _i, _i + 1
-	.endr
-
+	// The key is already in v[K0..], which is where the compares below
+	// want it.
 	v_mov_b32 v[RET], 0
 	v_mov_b32 v[RET+1], 0
 
-	// The key pointer dies here, which is what frees v[EBASE] below.
-	s_waitcnt vmcnt(0)
 	s_waitcnt lgkmcnt(0)
 	v_mov_b32 v[NEND], s[S0]		// bucket heads, until .Lnext
 	v_mov_b32 v[CHAIN], s[S0+1]
 	v_mov_b32 v[EBASE], s[S2]
 	v_mov_b32 v[EBASE+1], s[S2+1]
 
-	JHASH HA, HB, HC, HT, K0, \n, 0
-
-	// bucket_id = hash & (n_buckets - 1)
+	// What jhash starts from is loaded here rather than with the rest
+	// because the scalars only come free on the line above.
+	s_load_dword s[S0], s[DESC:DESC+1], DESC_KEY_SIZE
+	s_load_dword s[S1], s[DESC:DESC+1], DESC_HASHRND
 	s_load_dword s[S3], s[DESC:DESC+1], DESC_N_BUCKETS
 	s_waitcnt lgkmcnt(0)
+	s_add_i32 s[S0], s[S0], s[S1]
+
+	JHASH HA, HB, HC, HT, K0, \n, S0
+
+	// bucket_id = hash & (n_buckets - 1)
 	s_add_i32 s[S3], s[S3], -1
 	v_and_b32 v[HC], s[S3], v[HC]
 

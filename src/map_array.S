@@ -20,8 +20,8 @@
 	.globl knod_lookup_array
 	.p2align 2
 knod_lookup_array:
-	global_load_dwordx2 v[T0:T0+1], v[KEY:KEY+1], off
-	// value_size and max_entries are adjacent in the descriptor.
+	// value_size and max_entries are adjacent in the descriptor.  The key
+	// is one chunk and already in a register.
 	s_load_dwordx2 s[S0:S0+1], s[DESC:DESC+1], DESC_VALUE_SIZE
 	s_load_dwordx2 s[S2:S2+1], s[DESC:DESC+1], DESC_ELEMS
 
@@ -30,17 +30,17 @@ knod_lookup_array:
 
 	s_waitcnt lgkmcnt(0)
 	v_mov_b32 v[T2], s[S1]			// max_entries
-	s_waitcnt vmcnt(0)
 
 	// Park the lanes whose key is out of range.
-	v_cmp_ge_u32 vcc, v[T0], v[T2]
+	v_cmp_ge_u32 vcc, v[KNOD_BLOB_SPLICE_KEY_VREG], v[T2]
 	s_and_b64 s[XSAVE0:XSAVE0+1], exec, vcc
 	s_andn2_b64 exec, exec, vcc
 	s_cbranch_execz .Llookup_array_out
 
 	v_mov_b32 v[T3], s[S2]
 	v_mov_b32 v[T4], s[S2+1]
-	v_mad_u64_u32 v[RET:RET+1], s[S0:S0+1], s[S0], v[T0], v[T3:T4]
+	v_mad_u64_u32 v[RET:RET+1], s[S0:S0+1], s[S0], \
+		      v[KNOD_BLOB_SPLICE_KEY_VREG], v[T3:T4]
 
 .Llookup_array_out:
 	s_or_b64 exec, exec, s[XSAVE0:XSAVE0+1]

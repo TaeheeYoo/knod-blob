@@ -75,7 +75,7 @@
 .endm
 
 //
-// JHASH  a, b, c, tmp, key, nwords, initval
+// JHASH  a, b, c, tmp, key, nwords, start
 //
 // Hashes \nwords dwords starting at v[\key] and leaves the result in v[\c].
 // The caller has already loaded the key, one dword per register, because it
@@ -85,8 +85,15 @@
 // the length is baked in here rather than looped over: every routine knows its
 // key length, which is what makes one entry per length worth having.
 //
-.macro	JHASH a, b, c, tmp, key, nwords, initval
-	v_mov_b32 v[\a], (JHASH_INITVAL + \nwords * 4 + \initval)
+// s[\start] is the key length plus the map's seed, which jhash() adds to its
+// constant before it begins.  It comes in a register rather than being folded
+// into that constant because neither part is known here: the length is the
+// map's, in bytes, which \nwords only rounds up to, and the seed is drawn per
+// map at run time.
+//
+.macro	JHASH a, b, c, tmp, key, nwords, start
+	v_mov_b32 v[\a], JHASH_INITVAL
+	V_ADD_U32 v[\a], s[\start], v[\a]
 	v_mov_b32 v[\b], v[\a]
 	v_mov_b32 v[\c], v[\a]
 
