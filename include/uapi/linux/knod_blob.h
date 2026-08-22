@@ -19,7 +19,7 @@
 #include <linux/types.h>
 
 #define KNOD_BLOB_MAGIC		0x4b4e4442	/* 'KNDB' */
-#define KNOD_BLOB_ABI_VERSION	5
+#define KNOD_BLOB_ABI_VERSION	6
 
 /*
  * How a routine is reached.  SPLICE is what the JIT does: the bytes are copied
@@ -156,13 +156,20 @@ enum knod_blob_kind {
 #define KNOD_BLOB_CALL_RET_ADDR_SREG	30	/* s[30:31] */
 
 /*
- * Where a routine saves EXEC.  The register numbers are baked into the
- * assembly, so unlike the pairs the JIT hands out for BPF-level scopes these
- * cannot be assigned at compile time - the JIT keeps the range free instead,
- * and an entry says through exec_save_pairs how much of it a routine uses.
+ * Where a routine saves EXEC, and the scalars it may destroy while running.
+ * The register numbers are baked into the assembly, so unlike the pairs the JIT
+ * hands out for BPF-level scopes these cannot be assigned at compile time - the
+ * JIT keeps the whole range free instead, and an entry says through
+ * exec_save_pairs how much of the first part a routine uses.
+ *
+ * Nothing below this is scratch.  In particular s[34:35] carries the mask of
+ * lanes that have reached a verdict, which is live from wherever a lane
+ * finished to the epilogue that reads it, and so across any splice.
  */
 #define KNOD_BLOB_EXEC_SAVE_SREG	36	/* s[36:37] .. s[46:47] */
 #define KNOD_BLOB_EXEC_SAVE_PAIRS_MAX	6
+#define KNOD_BLOB_SPLICE_TMP_SREG	48	/* s48-s51 clobberable */
+#define KNOD_BLOB_SPLICE_TMP_SREG_END	51
 
 /*
  * The JIT's own scalars, at the same numbers on every generation so that a
