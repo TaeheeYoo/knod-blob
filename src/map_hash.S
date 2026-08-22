@@ -70,11 +70,17 @@ knod_lookup_hash_k\n:
 	v_mov_b32 v[EBASE], s[S2]
 	v_mov_b32 v[EBASE+1], s[S2+1]
 
-	JHASH HA, HB, HC, HT, K0, \n, 0
-
-	// bucket_id = hash & (n_buckets - 1)
+	// What jhash starts from is loaded here rather than with the rest
+	// because the scalars only come free on the line above.
+	s_load_dword s[S0], s[DESC:DESC+1], DESC_KEY_SIZE
+	s_load_dword s[S1], s[DESC:DESC+1], DESC_HASHRND
 	s_load_dword s[S3], s[DESC:DESC+1], DESC_N_BUCKETS
 	s_waitcnt lgkmcnt(0)
+	s_add_i32 s[S0], s[S0], s[S1]
+
+	JHASH HA, HB, HC, HT, K0, \n, S0
+
+	// bucket_id = hash & (n_buckets - 1)
 	s_add_i32 s[S3], s[S3], -1
 	v_and_b32 v[HC], s[S3], v[HC]
 
