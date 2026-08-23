@@ -15,17 +15,26 @@
 #define DESC		KNOD_BLOB_SPLICE_DESC_SREG
 #define KEY		KNOD_BLOB_SPLICE_KEY_VREG
 #define VAL		KNOD_BLOB_SPLICE_VAL_VREG
-#define RET		KNOD_BLOB_SPLICE_RET_VREG
+// Everything here stands in for a BPF helper, so all of it returns in r0.
+#define RET		KNOD_BLOB_SPLICE_R0_VREG
 
-// KNOD_BLOB_SPLICE_TMP_VREG (v28) upwards is ours to clobber.
+// The window runs v22-v57 with the key at v28 and the value at v42, which
+// leaves these six below the key and two above the value.
 #define T0		(KNOD_BLOB_SPLICE_TMP_VREG + 0)
 #define T1		(KNOD_BLOB_SPLICE_TMP_VREG + 1)
 #define T2		(KNOD_BLOB_SPLICE_TMP_VREG + 2)
 #define T3		(KNOD_BLOB_SPLICE_TMP_VREG + 3)
 #define T4		(KNOD_BLOB_SPLICE_TMP_VREG + 4)
 #define T5		(KNOD_BLOB_SPLICE_TMP_VREG + 5)
-#define T6		(KNOD_BLOB_SPLICE_TMP_VREG + 6)
-#define T7		(KNOD_BLOB_SPLICE_TMP_VREG + 7)
+#define THI0		(KNOD_BLOB_SPLICE_VAL_VREG + KNOD_BLOB_VALUE_CHUNKS_MAX)
+#define THI1		(THI0 + 1)
+
+#if THI1 != KNOD_BLOB_SPLICE_TMP_VREG_END
+# error "the value no longer ends two below the top of the window"
+#endif
+#if (KEY + KNOD_BLOB_KEY_CHUNKS_MAX) > VAL
+# error "the key runs into the value"
+#endif
 
 // KNOD_BLOB_SPLICE_TMP_SREG (s48) upwards is ours to clobber.  Not s32-s35:
 // s[34:35] is the done mask and is live across a splice.
