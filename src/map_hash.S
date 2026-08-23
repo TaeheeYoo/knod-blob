@@ -87,7 +87,7 @@ knod_lookup_hash_k\n:
 	v_mov_b32 v[NEND], KNOD_BPF_HASH_NEXT_END
 
 .Lnext\n:
-	global_load_dword v[CHAIN], v[EADDR:EADDR+1], off
+	global_load_dword v[CHAIN], v[EADDR:EADDR+1], off MAP_COHERENT
 	s_waitcnt vmcnt(0)
 	// The top bit marks a deleted element; it is not part of the index.
 	v_and_b32 v[CHAIN], KNOD_BPF_HASH_NEXT_MASK, v[CHAIN]
@@ -104,7 +104,7 @@ knod_lookup_hash_k\n:
 
 	.set _i, 0
 	.rept \n
-	global_load_dword v[M0 + _i], v[EADDR:EADDR+1], off offset:(ELEM_OFF_KV + _i * 4)
+	global_load_dword v[M0 + _i], v[EADDR:EADDR+1], off offset:(ELEM_OFF_KV + _i * 4) MAP_COHERENT
 	.set _i, _i + 1
 	.endr
 	s_waitcnt vmcnt(0)

@@ -129,6 +129,15 @@
 # define V_ADD_CI_U32	v_add_co_ci_u32
 #endif
 
+// A map is written by other CUs, so a load of one has to miss the caches that
+// are not shared with them.  Goes last on the instruction, after any offset.
+// gfx9 has no dlc bit; glc is the whole of what it offers.
+#if KNOD_ISA == 9
+# define MAP_COHERENT	glc
+#else
+# define MAP_COHERENT	glc dlc
+#endif
+
 // The carry-less add and subtract keep their plain names on gfx9 and gfx11 but
 // not on gfx10, which only accepts the _nc spelling.
 #if KNOD_ISA == 10
