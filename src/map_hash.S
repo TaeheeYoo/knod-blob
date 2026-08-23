@@ -10,11 +10,11 @@
 #include "common.inc"
 #include "jhash.inc"
 
-// The key and the stored key it is compared against are both held whole, and
-// between them they take all but four registers of the scratch window.  That
-// is what sets the 56-byte key limit, not any property of hashing.
-#define K0		(KNOD_BLOB_SPLICE_TMP_VREG + 0)		// v28-v41
-#define M0		(KNOD_BLOB_SPLICE_TMP_VREG + 14)	// v42-v55
+// A lookup is given no value, so it spends the value registers on holding the
+// stored key whole and comparing it a word at a time against the search key.
+// That is what sets the 56-byte key limit, not any property of hashing.
+#define K0		KEY			// v28-v41
+#define M0		VAL			// v42-v55
 
 // jhash state and its scratch borrow the stored-key registers, which are not
 // written until the walk starts and the hash is finished before then.
@@ -23,16 +23,10 @@
 #define HC		(M0 + 2)
 #define HT		(M0 + 3)
 
-// What is left of the window, plus the two pairs below it that a lookup has
-// no use for: it is given no value, and the key now arrives in registers.
-#define EBASE		22		// element storage base
-#define EADDR		VAL		// the element being examined
-#define NEND		(KNOD_BLOB_SPLICE_TMP_VREG + 28)
-#define CHAIN		(KNOD_BLOB_SPLICE_TMP_VREG + 29)
-
-#if (M0 + KNOD_BLOB_KEY_CHUNKS_MAX) > (KNOD_BLOB_SPLICE_TMP_VREG_END - 1)
-# error "key registers collide with the scratch at the top of the window"
-#endif
+#define EBASE		T0		// element storage base
+#define EADDR		T2		// the element being examined
+#define NEND		THI0
+#define CHAIN		THI1
 
 #define KNOD_BPF_HASH_NEXT_END		0x7FFFFFFF
 #define KNOD_BPF_HASH_NEXT_MASK		0x7FFFFFFF
@@ -93,7 +87,7 @@ knod_lookup_hash_k\n:
 	v_mov_b32 v[NEND], KNOD_BPF_HASH_NEXT_END
 
 .Lnext\n:
-	global_load_dword v[CHAIN], v[EADDR:EADDR+1], off
+	global_load_dword v[CHAIN], v[EADDR:EADDR+1], off MAP_COHERENT
 	s_waitcnt vmcnt(0)
 	// The top bit marks a deleted element; it is not part of the index.
 	v_and_b32 v[CHAIN], KNOD_BPF_HASH_NEXT_MASK, v[CHAIN]
@@ -110,7 +104,7 @@ knod_lookup_hash_k\n:
 
 	.set _i, 0
 	.rept \n
-	global_load_dword v[M0 + _i], v[EADDR:EADDR+1], off offset:(ELEM_OFF_KV + _i * 4)
+	global_load_dword v[M0 + _i], v[EADDR:EADDR+1], off offset:(ELEM_OFF_KV + _i * 4) MAP_COHERENT
 	.set _i, _i + 1
 	.endr
 	s_waitcnt vmcnt(0)

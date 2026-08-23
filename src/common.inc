@@ -15,17 +15,26 @@
 #define DESC		KNOD_BLOB_SPLICE_DESC_SREG
 #define KEY		KNOD_BLOB_SPLICE_KEY_VREG
 #define VAL		KNOD_BLOB_SPLICE_VAL_VREG
-#define RET		KNOD_BLOB_SPLICE_RET_VREG
+// Everything here stands in for a BPF helper, so all of it returns in r0.
+#define RET		KNOD_BLOB_SPLICE_R0_VREG
 
-// KNOD_BLOB_SPLICE_TMP_VREG (v28) upwards is ours to clobber.
+// The window runs v22-v57 with the key at v28 and the value at v42, which
+// leaves these six below the key and two above the value.
 #define T0		(KNOD_BLOB_SPLICE_TMP_VREG + 0)
 #define T1		(KNOD_BLOB_SPLICE_TMP_VREG + 1)
 #define T2		(KNOD_BLOB_SPLICE_TMP_VREG + 2)
 #define T3		(KNOD_BLOB_SPLICE_TMP_VREG + 3)
 #define T4		(KNOD_BLOB_SPLICE_TMP_VREG + 4)
 #define T5		(KNOD_BLOB_SPLICE_TMP_VREG + 5)
-#define T6		(KNOD_BLOB_SPLICE_TMP_VREG + 6)
-#define T7		(KNOD_BLOB_SPLICE_TMP_VREG + 7)
+#define THI0		(KNOD_BLOB_SPLICE_VAL_VREG + KNOD_BLOB_VALUE_CHUNKS_MAX)
+#define THI1		(THI0 + 1)
+
+#if THI1 != KNOD_BLOB_SPLICE_TMP_VREG_END
+# error "the value no longer ends two below the top of the window"
+#endif
+#if (KEY + KNOD_BLOB_KEY_CHUNKS_MAX) > VAL
+# error "the key runs into the value"
+#endif
 
 // KNOD_BLOB_SPLICE_TMP_SREG (s48) upwards is ours to clobber.  Not s32-s35:
 // s[34:35] is the done mask and is live across a splice.
@@ -118,6 +127,15 @@
 # define V_ADD_CI_U32	v_addc_co_u32
 #else
 # define V_ADD_CI_U32	v_add_co_ci_u32
+#endif
+
+// A map is written by other CUs, so a load of one has to miss the caches that
+// are not shared with them.  Goes last on the instruction, after any offset.
+// gfx9 has no dlc bit; glc is the whole of what it offers.
+#if KNOD_ISA == 9
+# define MAP_COHERENT	glc
+#else
+# define MAP_COHERENT	glc dlc
 #endif
 
 // The carry-less add and subtract keep their plain names on gfx9 and gfx11 but
