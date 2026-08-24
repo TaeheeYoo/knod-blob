@@ -355,3 +355,23 @@ knod_delete_hash_k\n:
 	DEFINE_HASH_WRITE 12, 2
 	DEFINE_HASH_WRITE 13, 2
 	DEFINE_HASH_WRITE 14, 2
+
+// The build concatenates every source into one file, so these names are
+// shared with whatever follows.  Handing them back keeps the next file's
+// meaning its own, and keeps a collision an error rather than an ordering.
+#undef K0
+#undef BADDR
+#undef EADDR
+#undef CHAIN
+#undef MCHUNK
+#undef TMP
+#undef TMP2
+#undef HA
+#undef HB
+#undef HC
+#undef HT
+#undef KNOD_BPF_HASH_NEXT_END
+#undef KNOD_BPF_HASH_NEXT_MASK
+#undef KNOD_BPF_HASH_DELETED
+#undef ELEM_OFF_NEXT
+#undef ELEM_OFF_KV
