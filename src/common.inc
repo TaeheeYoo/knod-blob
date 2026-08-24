@@ -47,6 +47,12 @@
 #define XSAVE0		(KNOD_BLOB_EXEC_SAVE_SREG + 0)
 #define XSAVE1		(KNOD_BLOB_EXEC_SAVE_SREG + 2)
 #define XSAVE2		(KNOD_BLOB_EXEC_SAVE_SREG + 4)
+#define XSAVE3		(KNOD_BLOB_EXEC_SAVE_SREG + 6)
+#define XSAVE4		(KNOD_BLOB_EXEC_SAVE_SREG + 8)
+
+#if (XSAVE4 + 2) > (KNOD_BLOB_EXEC_SAVE_SREG + KNOD_BLOB_EXEC_SAVE_PAIRS_MAX * 2)
+# error "more EXEC saves than the JIT keeps free"
+#endif
 
 //
 // Prologue and epilogue.  These are the ends of a program rather than
@@ -120,6 +126,7 @@
 #define DESC_N_BUCKETS		KNOD_BLOB_DESC_N_BUCKETS
 #define DESC_LOCK_OFFSET	KNOD_BLOB_DESC_LOCK_OFFSET
 #define DESC_HASHRND		KNOD_BLOB_DESC_HASHRND
+#define DESC_FREE_CUR		KNOD_BLOB_DESC_FREE_CUR
 
 // Mnemonics that were renamed after gfx9.  The encodings differ too, so this
 // is a spelling shim, not a compatibility layer.
