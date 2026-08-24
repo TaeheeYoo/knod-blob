@@ -40,7 +40,7 @@ all: $(BLOBS)
 define isa_rules
 $(BUILD)/$(1).$(2).s: $(DEPS) | $(BUILD)
 	cat $(SRC_$(1)) > $(BUILD)/$(1).$(2).cat.S
-	$(ASM_CPP) -Isrc -Iinclude/uapi -Werror=undef \
+	$(ASM_CPP) -Isrc -Iinclude/uapi -Werror=undef -Werror=macro-redefined \
 		-DKNOD_BLOB_LINK=KNOD_BLOB_LINK_SPLICE -D__ASSEMBLY__ \
 		-DKNOD_ISA=$(2) $(BUILD)/$(1).$(2).cat.S -o $$@
 
