@@ -114,3 +114,9 @@ knod_\name:
 	DEFINE_ARRAY lookup_percpu_array, 1, 0
 	DEFINE_ARRAY update_percpu_array, 1, 1
 	DEFINE_ARRAY delete_percpu_array, 1, 2
+
+// The build concatenates every source into one file, so these names are
+// shared with whatever follows.  Handing them back keeps the next file's
+// meaning its own, and keeps a collision an error rather than an ordering.
+#undef EBASE
+#undef ADDR

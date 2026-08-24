@@ -161,3 +161,21 @@ knod_lookup_hash_k\n:
 	DEFINE_LOOKUP_HASH 12
 	DEFINE_LOOKUP_HASH 13
 	DEFINE_LOOKUP_HASH 14
+
+// The build concatenates every source into one file, so these names are
+// shared with whatever follows.  Handing them back keeps the next file's
+// meaning its own, and keeps a collision an error rather than an ordering.
+#undef K0
+#undef M0
+#undef HA
+#undef HB
+#undef HC
+#undef HT
+#undef EBASE
+#undef EADDR
+#undef NEND
+#undef CHAIN
+#undef KNOD_BPF_HASH_NEXT_END
+#undef KNOD_BPF_HASH_NEXT_MASK
+#undef ELEM_OFF_NEXT
+#undef ELEM_OFF_KV
