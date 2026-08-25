@@ -10,8 +10,16 @@
 	// A re-uploaded shader can land on the address an old one is still
 	// cached at.  This must be the first instruction so that whichever
 	// version the SQC is serving runs it before the two diverge.
+	//
+	// Waves are per packet, so throwing the instruction cache away is a
+	// per-packet cost rather than a per-dispatch one, and it is worth being
+	// able to price.  KNOD_NO_ICACHE_INV builds it out for that, and is
+	// only safe while nothing re-uploads a shader - no attach, no program
+	// change - for the length of the run.
+#if !defined(KNOD_NO_ICACHE_INV)
 	s_icache_inv
 	s_waitcnt vmcnt(0) lgkmcnt(0)
+#endif
 
 	s_load_dwordx2 s[PARAM:PARAM+1], s[DISPATCH:DISPATCH+1], \
 		       KNOD_BLOB_AQL_KERNARG
