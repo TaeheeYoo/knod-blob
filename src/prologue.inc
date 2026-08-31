@@ -47,10 +47,12 @@
 	V_ADD_CI_U32 v[P0+1], vcc, 0, v[P0+1], vcc
 
 	// The whole descriptor: pool and base addresses, then the count and
-	// the ring cursor.
+	// the ring cursor, then where the shadow entries are.
 	global_load_dwordx4 v[P2:P2+3], v[P0:P0+1], off
 	global_load_dwordx4 v[P6:P6+3], v[P0:P0+1], off \
 			    offset:KNOD_BLOB_QUEUE_COUNT
+	global_load_dwordx2 v[P16:P16+1], v[P0:P0+1], off \
+			    offset:KNOD_BLOB_QUEUE_SHADOW_GADDR
 
 	s_mov_b64 s[DONE_MASK:DONE_MASK+1], 0
 
@@ -88,16 +90,24 @@
 	v_mov_b32 v[BPF_R10], KNOD_BLOB_BPF_STACK_SIZE
 	v_mov_b32 v[BPF_R10+1], 0
 
-	// slot = (ring_start + idx) & ring_mask, and the descriptor for it.
+	// slot = (ring_start + idx) & ring_mask.
 	V_ADD_U32 v[P10], v[P6+2], v[P18]
 	v_and_b32 v[P10], v[P6+3], v[P10]
+
+	// Which page the packet is on, and where in it.  Read from the shadow
+	// rather than the descriptor: neighbouring lanes want neighbouring
+	// slots, and at eight bytes apart a wave's worth is eight lines
+	// instead of sixty-four.
+	v_lshlrev_b32 v[P14], KNOD_BLOB_SHADOW_SHIFT, v[P10]
+	v_add_co_u32 v[P14], vcc, v[P14], v[P16]
+	V_ADD_CI_U32 v[P14+1], vcc, 0, v[P16+1], vcc
+	global_load_dwordx2 v[P12:P12+1], v[P14:P14+1], off
+
+	// The descriptor itself is still where the verdict goes back.
 	v_lshlrev_b32 v[SLOT], s[PS4+1], v[P10]
 	v_add_co_u32 v[SLOT], vcc, v[SLOT], v[P2]
 	V_ADD_CI_U32 v[SLOT+1], vcc, 0, v[P2+1], vcc
 
-	// Which page the packet is on, and where in it.
-	global_load_dwordx2 v[P12:P12+1], v[SLOT:SLOT+1], off \
-			    offset:KNOD_BLOB_BD_OFF
 	s_waitcnt vmcnt(0)
 
 	// data = base + (page_idx << page_shift).  The shift crosses 32 bits,
