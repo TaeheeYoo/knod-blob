@@ -16,8 +16,13 @@ SRC_ipsec	:= src/ipsec.S
 SRC_bpf		:= $(filter-out $(SRC_core) $(SRC_ipsec),$(wildcard src/*.S))
 
 ABI_HDR		:= include/uapi/linux/knod_blob.h
-DEPS		:= $(wildcard src/*.S) src/common.inc $(ABI_HDR)
 BUILD		:= build
+# The preprocessor flags decide what goes in - a probe, or no probe - and they
+# are in no file, so nothing about the sources says a build made with one is
+# not the build being asked for with another.  Keep them in a stamp every
+# object depends on, and changing them becomes a reason to build again.
+FLAGS_STAMP	:= $(BUILD)/.cppflags
+DEPS		:= $(wildcard src/*.S) src/common.inc $(ABI_HDR) $(FLAGS_STAMP)
 FIRMWARE_DIR	?= /lib/firmware/knod
 
 # gfx10 and later default to wave32 and the JIT runs wave64, so they have to
@@ -34,6 +39,14 @@ BLOBS		:= $(foreach f,$(FEATURES),\
 		     $(foreach i,$(ISAS),$(BUILD)/knod-$(f)-gfx$(i).bin))
 
 all: $(BLOBS)
+
+# Rewritten only when it would change, so an unchanged flag set is not itself
+# a reason to rebuild.
+.PHONY: FORCE
+$(FLAGS_STAMP): FORCE | $(BUILD)
+	@printf '%s' "$(EXTRA_CPPFLAGS)" > $@.new
+	@cmp -s $@.new $@ || { mv $@.new $@; echo "flags: [$(EXTRA_CPPFLAGS)]"; }
+	@rm -f $@.new
 
 # One set of rules per feature and ISA.  A pattern rule cannot express this
 # because the cpu and attributes are looked up by the ISA number, not the stem.
@@ -82,7 +95,6 @@ clean:
 # flag changes no file the build depends on, and checked, because a stale
 # object left a probe out once and the missing field read as a real answer.
 cycles:
-	$(MAKE) clean
 	$(MAKE) EXTRA_CPPFLAGS='-DKNOD_CYCLE_PROBE'
 	@grep -q s_getreg $(BUILD)/bpf.11.s || { \
 		echo "cycles: probe missing from the build" >&2; exit 1; }
