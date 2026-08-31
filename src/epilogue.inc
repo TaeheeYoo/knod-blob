@@ -15,6 +15,23 @@
 	global_store_dword v[SLOT:SLOT+1], v[BPF_R0], off \
 			   offset:KNOD_BLOB_BD_ACT glc slc
 
+#if defined(KNOD_HWID_PROBE) && KNOD_ISA == 11
+	// Which compute unit ran this wave, so the host can count how many one
+	// dispatch really reached.  The grid asks for a workgroup per queue per
+	// xgroup, but where those land is the hardware's choice, and a unit with
+	// the registers for several of them may take several.
+	//
+	// It goes in the half of act nothing reads on this path: the driver
+	// takes the verdict as a u32 and the shader stores it as one, so bytes
+	// 12..15 are untouched.  IPsec does read them, so this is a BPF-only
+	// build.  hwreg 23 is HW_ID1 on GFX10 and up, given by number because
+	// the name is not spelled the same everywhere.
+	s_getreg_b32 s[PS6], hwreg(23, 0, 32)
+	v_mov_b32 v[P5], s[PS6]
+	global_store_dword v[SLOT:SLOT+1], v[P5], off \
+			   offset:(KNOD_BLOB_BD_ACT + 4) glc slc
+#endif
+
 	// Where the packet sits now.  A program that moved its start or its
 	// end moved these registers; one that did not gets back the offset and
 	// length the prologue read, so this is worth doing either way.
