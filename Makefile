@@ -100,4 +100,14 @@ cycles:
 		echo "cycles: probe missing from the build" >&2; exit 1; }
 	@echo "cycles: probe present"
 
-.PHONY: all install clean cycles
+# Rebuild with one of the two stores every lane makes left out, to price a
+# store on its own.  Wrong for any program that moves the packet - the host
+# then reads the bounds the producer wrote - so this is for measuring and
+# nothing else.
+onestore:
+	$(MAKE) EXTRA_CPPFLAGS='-DKNOD_NO_OFFLEN_STORE'
+	@! grep -q 'offset:16 glc slc' $(BUILD)/bpf.11.s || { \
+		echo "onestore: the store is still there" >&2; exit 1; }
+	@echo "onestore: one store a lane"
+
+.PHONY: all install clean cycles onestore

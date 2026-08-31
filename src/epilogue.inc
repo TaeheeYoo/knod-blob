@@ -49,12 +49,25 @@
 	// Where the packet sits now.  A program that moved its start or its
 	// end moved these registers; one that did not gets back the offset and
 	// length the prologue read, so this is worth doing either way.
+	//
+	// What a dispatch costs turns out to follow how many stores each lane
+	// makes and little else - two against four was sixty-four microseconds
+	// on a shader whose own time is nine - and the reason is not the cache
+	// line, because letting these two share one bought nothing.  So price a
+	// store on its own: KNOD_NO_OFFLEN_STORE leaves this one out, which
+	// halves what a lane writes.
+	//
+	// Only for measuring, and only with a program that moves neither the
+	// start nor the end of the packet.  One that does gets its adjustment
+	// dropped, and the host reads back the bounds the producer wrote.
+#ifndef KNOD_NO_OFFLEN_STORE
 	V_SUB_U32 v[P4], v[DATA_END], v[DATA]			// len
 	v_lshlrev_b32 v[P4], 16, v[P4]
 	V_SUB_U32 v[P5], v[DATA], v[PAGE_BASE]			// off
 	v_or_b32 v[P4], v[P4], v[P5]
 	global_store_dword v[SLOT:SLOT+1], v[P4], off \
 			   offset:KNOD_BLOB_BD_OFF glc slc
+#endif
 	.endm
 
 	.macro KNOD_EPILOGUE_POST_BODY
