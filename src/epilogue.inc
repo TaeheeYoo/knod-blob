@@ -118,15 +118,9 @@
 	s_mov_b64 exec, s[INITIAL_EXEC:INITIAL_EXEC+1]
 	s_getreg_b32 s[PS0], hwreg(HW_REG_SHADER_CYCLES, 0, 20)
 	s_sub_u32 s[PS1], s[PS0], s[PROBE1]
-	// The epilogue's own count, and when it ended.  The second is what
-	// tells a dispatch's span apart from a wave's: every lane's start is
-	// its end less its three counts, so the earliest start and the latest
-	// end bound how long the whole dispatch was inside the shader - and
-	// what is left over is what came after it.
 	v_mov_b32 v[P0], s[PS1]
-	v_mov_b32 v[P0+1], s[PS0]
-	global_store_dwordx2 v[SLOT:SLOT+1], v[P0:P0+1], off \
-			     offset:(KNOD_BLOB_BD_PROBE + 8)
+	global_store_dword v[SLOT:SLOT+1], v[P0], off \
+			   offset:(KNOD_BLOB_BD_PROBE + 8)
 #endif
 	s_endpgm
 	.endm
