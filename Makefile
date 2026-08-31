@@ -72,7 +72,19 @@ install: $(BLOBS)
 	install -d $(DESTDIR)$(FIRMWARE_DIR)
 	install -m 0644 $(BLOBS) $(DESTDIR)$(FIRMWARE_DIR)
 
+# Rebuild with the HW_ID probe, which has every wave record the compute unit it
+# ran on.  Not the default: it is a store in the epilogue of every packet, on
+# the very path the probe exists to measure.  From scratch, because the flag
+# changes no file the build depends on, and checked, because a stale object
+# left the probe out once and the missing field read as a real answer.
+hwid:
+	$(MAKE) clean
+	$(MAKE) EXTRA_CPPFLAGS='-DKNOD_HWID_PROBE'
+	@grep -q s_getreg $(BUILD)/bpf.11.s || \
+		{ echo "hwid: probe is not in the build"; exit 1; }
+	@echo "hwid: probe built in; a plain 'make' leaves it out"
+
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all install clean
+.PHONY: all install clean hwid
