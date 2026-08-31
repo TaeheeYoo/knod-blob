@@ -7,6 +7,20 @@
 #define EPILOGUE_INC
 
 	.macro KNOD_EPILOGUE_PRE_BODY
+#ifdef KNOD_CYCLES
+	// The program is over, so its count is known and both finished counts
+	// can go away; s33 then times the epilogue.  EXEC is whatever the
+	// program left, and every in-bounds lane has a count to report.
+	s_mov_b64 exec, s[INITIAL_EXEC:INITIAL_EXEC+1]
+	s_getreg_b32 s[PS0], hwreg(HW_REG_SHADER_CYCLES, 0, 20)
+	s_sub_u32 s[PS1], s[PS0], s[PROBE1]
+	v_mov_b32 v[P0], s[PROBE0]
+	v_mov_b32 v[P0+1], s[PS1]
+	global_store_dwordx2 v[SLOT:SLOT+1], v[P0:P0+1], off \
+			     offset:KNOD_BLOB_BD_PROBE
+	s_mov_b32 s[PROBE1], s[PS0]
+#endif
+
 	s_andn2_b64 exec, s[INITIAL_EXEC:INITIAL_EXEC+1], \
 		    s[DONE_MASK:DONE_MASK+1]
 	v_mov_b32 v[BPF_R0], XDP_DROP
@@ -96,6 +110,18 @@
 			     offset:8 glc slc
 
 .Lend\@:
+#ifdef KNOD_CYCLES
+	// Both paths arrive here - the one that passed by falling through, the
+	// one that did not by the branch - so this closes the epilogue for
+	// every lane.  The store is past the last reading and prices itself
+	// out of what it reports.
+	s_mov_b64 exec, s[INITIAL_EXEC:INITIAL_EXEC+1]
+	s_getreg_b32 s[PS0], hwreg(HW_REG_SHADER_CYCLES, 0, 20)
+	s_sub_u32 s[PS1], s[PS0], s[PROBE1]
+	v_mov_b32 v[P0], s[PS1]
+	global_store_dword v[SLOT:SLOT+1], v[P0], off \
+			   offset:(KNOD_BLOB_BD_PROBE + 8)
+#endif
 	s_endpgm
 	.endm
 

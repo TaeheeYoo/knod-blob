@@ -21,6 +21,12 @@
 	s_waitcnt vmcnt(0) lgkmcnt(0)
 #endif
 
+#ifdef KNOD_CYCLES
+	// Where the shader's time goes.  s_getreg reads a register, so it waits
+	// on nothing and adds only its own issue to whichever part it closes.
+	s_getreg_b32 s[PROBE0], hwreg(HW_REG_SHADER_CYCLES, 0, 20)
+#endif
+
 	s_load_dwordx2 s[PARAM:PARAM+1], s[DISPATCH:DISPATCH+1], \
 		       KNOD_BLOB_AQL_KERNARG
 
@@ -119,6 +125,12 @@
 	v_lshrrev_b32 v[DATA_END], 16, v[P12]
 	v_add_co_u32 v[DATA_END], vcc, v[DATA], v[DATA_END]
 	V_ADD_CI_U32 v[DATA_END+1], vcc, 0, v[DATA+1], vcc
+
+#ifdef KNOD_CYCLES
+	// s32 becomes what the prologue took, s33 when it ended.
+	s_getreg_b32 s[PROBE1], hwreg(HW_REG_SHADER_CYCLES, 0, 20)
+	s_sub_u32 s[PROBE0], s[PROBE1], s[PROBE0]
+#endif
 	.endm
 
 #endif /* PROLOGUE_INC */

@@ -75,4 +75,17 @@ install: $(BLOBS)
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all install clean
+# Rebuild with the cycle probe, which has every wave record what the prologue,
+# the program and the epilogue each took, in shader clocks, in the half of its
+# ring slot spsc_bd leaves free.  Not the default: it is four register reads
+# and two stores on the path it exists to measure.  From scratch, because the
+# flag changes no file the build depends on, and checked, because a stale
+# object left a probe out once and the missing field read as a real answer.
+cycles:
+	$(MAKE) clean
+	$(MAKE) EXTRA_CPPFLAGS='-DKNOD_CYCLE_PROBE'
+	@grep -q s_getreg $(BUILD)/bpf.11.s || { \
+		echo "cycles: probe missing from the build" >&2; exit 1; }
+	@echo "cycles: probe present"
+
+.PHONY: all install clean cycles
