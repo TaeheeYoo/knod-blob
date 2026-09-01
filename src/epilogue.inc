@@ -85,29 +85,11 @@
 	global_store_short v[P18:P18+1], v[IDX], off \
 			   offset:KNOD_BLOB_PARAM_PASS_INDICES glc slc
 
-	// The delivery buffer for this queue, and how far apart its slots are.
-	// A slot is a page, so that follows the page size and comes from the
-	// dispatch rather than from here.
-	s_lshl_b32 s[PS2], s[WG_Y], 3
-	s_load_dwordx2 s[PS0:PS0+1], s[PARAM:PARAM+1], s[PS2] \
-		       offset:KNOD_BLOB_PARAM_PASS_META
-	s_load_dwordx2 s[PS4:PS4+1], s[PARAM:PARAM+1], \
-		       KNOD_BLOB_PARAM_PAGE_SHIFT
-	s_waitcnt lgkmcnt(0)
-	s_sub_u32 s[PS4+1], s[PS4], 1
-	v_lshlrev_b32 v[P22], s[PS4+1], v[P20]
-	v_mov_b32 v[P22+1], 0
-	v_add_co_u32 v[P22], vcc, s[PS0], v[P22]
-
-	// The high half takes no carry: the buffer is one allocation and a
-	// slot offset cannot reach across four gigabytes of it.
-	v_mov_b32 v[P22+1], s[PS0+1]
-
-	// The slot header: how long the packet is, then where it lives.
-	V_SUB_U32 v[BPF_R0], v[DATA_END], v[DATA]
-	global_store_dword v[P22:P22+1], v[BPF_R0], off glc slc
-	global_store_dwordx2 v[P22:P22+1], v[DATA:DATA+1], off \
-			     offset:8 glc slc
+	// What used to follow wrote a {length, address} header into a delivery
+	// slot for this queue.  Nothing reads it: PASS goes to the host through
+	// the act handler and knod_d2h_copy, which take both from the
+	// descriptor.  So it was two stores and a scalar load waited on, per
+	// passing lane, into memory no one looks at.
 
 .Lend\@:
 #ifdef KNOD_CYCLES
