@@ -22,7 +22,11 @@ BUILD		:= build
 # not the build being asked for with another.  Keep them in a stamp every
 # object depends on, and changing them becomes a reason to build again.
 FLAGS_STAMP	:= $(BUILD)/.cppflags
-DEPS		:= $(wildcard src/*.S) src/common.inc $(ABI_HDR) $(FLAGS_STAMP)
+# Every source, not just the ones that name themselves .S: the bodies live in
+# .inc files that the .S files include, and leaving them out meant editing a
+# prologue or an epilogue built nothing.
+DEPS		:= $(wildcard src/*.S) $(wildcard src/*.inc) \
+		   $(wildcard src/ipsec/*) $(ABI_HDR) $(FLAGS_STAMP)
 FIRMWARE_DIR	?= /lib/firmware/knod
 
 # gfx10 and later default to wave32 and the JIT runs wave64, so they have to
