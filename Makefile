@@ -22,6 +22,11 @@ BUILD		:= build
 # not the build being asked for with another.  Keep them in a stamp every
 # object depends on, and changing them becomes a reason to build again.
 FLAGS_STAMP	:= $(BUILD)/.cppflags
+# What the last build used, when nothing is given.  A configuration set once -
+# `make cycles` - then survives the `make install` that follows, which would
+# otherwise build with no flags and install the opposite of what was asked
+# for.  Give EXTRA_CPPFLAGS on the command line to change it, empty to clear.
+EXTRA_CPPFLAGS	?= $(shell cat $(FLAGS_STAMP) 2>/dev/null)
 # Every source, not just the ones that name themselves .S: the bodies live in
 # .inc files that the .S files include, and leaving them out meant editing a
 # prologue or an epilogue built nothing.
@@ -86,6 +91,7 @@ $(BUILD):
 	mkdir -p $@
 
 install: $(BLOBS)
+	@echo "install: flags [$(EXTRA_CPPFLAGS)]"
 	install -d $(DESTDIR)$(FIRMWARE_DIR)
 	install -m 0644 $(BLOBS) $(DESTDIR)$(FIRMWARE_DIR)
 
@@ -104,4 +110,8 @@ cycles:
 		echo "cycles: probe missing from the build" >&2; exit 1; }
 	@echo "cycles: probe present"
 
-.PHONY: all install clean cycles
+# Back to a blob with nothing extra in it.
+plain:
+	$(MAKE) EXTRA_CPPFLAGS=
+
+.PHONY: all install clean cycles plain
