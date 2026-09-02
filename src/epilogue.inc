@@ -15,7 +15,7 @@
 	global_store_dword v[SLOT:SLOT+1], v[BPF_R0], off \
 			   offset:KNOD_BLOB_BD_ACT glc slc
 
-#if defined(KNOD_HWID_PROBE) && KNOD_ISA == 11
+#if defined(KNOD_HWID_PROBE)
 	// Which compute unit ran this wave, so the host can count how many one
 	// dispatch really reached.  The grid asks for a workgroup per queue per
 	// xgroup, but where those land is the hardware's choice, and a unit with
@@ -24,9 +24,15 @@
 	// It goes in the half of act nothing reads on this path: the driver
 	// takes the verdict as a u32 and the shader stores it as one, so bytes
 	// 12..15 are untouched.  IPsec does read them, so this is a BPF-only
-	// build.  hwreg 23 is HW_ID1 on GFX10 and up, given by number because
-	// the name is not spelled the same everywhere.
-	s_getreg_b32 s[PS6], hwreg(23, 0, 32)
+	// build.  The register goes by number because the name is not spelled
+	// the same everywhere: GCN keeps this in HW_ID, RDNA split it and put
+	// the unit in HW_ID1.  They pack the fields differently too, so the
+	// host decodes by generation rather than the shader normalising it.
+#if KNOD_ISA == 9
+	s_getreg_b32 s[PS6], hwreg(4, 0, 32)		// HW_ID
+#else
+	s_getreg_b32 s[PS6], hwreg(23, 0, 32)		// HW_ID1
+#endif
 	v_mov_b32 v[P5], s[PS6]
 	global_store_dword v[SLOT:SLOT+1], v[P5], off \
 			   offset:(KNOD_BLOB_BD_ACT + 4) glc slc
