@@ -69,12 +69,34 @@
 	v_lshlrev_b32 v[BPF_R1], 2, v[BPF_R1]
 	V_ADD_U32 v[P18], v[BPF_R1], v[P18]
 
-	// Claim a slot.  Every passing lane adds one and takes back what the
-	// counter held, which is its own index.
-	v_mov_b32 v[P20], 1
-	global_atomic_add v[P20], v[P18:P18+1], v[P20], off \
+	// Claim a slot each.  One lane claims them all: the counter is one
+	// dword per queue in host memory, so a lane apiece meant every lane of
+	// the wave taking its turn at the same address across the bus, one
+	// after another, with the wait below exposing all of it.  It was
+	// two thirds of the shader's time.
+	//
+	// mbcnt gives a lane how many live lanes are below it, which is both
+	// its place in the run this wave is claiming and, for the lowest one,
+	// zero - so the same number elects the lane that does the claiming.
+	v_mbcnt_lo_u32_b32 v[P20], exec_lo, 0
+	v_mbcnt_hi_u32_b32 v[P20], exec_hi, v[P20]
+	s_bcnt1_i32_b64 s[PS0], exec
+
+	s_mov_b64 s[PS2:PS2+1], exec
+	v_cmp_eq_u32 vcc, 0, v[P20]
+	s_and_b64 exec, exec, vcc
+
+	v_mov_b32 v[P22], s[PS0]
+	global_atomic_add v[P22], v[P18:P18+1], v[P22], off \
 			  offset:KNOD_BLOB_PARAM_PASS_COUNT glc
 	s_waitcnt vmcnt(0)
+
+	// What came back is where the run starts.  readfirstlane takes it from
+	// the one lane still live, before the rest come back to add their place
+	// to it.
+	v_readfirstlane_b32 s[PS4], v[P22]
+	s_mov_b64 exec, s[PS2:PS2+1]
+	V_ADD_U32 v[P20], s[PS4], v[P20]
 
 	// param->pass_indices[slot] = this descriptor.  Indices are shorts, so
 	// the slot is doubled to reach one - and doubled again below, where the
