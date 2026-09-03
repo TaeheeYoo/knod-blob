@@ -26,8 +26,29 @@
 	v_mov_b32 v[BPF_R0], XDP_DROP
 	s_mov_b64 exec, s[INITIAL_EXEC:INITIAL_EXEC+1]
 
-	global_store_dword v[SLOT:SLOT+1], v[BPF_R0], off \
-			   offset:KNOD_BLOB_BD_ACT glc slc
+	// Where the packet sits now.  A program that moved its start or its end
+	// moved these registers; one that did not gets back what the prologue
+	// read, so this is worth writing either way.
+	V_SUB_U32 v[P6], v[DATA_END], v[DATA]			// len
+	v_lshlrev_b32 v[P6], 16, v[P6]
+	V_SUB_U32 v[P7], v[DATA], v[PAGE_BASE]			// off
+	v_or_b32 v[P6], v[P6], v[P7]
+
+	// The verdict, the bounds, and the page they are on, in one store.
+	// They sit in the descriptor eight bytes apart with the half of act
+	// nothing reads between them, so four dwords covers all three - and the
+	// page goes back unchanged only to make that possible.
+	//
+	// One store rather than two because that is what a dispatch costs:
+	// stores are posted, so a wave never waits for one, but the release
+	// that ends the dispatch does, and until then they keep dispatches from
+	// overlapping.  Dropping one of two took the drop path from 27.4 Mpps
+	// to 48.2.
+	v_mov_b32 v[P4], v[BPF_R0]
+	v_mov_b32 v[P5], 0
+	v_mov_b32 v[P7], v[PAGE_IDX]
+	global_store_dwordx4 v[SLOT:SLOT+1], v[P4:P4+3], off \
+			     offset:KNOD_BLOB_BD_ACT glc slc
 
 #if defined(KNOD_HWID_PROBE)
 	// Which compute unit ran this wave, so the host can count how many one
@@ -52,15 +73,6 @@
 			   offset:(KNOD_BLOB_BD_ACT + 4) glc slc
 #endif
 
-	// Where the packet sits now.  A program that moved its start or its
-	// end moved these registers; one that did not gets back the offset and
-	// length the prologue read, so this is worth doing either way.
-	V_SUB_U32 v[P4], v[DATA_END], v[DATA]			// len
-	v_lshlrev_b32 v[P4], 16, v[P4]
-	V_SUB_U32 v[P5], v[DATA], v[PAGE_BASE]			// off
-	v_or_b32 v[P4], v[P4], v[P5]
-	global_store_dword v[SLOT:SLOT+1], v[P4], off \
-			   offset:KNOD_BLOB_BD_OFF glc slc
 	.endm
 
 	.macro KNOD_EPILOGUE_POST_BODY
