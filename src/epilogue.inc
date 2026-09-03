@@ -7,6 +7,20 @@
 #define EPILOGUE_INC
 
 	.macro KNOD_EPILOGUE_PRE_BODY
+#ifdef KNOD_CYCLES
+	// The program is over, so its count is known and both finished counts
+	// can go away; s33 then times the epilogue.  EXEC is whatever the
+	// program left, and every in-bounds lane has a count to report.
+	s_mov_b64 exec, s[INITIAL_EXEC:INITIAL_EXEC+1]
+	s_getreg_b32 s[PS0], hwreg(HW_REG_SHADER_CYCLES, 0, 20)
+	s_sub_u32 s[PS1], s[PS0], s[PROBE1]
+	v_mov_b32 v[P0], s[PROBE0]
+	v_mov_b32 v[P0+1], s[PS1]
+	global_store_dwordx2 v[SLOT:SLOT+1], v[P0:P0+1], off \
+			     offset:KNOD_BLOB_BD_PROBE
+	s_mov_b32 s[PROBE1], s[PS0]
+#endif
+
 	s_andn2_b64 exec, s[INITIAL_EXEC:INITIAL_EXEC+1], \
 		    s[DONE_MASK:DONE_MASK+1]
 	v_mov_b32 v[BPF_R0], XDP_DROP
@@ -61,12 +75,34 @@
 	v_lshlrev_b32 v[BPF_R1], 2, v[BPF_R1]
 	V_ADD_U32 v[P18], v[BPF_R1], v[P18]
 
-	// Claim a slot.  Every passing lane adds one and takes back what the
-	// counter held, which is its own index.
-	v_mov_b32 v[P20], 1
-	global_atomic_add v[P20], v[P18:P18+1], v[P20], off \
+	// Claim a slot each.  One lane claims them all: the counter is one
+	// dword per queue in host memory, so a lane apiece meant every lane of
+	// the wave taking its turn at the same address across the bus, one
+	// after another, with the wait below exposing all of it.  It was
+	// two thirds of the shader's time.
+	//
+	// mbcnt gives a lane how many live lanes are below it, which is both
+	// its place in the run this wave is claiming and, for the lowest one,
+	// zero - so the same number elects the lane that does the claiming.
+	v_mbcnt_lo_u32_b32 v[P20], exec_lo, 0
+	v_mbcnt_hi_u32_b32 v[P20], exec_hi, v[P20]
+	s_bcnt1_i32_b64 s[PS0], exec
+
+	s_mov_b64 s[PS2:PS2+1], exec
+	v_cmp_eq_u32 vcc, 0, v[P20]
+	s_and_b64 exec, exec, vcc
+
+	v_mov_b32 v[P22], s[PS0]
+	global_atomic_add v[P22], v[P18:P18+1], v[P22], off \
 			  offset:KNOD_BLOB_PARAM_PASS_COUNT glc
 	s_waitcnt vmcnt(0)
+
+	// What came back is where the run starts.  readfirstlane takes it from
+	// the one lane still live, before the rest come back to add their place
+	// to it.
+	v_readfirstlane_b32 s[PS4], v[P22]
+	s_mov_b64 exec, s[PS2:PS2+1]
+	V_ADD_U32 v[P20], s[PS4], v[P20]
 
 	// param->pass_indices[slot] = this descriptor.  Indices are shorts, so
 	// the slot is doubled to reach one - and doubled again below, where the
@@ -77,31 +113,25 @@
 	global_store_short v[P18:P18+1], v[IDX], off \
 			   offset:KNOD_BLOB_PARAM_PASS_INDICES glc slc
 
-	// The delivery buffer for this queue, and how far apart its slots are.
-	// A slot is a page, so that follows the page size and comes from the
-	// dispatch rather than from here.
-	s_lshl_b32 s[PS2], s[WG_Y], 3
-	s_load_dwordx2 s[PS0:PS0+1], s[PARAM:PARAM+1], s[PS2] \
-		       offset:KNOD_BLOB_PARAM_PASS_META
-	s_load_dwordx2 s[PS4:PS4+1], s[PARAM:PARAM+1], \
-		       KNOD_BLOB_PARAM_PAGE_SHIFT
-	s_waitcnt lgkmcnt(0)
-	s_sub_u32 s[PS4+1], s[PS4], 1
-	v_lshlrev_b32 v[P22], s[PS4+1], v[P20]
-	v_mov_b32 v[P22+1], 0
-	v_add_co_u32 v[P22], vcc, s[PS0], v[P22]
-
-	// The high half takes no carry: the buffer is one allocation and a
-	// slot offset cannot reach across four gigabytes of it.
-	v_mov_b32 v[P22+1], s[PS0+1]
-
-	// The slot header: how long the packet is, then where it lives.
-	V_SUB_U32 v[BPF_R0], v[DATA_END], v[DATA]
-	global_store_dword v[P22:P22+1], v[BPF_R0], off glc slc
-	global_store_dwordx2 v[P22:P22+1], v[DATA:DATA+1], off \
-			     offset:8 glc slc
+	// What used to follow wrote a {length, address} header into a delivery
+	// slot for this queue.  Nothing reads it: PASS goes to the host through
+	// the act handler and knod_d2h_copy, which take both from the
+	// descriptor.  So it was two stores and a scalar load waited on, per
+	// passing lane, into memory no one looks at.
 
 .Lend\@:
+#ifdef KNOD_CYCLES
+	// Both paths arrive here - the one that passed by falling through, the
+	// one that did not by the branch - so this closes the epilogue for
+	// every lane.  The store is past the last reading and prices itself
+	// out of what it reports.
+	s_mov_b64 exec, s[INITIAL_EXEC:INITIAL_EXEC+1]
+	s_getreg_b32 s[PS0], hwreg(HW_REG_SHADER_CYCLES, 0, 20)
+	s_sub_u32 s[PS1], s[PS0], s[PROBE1]
+	v_mov_b32 v[P0], s[PS1]
+	global_store_dword v[SLOT:SLOT+1], v[P0], off \
+			   offset:(KNOD_BLOB_BD_PROBE + 8)
+#endif
 	s_endpgm
 	.endm
 

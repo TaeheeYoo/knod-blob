@@ -73,6 +73,14 @@
 #define DATA_END	KNOD_BLOB_PRO_DATA_END_VREG
 #define PAGE_BASE	KNOD_BLOB_PRO_PAGE_BASE_VREG
 
+// A probe build times three parts of the shader.  GFX9 has no counter to read,
+// so a build for it leaves the whole thing out rather than reporting zeroes.
+#if defined(KNOD_CYCLE_PROBE) && KNOD_ISA >= 10
+# define KNOD_CYCLES	1
+#endif
+#define PROBE0		(KNOD_BLOB_PROBE_SREG + 0)
+#define PROBE1		(KNOD_BLOB_PROBE_SREG + 1)
+
 #define P0		(KNOD_BLOB_PRO_TMP_VREG + 0)
 #define P1		(KNOD_BLOB_PRO_TMP_VREG + 1)
 #define P2		(KNOD_BLOB_PRO_TMP_VREG + 2)
@@ -92,6 +100,7 @@
 #define P22		(KNOD_BLOB_PRO_TMP_VREG + 22)
 
 #define PS0		(KNOD_BLOB_PRO_TMP_SREG + 0)
+#define PS1		(KNOD_BLOB_PRO_TMP_SREG + 1)
 #define PS2		(KNOD_BLOB_PRO_TMP_SREG + 2)
 #define PS4		(KNOD_BLOB_PRO_TMP_SREG + 4)
 #define PS6		(KNOD_BLOB_PRO_TMP_SREG + 6)
