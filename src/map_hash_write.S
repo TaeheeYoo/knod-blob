@@ -221,9 +221,10 @@ knod_delete_hash_k\n:
 
 .Lmissing_\@:
 .if \mode == 1
-	// Take an element off the free list.  The count runs down, so a
-	// decrement that lands below zero means the map is full and the lane
-	// gives up - the emitter reports that as success too.
+	// Take an element off the free list.  Every lane decrements before any
+	// of them knows whether there was anything left and the branch is
+	// taken for the whole wave, so when one comes up short none of them
+	// takes an element and all the decrements go back.
 	s_load_dwordx2 s[S0:S0+1], s[DESC:DESC+1], DESC_FREE_CUR
 	s_waitcnt lgkmcnt(0)
 	v_mov_b32 v[EADDR], s[S0]
@@ -233,7 +234,11 @@ knod_delete_hash_k\n:
 	s_waitcnt vmcnt(0)
 	V_SUB_U32 v[TMP], v[TMP], 1
 	v_cmp_gt_i32 vcc, 0, v[TMP]
-	s_cbranch_vccnz .Ldone_\@
+	s_cbranch_vccz .Lgot_\@
+	v_mov_b32 v[MCHUNK], 1
+	global_atomic_add v[EADDR:EADDR+1], v[MCHUNK], off
+	s_branch .Ldone_\@
+.Lgot_\@:
 
 	// elem_id = queue[cur]
 	s_load_dwordx2 s[S0:S0+1], s[DESC:DESC+1], DESC_QUEUE
