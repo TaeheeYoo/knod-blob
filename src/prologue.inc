@@ -118,6 +118,9 @@
 	v_mov_b32 v[PAGE_BASE], v[DATA]
 	v_mov_b32 v[PAGE_BASE+1], v[DATA+1]
 
+	// And which page it was, for the epilogue to hand back untouched.
+	v_mov_b32 v[PAGE_IDX], v[P12+1]
+
 	// off and len share a dword, off in the low half.
 	v_and_b32 v[P16], 0xffff, v[P12]
 	v_add_co_u32 v[DATA], vcc, v[P16], v[DATA]
