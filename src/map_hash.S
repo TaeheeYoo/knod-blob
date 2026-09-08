@@ -101,6 +101,9 @@ knod_lookup_hash_k\n:
 	s_load_dword s[S3], s[DESC:DESC+1], DESC_ELEM_SIZE
 	s_waitcnt lgkmcnt(0)
 	v_mad_u64_u32 v[EADDR:EADDR+1], s[S0:S0+1], s[S3], v[CHAIN], v[EBASE:EBASE+1]
+	// A concurrent delete can mark an element already reached by this
+	// walk.  Its next field carries the deletion mark, just as in the JIT.
+	global_load_dword v[CHAIN], v[EADDR:EADDR+1], off MAP_COHERENT
 
 	.set _i, 0
 	.rept \n
@@ -120,6 +123,11 @@ knod_lookup_hash_k\n:
 	s_and_b64 s[XSAVE1:XSAVE1+1], s[XSAVE1:XSAVE1+1], vcc
 	.set _i, _i + 1
 	.endr
+
+	// Bit 31 marks a deleted element.  Keep walking through it instead of
+	// returning its value, even when the key compares equal.
+	v_cmp_le_i32 vcc, 0, v[CHAIN]
+	s_and_b64 s[XSAVE1:XSAVE1+1], s[XSAVE1:XSAVE1+1], vcc
 
 	// Matching lanes take the value and leave the walk.
 	s_and_saveexec_b64 s[XSAVE2:XSAVE2+1], s[XSAVE1:XSAVE1+1]
