@@ -175,4 +175,13 @@
 # define KNOD_BLOB_RET
 #endif
 
+// GFX10+ tracks non-returning vector stores separately from loads.
+.macro KNOD_WAIT_STORES
+#if KNOD_ISA >= 10
+	s_waitcnt_vscnt null, 0
+#else
+	s_waitcnt vmcnt(0)
+#endif
+.endm
+
 #endif /* COMMON_INC */
