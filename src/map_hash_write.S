@@ -287,11 +287,13 @@ knod_delete_hash_k\n:
 	.set _i, _i + 1
 	.endr
 .Llinked_\@:
-	s_waitcnt vmcnt(0)
+	KNOD_WAIT_STORES
 	global_store_dword v[BADDR:BADDR+1], v[CHAIN], off
 .endif
 
 .Ldone_\@:
+	// The next lane can read this lane's newly written key or value.
+	KNOD_WAIT_STORES
 	// This lane is served; go back for the next one sharing the bucket.
 	s_andn2_b64 exec, s[XSAVE3:XSAVE3+1], s[XSAVE4:XSAVE4+1]
 	s_cbranch_execnz .Llane_\@
@@ -304,9 +306,9 @@ knod_delete_hash_k\n:
 	v_add_co_u32 v[EADDR], vcc, s[S1], v[BADDR]
 	V_ADD_CI_U32 v[EADDR+1], vcc, 0, v[BADDR+1], vcc
 	v_mov_b32 v[TMP], 0
-	s_waitcnt vmcnt(0)
+	KNOD_WAIT_STORES
 	global_store_dword v[EADDR:EADDR+1], v[TMP], off glc
-	s_waitcnt vmcnt(0)
+	KNOD_WAIT_STORES
 
 	// What is left is what came into this round less the bucket just done.
 	// Restoring the saved mask alone would bring the served lanes back and
