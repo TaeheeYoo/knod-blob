@@ -36,14 +36,14 @@
 # error "the key runs into the value"
 #endif
 
-// KNOD_BLOB_SPLICE_TMP_SREG (s48) upwards is ours to clobber.  Not s32-s35:
-// s[34:35] is the done mask and is live across a splice.
+// KNOD_BLOB_SPLICE_TMP_SREG (s46) upwards is ours to clobber.  Nothing below:
+// s[32:33] is the done mask and is live across a splice.
 #define S0		(KNOD_BLOB_SPLICE_TMP_SREG + 0)
 #define S1		(KNOD_BLOB_SPLICE_TMP_SREG + 1)
 #define S2		(KNOD_BLOB_SPLICE_TMP_SREG + 2)
 #define S3		(KNOD_BLOB_SPLICE_TMP_SREG + 3)
 
-// KNOD_BLOB_EXEC_SAVE_SREG (s36) upwards is ours to save EXEC in.
+// KNOD_BLOB_EXEC_SAVE_SREG (s34) upwards is ours to save EXEC in.
 #define XSAVE0		(KNOD_BLOB_EXEC_SAVE_SREG + 0)
 #define XSAVE1		(KNOD_BLOB_EXEC_SAVE_SREG + 2)
 #define XSAVE2		(KNOD_BLOB_EXEC_SAVE_SREG + 4)
