@@ -95,6 +95,9 @@ install: $(BLOBS)
 	install -d $(DESTDIR)$(FIRMWARE_DIR)
 	install -m 0644 $(BLOBS) $(DESTDIR)$(FIRMWARE_DIR)
 
+uninstall:
+	rm -f $(addprefix $(DESTDIR)$(FIRMWARE_DIR)/,$(notdir $(BLOBS)))
+
 # Rebuild with the HW_ID probe, which has every wave record the compute unit it
 # ran on.  Not the default: it is a store in the epilogue of every packet, on
 # the very path the probe exists to measure.  From scratch, because the flag
@@ -126,4 +129,4 @@ cycles:
 plain:
 	$(MAKE) EXTRA_CPPFLAGS=
 
-.PHONY: all install clean hwid cycles plain
+.PHONY: all install uninstall clean hwid cycles plain
