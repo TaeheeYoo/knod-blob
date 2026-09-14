@@ -48,7 +48,7 @@
 	v_mov_b32 v[P5], 0
 	v_mov_b32 v[P7], v[PAGE_IDX]
 	global_store_dwordx4 v[SLOT:SLOT+1], v[P4:P4+3], off \
-			     offset:KNOD_BLOB_BD_ACT STORE_BYPASS
+			     offset:KNOD_BLOB_BD_ACT glc slc
 
 #if defined(KNOD_HWID_PROBE)
 	// Which compute unit ran this wave, so the host can count how many one
@@ -70,7 +70,7 @@
 #endif
 	v_mov_b32 v[P5], s[PS6]
 	global_store_dword v[SLOT:SLOT+1], v[P5], off \
-			   offset:(KNOD_BLOB_BD_ACT + 4) STORE_BYPASS
+			   offset:(KNOD_BLOB_BD_ACT + 4) glc slc
 #endif
 
 	.endm
@@ -123,7 +123,7 @@
 	v_lshlrev_b32 v[P20], 1, v[P20]
 	V_ADD_U32 v[P18], v[P20], v[P18]
 	global_store_short v[P18:P18+1], v[IDX], off \
-			   offset:KNOD_BLOB_PARAM_PASS_INDICES STORE_BYPASS
+			   offset:KNOD_BLOB_PARAM_PASS_INDICES glc slc
 
 	// What used to follow wrote a {length, address} header into a delivery
 	// slot for this queue.  Nothing reads it: PASS goes to the host through
