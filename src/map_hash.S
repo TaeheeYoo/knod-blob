@@ -46,10 +46,18 @@
 // mask is put back at the end and the lanes that dropped out keep the zero
 // written up front, which is what a miss looks like.
 //
-.macro	DEFINE_LOOKUP_HASH n
+// @pc = 0 for a plain hash, 1 for a percpu hash whose value pointer is offset
+// by workgroup_id_y * per_instance_size to reach this instance's value slot.
+.macro	DEFINE_LOOKUP_HASH n, pc=0
+.if \pc
+	.globl knod_lookup_percpu_hash_k\n
+	.p2align 2
+knod_lookup_percpu_hash_k\n:
+.else
 	.globl knod_lookup_hash_k\n
 	.p2align 2
 knod_lookup_hash_k\n:
+.endif
 	s_load_dwordx2 s[S0:S0+1], s[DESC:DESC+1], DESC_BUCKET
 	s_load_dwordx2 s[S2:S2+1], s[DESC:DESC+1], DESC_ELEMS
 
@@ -86,7 +94,7 @@ knod_lookup_hash_k\n:
 	s_mov_b64 s[XSAVE0:XSAVE0+1], exec
 	v_mov_b32 v[NEND], KNOD_BPF_HASH_NEXT_END
 
-.Lnext\n:
+.Lnext_\n\()_\pc:
 	global_load_dword v[CHAIN], v[EADDR:EADDR+1], off MAP_COHERENT
 	s_waitcnt vmcnt(0)
 	// The top bit marks a deleted element; it is not part of the index.
@@ -95,7 +103,7 @@ knod_lookup_hash_k\n:
 	// Lanes that reached the end of their chain stop here.
 	v_cmp_eq_u32 vcc, v[NEND], v[CHAIN]
 	s_andn2_b64 exec, exec, vcc
-	s_cbranch_execz .Lout\n
+	s_cbranch_execz .Lout_\n\()_\pc
 
 	// elem = elems + elem_id * elem_size
 	s_load_dword s[S3], s[DESC:DESC+1], DESC_ELEM_SIZE
@@ -131,25 +139,40 @@ knod_lookup_hash_k\n:
 
 	// Matching lanes take the value and leave the walk.
 	s_and_saveexec_b64 s[XSAVE2:XSAVE2+1], s[XSAVE1:XSAVE1+1]
-	s_cbranch_execz .Lmiss\n
+	s_cbranch_execz .Lmiss_\n\()_\pc
+.if \pc
+	// This instance's slot: value_off + workgroup_id_y * per_instance_size.
+	s_load_dword s[S3], s[DESC:DESC+1], DESC_PER_INSTANCE
+	s_waitcnt lgkmcnt(0)
+	s_mul_i32 s[S3], s[S3], s[WG_Y]
+	s_add_i32 s[S3], s[S3], KNOD_BLOB_ELEM_VALUE_OFF(\n)
+	v_add_co_u32 v[RET], vcc, s[S3], v[EADDR]
+	V_ADD_CI_U32 v[RET+1], vcc, 0, v[EADDR+1], vcc
+.else
 	v_add_co_u32 v[RET], vcc, KNOD_BLOB_ELEM_VALUE_OFF(\n), v[EADDR]
 	V_ADD_CI_U32 v[RET+1], vcc, 0, v[EADDR+1], vcc
-.Lmiss\n:
+.endif
+.Lmiss_\n\()_\pc:
 	// exec = lanes still walking = (those that were walking) - (matched)
 	s_andn2_b64 exec, s[XSAVE2:XSAVE2+1], s[XSAVE1:XSAVE1+1]
-	s_cbranch_execz .Lout\n
+	s_cbranch_execz .Lout_\n\()_\pc
 
 	// Follow the chain.  v[EADDR:EADDR+1] already points at the element
 	// and its next index sits at offset zero, which is what .Lnext reloads.
-	s_branch .Lnext\n
+	s_branch .Lnext_\n\()_\pc
 
-.Lout\n:
+.Lout_\n\()_\pc:
 	s_mov_b64 exec, s[XSAVE0:XSAVE0+1]
 	KNOD_BLOB_RET
+.if \pc
+	.size knod_lookup_percpu_hash_k\n, . - knod_lookup_percpu_hash_k\n
+	.globl knod_lookup_percpu_hash_k\n\()_xsave
+	.set knod_lookup_percpu_hash_k\n\()_xsave, 3
+.else
 	.size knod_lookup_hash_k\n, . - knod_lookup_hash_k\n
-
 	.globl knod_lookup_hash_k\n\()_xsave
 	.set knod_lookup_hash_k\n\()_xsave, 3
+.endif
 .endm
 
 // One per DIV_ROUND_UP(key_size, 4) the JIT will accept.  Spelled out rather
@@ -169,6 +192,21 @@ knod_lookup_hash_k\n:
 	DEFINE_LOOKUP_HASH 12
 	DEFINE_LOOKUP_HASH 13
 	DEFINE_LOOKUP_HASH 14
+
+	DEFINE_LOOKUP_HASH 1, 1
+	DEFINE_LOOKUP_HASH 2, 1
+	DEFINE_LOOKUP_HASH 3, 1
+	DEFINE_LOOKUP_HASH 4, 1
+	DEFINE_LOOKUP_HASH 5, 1
+	DEFINE_LOOKUP_HASH 6, 1
+	DEFINE_LOOKUP_HASH 7, 1
+	DEFINE_LOOKUP_HASH 8, 1
+	DEFINE_LOOKUP_HASH 9, 1
+	DEFINE_LOOKUP_HASH 10, 1
+	DEFINE_LOOKUP_HASH 11, 1
+	DEFINE_LOOKUP_HASH 12, 1
+	DEFINE_LOOKUP_HASH 13, 1
+	DEFINE_LOOKUP_HASH 14, 1
 
 // The build concatenates every source into one file, so these names are
 // shared with whatever follows.  Handing them back keeps the next file's
