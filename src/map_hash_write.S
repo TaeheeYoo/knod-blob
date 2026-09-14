@@ -66,18 +66,26 @@
 	s_and_b64 exec, exec, vcc
 .endm
 
-// DEFINE_HASH_WRITE  n, mode
+// DEFINE_HASH_WRITE  n, mode, pc
 //
 //   mode 1  update:  the key's value is replaced, or the key is inserted
 //   mode 2  delete:  the key's element is unlinked and handed to the GC
+//   pc 1    the value is per-instance: stores land in this instance's slot,
+//           value_off + workgroup_id_y * per_instance_size (update only)
 //
 // r0 is zero either way: the emitter reports success for every lane, missing
 // key and full map included, and this keeps to that.
-.macro	DEFINE_HASH_WRITE n, mode
+.macro	DEFINE_HASH_WRITE n, mode, pc=0
 .if \mode == 1
+.if \pc
+	.globl knod_update_percpu_hash_k\n
+	.p2align 2
+knod_update_percpu_hash_k\n:
+.else
 	.globl knod_update_hash_k\n
 	.p2align 2
 knod_update_hash_k\n:
+.endif
 .else
 	.globl knod_delete_hash_k\n
 	.p2align 2
@@ -183,6 +191,14 @@ knod_delete_hash_k\n:
 	s_load_dword s[S0], s[DESC:DESC+1], DESC_VALUE_SIZE
 	s_waitcnt lgkmcnt(0)
 	s_lshr_b32 s[S1], s[S0], 2
+.if \pc
+	// This instance's slot: value_off + workgroup_id_y * per_instance_size.
+	s_load_dword s[S2], s[DESC:DESC+1], DESC_PER_INSTANCE
+	s_waitcnt lgkmcnt(0)
+	s_mul_i32 s[S2], s[S2], s[WG_Y]
+	v_add_co_u32 v[EADDR], vcc, s[S2], v[EADDR]
+	V_ADD_CI_U32 v[EADDR+1], vcc, 0, v[EADDR+1], vcc
+.endif
 	.set _i, 0
 	.rept KNOD_BLOB_VALUE_CHUNKS_MAX
 	s_cmp_ge_u32 s[S1], (_i + 1)
@@ -278,6 +294,16 @@ knod_delete_hash_k\n:
 	s_load_dword s[S0], s[DESC:DESC+1], DESC_VALUE_SIZE
 	s_waitcnt lgkmcnt(0)
 	s_lshr_b32 s[S1], s[S0], 2
+.if \pc
+	// A fresh element's other instance slots are left zero by the host
+	// clearing them before the element is put back on the free list; this
+	// lane only writes its own.
+	s_load_dword s[S2], s[DESC:DESC+1], DESC_PER_INSTANCE
+	s_waitcnt lgkmcnt(0)
+	s_mul_i32 s[S2], s[S2], s[WG_Y]
+	v_add_co_u32 v[EADDR], vcc, s[S2], v[EADDR]
+	V_ADD_CI_U32 v[EADDR+1], vcc, 0, v[EADDR+1], vcc
+.endif
 	.set _i, 0
 	.rept KNOD_BLOB_VALUE_CHUNKS_MAX
 	s_cmp_ge_u32 s[S1], (_i + 1)
@@ -320,9 +346,15 @@ knod_delete_hash_k\n:
 	s_mov_b64 exec, s[XSAVE0:XSAVE0+1]
 	KNOD_BLOB_RET
 .if \mode == 1
+.if \pc
+	.size knod_update_percpu_hash_k\n, . - knod_update_percpu_hash_k\n
+	.globl knod_update_percpu_hash_k\n\()_xsave
+	.set knod_update_percpu_hash_k\n\()_xsave, 5
+.else
 	.size knod_update_hash_k\n, . - knod_update_hash_k\n
 	.globl knod_update_hash_k\n\()_xsave
 	.set knod_update_hash_k\n\()_xsave, 5
+.endif
 .else
 	.size knod_delete_hash_k\n, . - knod_delete_hash_k\n
 	.globl knod_delete_hash_k\n\()_xsave
@@ -362,6 +394,21 @@ knod_delete_hash_k\n:
 	DEFINE_HASH_WRITE 12, 2
 	DEFINE_HASH_WRITE 13, 2
 	DEFINE_HASH_WRITE 14, 2
+
+	DEFINE_HASH_WRITE 1, 1, 1
+	DEFINE_HASH_WRITE 2, 1, 1
+	DEFINE_HASH_WRITE 3, 1, 1
+	DEFINE_HASH_WRITE 4, 1, 1
+	DEFINE_HASH_WRITE 5, 1, 1
+	DEFINE_HASH_WRITE 6, 1, 1
+	DEFINE_HASH_WRITE 7, 1, 1
+	DEFINE_HASH_WRITE 8, 1, 1
+	DEFINE_HASH_WRITE 9, 1, 1
+	DEFINE_HASH_WRITE 10, 1, 1
+	DEFINE_HASH_WRITE 11, 1, 1
+	DEFINE_HASH_WRITE 12, 1, 1
+	DEFINE_HASH_WRITE 13, 1, 1
+	DEFINE_HASH_WRITE 14, 1, 1
 
 // The build concatenates every source into one file, so these names are
 // shared with whatever follows.  Handing them back keeps the next file's
