@@ -155,6 +155,17 @@
 # define MAP_COHERENT	glc dlc
 #endif
 
+// What is touched once by one lane has no claim on an L2 line: the packet's
+// descriptor is read hit-no-allocate and the verdict written bypassing L2.
+// gfx9 has neither policy bit, so it streams instead.
+#if KNOD_ISA == 9
+# define PKT_STREAM	slc
+# define STORE_BYPASS	slc
+#else
+# define PKT_STREAM	slc dlc
+# define STORE_BYPASS	dlc
+#endif
+
 // The carry-less add and subtract keep their plain names on gfx9 and gfx11 but
 // not on gfx10, which only accepts the _nc spelling.
 #if KNOD_ISA == 10

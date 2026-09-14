@@ -103,7 +103,7 @@
 
 	// Which page the packet is on, and where in it.
 	global_load_dwordx2 v[P12:P12+1], v[SLOT:SLOT+1], off \
-			    offset:KNOD_BLOB_BD_OFF
+			    offset:KNOD_BLOB_BD_OFF PKT_STREAM
 	s_waitcnt vmcnt(0)
 
 	// data = base + (page_idx << page_shift).  The shift crosses 32 bits,
