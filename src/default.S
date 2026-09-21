@@ -17,13 +17,8 @@ knod_default_kernel:
 	s_endpgm
 
 	// Far enough that the prefetcher lands on something valid.  RDNA has an
-	// encoding that means exactly this; GFX9 has none, so repeat the one
-	// instruction that is safe to land on there.
+	// encoding that means exactly this.
 	.rept 191
-#if KNOD_ISA == 9
-	s_endpgm
-#else
 	s_code_end
-#endif
 	.endr
 	.size knod_default_kernel, . - knod_default_kernel

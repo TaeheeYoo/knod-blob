@@ -10,10 +10,9 @@ ASM_CPP		?= clang -x assembler-with-cpp -E
 
 # One container per feature, because the core has to bring up a queue before
 # any feature module is loaded and so cannot read the BPF JIT's blob.
-FEATURES	:= core bpf ipsec
+FEATURES	:= core
 SRC_core	:= src/default.S
-SRC_ipsec	:= src/ipsec.S
-SRC_bpf		:= $(filter-out $(SRC_core) $(SRC_ipsec),$(wildcard src/*.S))
+SRC_bpf-persistent := $(filter-out $(SRC_core),$(wildcard src/*.S))
 
 ABI_HDR		:= include/uapi/linux/knod_blob.h
 BUILD		:= build
@@ -31,21 +30,19 @@ EXTRA_CPPFLAGS	?= $(shell cat $(FLAGS_STAMP) 2>/dev/null)
 # .inc files that the .S files include, and leaving them out meant editing a
 # prologue or an epilogue built nothing.
 DEPS		:= $(wildcard src/*.S) $(wildcard src/*.inc) \
-		   $(wildcard src/ipsec/*) $(ABI_HDR) $(FLAGS_STAMP)
+		   $(ABI_HDR) $(FLAGS_STAMP) include/uapi/linux/knod_persistent.h
 FIRMWARE_DIR	?= /lib/firmware/knod
 
-# gfx10 and later default to wave32 and the JIT runs wave64, so they have to
-# be told; gfx9 has no such switch.
-ISAS		:= 9 10 11
-CPU_9		:= gfx900
+# Persistent-shader KNOD supports RDNA generations in Wave64 mode.
+ISAS		:= 10 11
 CPU_10		:= gfx1030
 CPU_11		:= gfx1100
-ATTR_9		:=
 ATTR_10		:= --mattr=+wavefrontsize64
 ATTR_11		:= --mattr=+wavefrontsize64
 
 BLOBS		:= $(foreach f,$(FEATURES),\
-		     $(foreach i,$(ISAS),$(BUILD)/knod-$(f)-gfx$(i).bin))
+		     $(foreach i,$(ISAS),$(BUILD)/knod-$(f)-gfx$(i).bin)) \
+		     $(foreach i,$(ISAS),$(BUILD)/knod-bpf-persistent-gfx$(i).bin)
 
 all: $(BLOBS)
 
@@ -76,7 +73,7 @@ $(BUILD)/$(1).$(2).text: $(BUILD)/$(1).$(2).o
 
 $(BUILD)/knod-$(1)-gfx$(2).bin: $(BUILD)/$(1).$(2).text $(BUILD)/$(1).$(2).o \
 				tools/pack.py $(ABI_HDR)
-	python3 tools/pack.py --isa $(2) --wave 64 \
+	python3 tools/pack.py --isa $(2) --wave 64 $(if $(filter bpf-persistent,$(1)),--persistent-shader,) \
 		--text $$< --obj $(BUILD)/$(1).$(2).o -o $$@
 
 dis-$(1)-$(2): $(BUILD)/$(1).$(2).o
@@ -86,6 +83,7 @@ endef
 
 $(foreach f,$(FEATURES),\
   $(foreach i,$(ISAS),$(eval $(call isa_rules,$(f),$(i)))))
+$(foreach i,$(ISAS),$(eval $(call isa_rules,bpf-persistent,$(i))))
 
 $(BUILD):
 	mkdir -p $@
@@ -106,7 +104,7 @@ uninstall:
 hwid:
 	$(MAKE) clean
 	$(MAKE) EXTRA_CPPFLAGS='-DKNOD_HWID_PROBE'
-	@grep -q s_getreg $(BUILD)/bpf.11.s || \
+	@grep -q s_getreg $(BUILD)/bpf-persistent.10.s || \
 		{ echo "hwid: probe is not in the build"; exit 1; }
 	@echo "hwid: probe built in; a plain 'make' leaves it out"
 
@@ -121,7 +119,7 @@ clean:
 # object left a probe out once and the missing field read as a real answer.
 cycles:
 	$(MAKE) EXTRA_CPPFLAGS='-DKNOD_CYCLE_PROBE'
-	@grep -q s_getreg $(BUILD)/bpf.11.s || { \
+	@grep -q s_getreg $(BUILD)/bpf-persistent.10.s || { \
 		echo "cycles: probe missing from the build" >&2; exit 1; }
 	@echo "cycles: probe present"
 

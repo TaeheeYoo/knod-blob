@@ -89,7 +89,14 @@ def main():
     ap.add_argument("--text", required=True, help="flat .text of all routines")
     ap.add_argument("--obj", required=True, help="object to read symbols from")
     ap.add_argument("-o", "--output", required=True)
+    ap.add_argument("--persistent-shader", action="store_true")
     args = ap.parse_args()
+    protocol = 0
+    if args.persistent_shader:
+        if args.isa not in (10, 11) or args.wave != 64:
+            sys.exit("persistent shader requires gfx10/gfx11 Wave64")
+        with open("include/uapi/linux/knod_persistent.h") as source:
+            protocol = int(re.search(r"^#define KNOD_PERSIST_VERSION (\S+)", source.read(), re.M)[1], 0)
 
     magic, abi, kinds = contract(HEADER)
 
@@ -115,7 +122,7 @@ def main():
 
     code_off = HDR_SIZE + ENTRY_SIZE * len(entries)
     blob = struct.pack(HDR, magic, abi, args.isa, LINK_SPLICE,
-                       args.wave, len(entries), HDR_SIZE, 0)
+                       args.wave, len(entries), HDR_SIZE, protocol)
     for kind, chunks, off, size, pairs in entries:
         blob += struct.pack(ENTRY, kind, chunks, code_off + off, size, pairs, 0)
     blob += code

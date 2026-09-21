@@ -5,15 +5,18 @@
 
 #ifndef PROLOGUE_INC
 #define PROLOGUE_INC
+#include <linux/knod_persistent.h>
+#if KNOD_ISA != 10 && KNOD_ISA != 11
+#error "persistent shader requires GFX10/GFX11 Wave64"
+#endif
 
 	.macro KNOD_PROLOGUE_BODY
 	// A re-uploaded shader can land on the address an old one is still
 	// cached at.  This must be the first instruction so that whichever
 	// version the SQC is serving runs it before the two diverge.
 	//
-	// Waves are per packet, so throwing the instruction cache away is a
-	// per-packet cost rather than a per-dispatch one, and it is worth being
-	// able to price.  KNOD_NO_ICACHE_INV builds it out for that, and is
+	// The invalidate runs once when a persistent shader lifetime starts.
+	// KNOD_NO_ICACHE_INV builds it out for controlled measurements, and is
 	// only safe while nothing re-uploads a shader - no attach, no program
 	// change - for the length of the run.
 #if !defined(KNOD_NO_ICACHE_INV)
@@ -27,19 +30,65 @@
 	s_getreg_b32 s[PROBE0], hwreg(HW_REG_SHADER_CYCLES, 0, 20)
 #endif
 
-	s_load_dwordx2 s[PARAM:PARAM+1], s[DISPATCH:DISPATCH+1], \
-		       KNOD_BLOB_AQL_KERNARG
+	// Protected persistent-launch SGPRs: 0=physical wave TID base,
+	// 2=mailbox batch slot, 6:7=loop PC, 8:9=control,
+	// 10:11=expected sequence. The BPF body/helpers must not write them.
+	// Kernel descriptor enables the stable kernarg pointer in s[8:9].
+	v_readfirstlane_b32 s0, v[TID]
+	s_and_b32 s0, s0, 1023
+	s_mov_b32 s2, 0
+	s_mov_b64 s[10:11], 1
+	s_waitcnt lgkmcnt(0)
+	s_getpc_b64 s[6:7]
+.Lpersistent_poll\@:
+	s_mov_b64 exec, -1
+	v_mov_b32 v[P0], s8
+	v_mov_b32 v[P1], s9
+	global_load_dwordx2 v[P2:P2+1], v[P0:P0+1], off glc dlc
+	s_waitcnt vmcnt(0)
+	v_readfirstlane_b32 s[PS0], v[P2]
+	s_cmp_eq_u32 s[PS0], KNOD_PERSIST_VERSION
+	s_cbranch_scc0 .Lpersistent_exit\@
+	v_readfirstlane_b32 s[PS0], v[P3]
+	s_cmp_eq_u32 s[PS0], 0
+	s_cbranch_scc0 .Lpersistent_exit\@
+	s_lshl_b32 s[PS0], s2, 9
+	s_add_u32 s[PS0], s[PS0], KNOD_PERSIST_SLOT_BASE
+	v_add_co_u32 v[P0], vcc, s[PS0], v[P0]
+	V_ADD_CI_U32 v[P1], vcc, 0, v[P1], vcc
+	global_load_dwordx2 v[P2:P2+1], v[P0:P0+1], off glc dlc
+	s_waitcnt vmcnt(0)
+	v_readfirstlane_b32 s[PS0], v[P2]
+	v_readfirstlane_b32 s[PS1], v[P3]
+	s_cmp_eq_u64 s[PS0:PS1], s[10:11]
+	s_cbranch_scc1 .Lpersistent_ready\@
+	s_sleep 1
+	s_branch .Lpersistent_poll\@
+.Lpersistent_exit\@:
+	s_endpgm
+.Lpersistent_ready\@:
+	// Acquire the submitted batch before reading reused parameters/data.
+	buffer_gl1_inv
+	buffer_gl0_inv
+	s_dcache_inv
+	global_load_dwordx2 v[P2:P2+1], v[P0:P0+1], off offset:KNOD_PERSIST_PARAM glc dlc
+	s_waitcnt vmcnt(0)
+	v_readfirstlane_b32 s[PARAM], v[P2]
+	v_readfirstlane_b32 s[PARAM+1], v[P3]
+	v_mbcnt_lo_u32_b32 v[TID], -1, 0
+	v_mbcnt_hi_u32_b32 v[TID], -1, v[TID]
+	V_ADD_U32 v[TID], s0, v[TID]
 
 	// The workitem id arrives packed in the low bits of v0.
-	v_bfe_i32 v[IDX], v[TID], 0, 10
+	v_bfe_u32 v[IDX], v[TID], 0, 10
 	s_mov_b32 s[FRAME], 0
 	s_waitcnt lgkmcnt(0)
 
-	// The shift counts, in the two pairs they sit in.  Issued but not
+	// Batch/WG sizes and page/ring shifts, in two pairs. Issued but not
 	// waited for: the queue address below needs only the param pointer, so
 	// the descriptor fetch can be in flight while these land.
 	s_load_dwordx2 s[PS2:PS2+1], s[PARAM:PARAM+1], \
-		       KNOD_BLOB_PARAM_BATCH_SHIFT
+		       KNOD_BLOB_PARAM_PACKETS_PER_RXQ
 	s_load_dwordx2 s[PS4:PS4+1], s[PARAM:PARAM+1], \
 		       KNOD_BLOB_PARAM_PAGE_SHIFT
 
@@ -60,12 +109,12 @@
 
 	s_mov_b64 s[DONE_MASK:DONE_MASK+1], 0
 
-	// idx = (workgroup_id_x << wg_shift) + workitem_id.  The shift count
+	// idx = workgroup_id_x * workgroup_size + workitem_id. The size
 	// is a scalar now, so the group id comes across to a VGPR first rather
 	// than putting a second scalar on the constant bus.
 	s_waitcnt lgkmcnt(0)
 	v_mov_b32 v[P14], s[WG_X]
-	v_lshlrev_b32 v[P14], s[PS2+1], v[P14]
+	v_mul_lo_u32 v[P14], s[PS2+1], v[P14]
 	V_ADD_U32 v[IDX], v[P14], v[IDX]
 
 	s_waitcnt vmcnt(0)
@@ -80,7 +129,8 @@
 	// an index across all of them.
 	v_mov_b32 v[P18], v[IDX]
 	v_mov_b32 v[P14], s[WG_Y]
-	v_lshl_add_u32 v[IDX], v[P14], s[PS2], v[IDX]
+	v_mul_lo_u32 v[P14], s[PS2], v[P14]
+	V_ADD_U32 v[IDX], v[P14], v[IDX]
 
 	// r1 = &param->sub[idx], the xdp_md the program is called with.
 	v_mad_u64_u32 v[BPF_R1:BPF_R1+1], s[PS0:PS0+1], KNOD_BLOB_SUB_SIZE, \
