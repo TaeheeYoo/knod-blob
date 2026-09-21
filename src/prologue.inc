@@ -31,15 +31,15 @@
 		       KNOD_BLOB_AQL_KERNARG
 
 	// The workitem id arrives packed in the low bits of v0.
-	v_bfe_i32 v[IDX], v[TID], 0, 10
+	v_bfe_u32 v[IDX], v[TID], 0, 10
 	s_mov_b32 s[FRAME], 0
 	s_waitcnt lgkmcnt(0)
 
-	// The shift counts, in the two pairs they sit in.  Issued but not
+	// Batch/WG sizes and page/ring shifts, in two pairs. Issued but not
 	// waited for: the queue address below needs only the param pointer, so
 	// the descriptor fetch can be in flight while these land.
 	s_load_dwordx2 s[PS2:PS2+1], s[PARAM:PARAM+1], \
-		       KNOD_BLOB_PARAM_BATCH_SHIFT
+		       KNOD_BLOB_PARAM_BATCH_SIZE
 	s_load_dwordx2 s[PS4:PS4+1], s[PARAM:PARAM+1], \
 		       KNOD_BLOB_PARAM_PAGE_SHIFT
 
@@ -60,12 +60,12 @@
 
 	s_mov_b64 s[DONE_MASK:DONE_MASK+1], 0
 
-	// idx = (workgroup_id_x << wg_shift) + workitem_id.  The shift count
+	// idx = workgroup_id_x * workgroup_size + workitem_id. The size
 	// is a scalar now, so the group id comes across to a VGPR first rather
 	// than putting a second scalar on the constant bus.
 	s_waitcnt lgkmcnt(0)
 	v_mov_b32 v[P14], s[WG_X]
-	v_lshlrev_b32 v[P14], s[PS2+1], v[P14]
+	v_mul_lo_u32 v[P14], s[PS2+1], v[P14]
 	V_ADD_U32 v[IDX], v[P14], v[IDX]
 
 	s_waitcnt vmcnt(0)
@@ -80,7 +80,8 @@
 	// an index across all of them.
 	v_mov_b32 v[P18], v[IDX]
 	v_mov_b32 v[P14], s[WG_Y]
-	v_lshl_add_u32 v[IDX], v[P14], s[PS2], v[IDX]
+	v_mul_lo_u32 v[P14], s[PS2], v[P14]
+	V_ADD_U32 v[IDX], v[P14], v[IDX]
 
 	// r1 = &param->sub[idx], the xdp_md the program is called with.
 	v_mad_u64_u32 v[BPF_R1:BPF_R1+1], s[PS0:PS0+1], KNOD_BLOB_SUB_SIZE, \

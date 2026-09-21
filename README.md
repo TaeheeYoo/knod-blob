@@ -31,8 +31,10 @@ The prologue has to come out the same as what the kernel's own JIT emits.
 
     knod-blob-check /sys/kernel/debug/dri/128/knod/bpf/insn build/knod-bpf-gfx10.bin
 
-Only gfx10 has been checked against real hardware. The gfx11 image assembles,
-but nothing has confirmed it matches that generation's JIT output on hardware.
+The runtime passes the actual batch and workgroup sizes, allowing the RDNA
+firmware to serve the supported WG256, WG512, and WG768 geometries. Only gfx10
+has been checked against real hardware. The gfx11 image assembles, but nothing
+has confirmed it matches that generation's JIT output on hardware.
 
 ## Requires
 
