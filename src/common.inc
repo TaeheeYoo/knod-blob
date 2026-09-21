@@ -2,7 +2,7 @@
 //
 // Short names for the register assignment the kernel publishes.  Everything
 // numeric comes from the uapi header so the two cannot drift; only spelling
-// and the ISA shims live here.
+// and the RDNA ISA shims live here.
 //
 // Names are register numbers rather than operands so they work in range
 // syntax: v[KEY] for one, v[KEY:KEY+1] for a pair.
@@ -74,9 +74,8 @@
 #define PAGE_BASE	KNOD_BLOB_PRO_PAGE_BASE_VREG
 #define PAGE_IDX	KNOD_BLOB_PRO_PAGE_IDX_VREG
 
-// A probe build times three parts of the shader.  GFX9 has no counter to read,
-// so a build for it leaves the whole thing out rather than reporting zeroes.
-#if defined(KNOD_CYCLE_PROBE) && KNOD_ISA >= 10
+// A probe build times three parts of the shader.
+#if defined(KNOD_CYCLE_PROBE)
 # define KNOD_CYCLES	1
 #endif
 #define PROBE0		(KNOD_BLOB_PROBE_SREG + 0)
@@ -138,25 +137,13 @@
 #define DESC_HASHRND		KNOD_BLOB_DESC_HASHRND
 #define DESC_FREE_CUR		KNOD_BLOB_DESC_FREE_CUR
 
-// Mnemonics that were renamed after gfx9.  The encodings differ too, so this
-// is a spelling shim, not a compatibility layer.
-#if KNOD_ISA == 9
-# define V_ADD_CI_U32	v_addc_co_u32
-#else
-# define V_ADD_CI_U32	v_add_co_ci_u32
-#endif
+#define V_ADD_CI_U32	v_add_co_ci_u32
 
 // A map is written by other CUs, so a load of one has to miss the caches that
 // are not shared with them.  Goes last on the instruction, after any offset.
-// gfx9 has no dlc bit; glc is the whole of what it offers.
-#if KNOD_ISA == 9
-# define MAP_COHERENT	glc
-#else
-# define MAP_COHERENT	glc dlc
-#endif
+#define MAP_COHERENT	glc dlc
 
-// The carry-less add and subtract keep their plain names on gfx9 and gfx11 but
-// not on gfx10, which only accepts the _nc spelling.
+// GFX10 requires the _nc spelling; GFX11 uses the plain spelling.
 #if KNOD_ISA == 10
 # define V_ADD_U32	v_add_nc_u32
 # define V_SUB_U32	v_sub_nc_u32
@@ -175,13 +162,9 @@
 # define KNOD_BLOB_RET
 #endif
 
-// GFX10+ tracks non-returning vector stores separately from loads.
+// RDNA tracks non-returning vector stores separately from loads.
 .macro KNOD_WAIT_STORES
-#if KNOD_ISA >= 10
 	s_waitcnt_vscnt null, 0
-#else
-	s_waitcnt vmcnt(0)
-#endif
 .endm
 
 #endif /* COMMON_INC */

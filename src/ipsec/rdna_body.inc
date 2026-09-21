@@ -1414,7 +1414,7 @@
 .Lf026:
 
 	// Phase 12: GPU-initiated SDMA dispatch (thread 0 only)
-	// Identical logic to GFX9 Phase 12.  See ipsec_fused_gfx9.h
+	// Complete the authenticated-decrypt pipeline and publish its verdict.
 	// for the full protocol description.
 	// GPU writes SDMA COPY_LINEAR packets only.  FENCE, wptr update,
 	// and doorbell are left to the CPU.

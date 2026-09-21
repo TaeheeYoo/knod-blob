@@ -6,9 +6,8 @@ generation and installed as firmware.
     make
     sudo make install          # /lib/firmware/knod/knod-bpf-gfx<n>.bin
 
-One source is assembled for every generation; what differs between them lives
-in `src/common.inc`, and today that is two mnemonics that were renamed and two
-scalars the JIT places differently. Everything else - opcode numbers, field
+One source is assembled for both supported RDNA generations; what differs
+between them lives in `src/common.inc`. Everything else - opcode numbers, field
 layouts, the pitfalls each generation brought - is the assembler's problem
 rather than ours.
 
@@ -32,8 +31,8 @@ The prologue has to come out the same as what the kernel's own JIT emits.
 
     knod-blob-check /sys/kernel/debug/dri/128/knod/bpf/insn build/knod-bpf-gfx10.bin
 
-Only gfx10 has been checked against real hardware. The other two assemble, but
-nothing has confirmed they match what those generations' JIT would emit.
+Only gfx10 has been checked against real hardware. The gfx11 image assembles,
+but nothing has confirmed it matches that generation's JIT output on hardware.
 
 ## Requires
 

@@ -34,13 +34,10 @@ DEPS		:= $(wildcard src/*.S) $(wildcard src/*.inc) \
 		   $(wildcard src/ipsec/*) $(ABI_HDR) $(FLAGS_STAMP)
 FIRMWARE_DIR	?= /lib/firmware/knod
 
-# gfx10 and later default to wave32 and the JIT runs wave64, so they have to
-# be told; gfx9 has no such switch.
-ISAS		:= 9 10 11
-CPU_9		:= gfx900
+# RDNA defaults to wave32 and the JIT runs wave64, so it has to be told.
+ISAS		:= 10 11
 CPU_10		:= gfx1030
 CPU_11		:= gfx1100
-ATTR_9		:=
 ATTR_10		:= --mattr=+wavefrontsize64
 ATTR_11		:= --mattr=+wavefrontsize64
 

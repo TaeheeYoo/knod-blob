@@ -63,11 +63,7 @@
 	// the same everywhere: GCN keeps this in HW_ID, RDNA split it and put
 	// the unit in HW_ID1.  They pack the fields differently too, so the
 	// host decodes by generation rather than the shader normalising it.
-#if KNOD_ISA == 9
-	s_getreg_b32 s[PS6], hwreg(4, 0, 32)		// HW_ID
-#else
 	s_getreg_b32 s[PS6], hwreg(23, 0, 32)		// HW_ID1
-#endif
 	v_mov_b32 v[P5], s[PS6]
 	global_store_dword v[SLOT:SLOT+1], v[P5], off \
 			   offset:(KNOD_BLOB_BD_ACT + 4) glc slc
