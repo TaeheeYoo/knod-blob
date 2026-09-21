@@ -10,10 +10,9 @@ ASM_CPP		?= clang -x assembler-with-cpp -E
 
 # One container per feature, because the core has to bring up a queue before
 # any feature module is loaded and so cannot read the BPF JIT's blob.
-FEATURES	:= core bpf ipsec
+FEATURES	:= core bpf
 SRC_core	:= src/default.S
-SRC_ipsec	:= src/ipsec.S
-SRC_bpf		:= $(filter-out $(SRC_core) $(SRC_ipsec),$(wildcard src/*.S))
+SRC_bpf		:= $(filter-out $(SRC_core),$(wildcard src/*.S))
 
 ABI_HDR		:= include/uapi/linux/knod_blob.h
 BUILD		:= build
@@ -31,7 +30,7 @@ EXTRA_CPPFLAGS	?= $(shell cat $(FLAGS_STAMP) 2>/dev/null)
 # .inc files that the .S files include, and leaving them out meant editing a
 # prologue or an epilogue built nothing.
 DEPS		:= $(wildcard src/*.S) $(wildcard src/*.inc) \
-		   $(wildcard src/ipsec/*) $(ABI_HDR) $(FLAGS_STAMP)
+		   $(ABI_HDR) $(FLAGS_STAMP)
 FIRMWARE_DIR	?= /lib/firmware/knod
 
 # RDNA defaults to wave32 and the JIT runs wave64, so it has to be told.

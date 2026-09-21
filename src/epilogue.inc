@@ -58,8 +58,8 @@
 	//
 	// It goes in the half of act nothing reads on this path: the driver
 	// takes the verdict as a u32 and the shader stores it as one, so bytes
-	// 12..15 are untouched.  IPsec does read them, so this is a BPF-only
-	// build.  The register goes by number because the name is not spelled
+	// 12..15 are untouched. The register goes by number because the name is
+	// not spelled
 	// the same everywhere: GCN keeps this in HW_ID, RDNA split it and put
 	// the unit in HW_ID1.  They pack the fields differently too, so the
 	// host decodes by generation rather than the shader normalising it.
