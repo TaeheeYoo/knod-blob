@@ -20,8 +20,7 @@ knod_pass_kernel:
 	KNOD_PROLOGUE_BODY
 
 	// Every lane that had a packet is finished, and finished with PASS.
-	// Saying so here is what lets the epilogue below be the ordinary one:
-	// it turns lanes back on by the done mask, and this claims them all.
+	// The common persistent-shader epilogue restores lanes from the done mask.
 	s_mov_b64 s[DONE_MASK:DONE_MASK+1], s[INITIAL_EXEC:INITIAL_EXEC+1]
 	v_mov_b32 v[BPF_R0], XDP_PASS
 

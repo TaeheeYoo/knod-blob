@@ -6,10 +6,8 @@
 // the packet's bounds, and the address of the buffer descriptor the epilogue
 // will write back to.  Lanes with no packet are switched off and stay off.
 //
-// Two things follow the program rather than the hardware and are emitted by
-// the JIT after this: zeroing the EXEC-save scalars, one per pair the control
-// flow needs, and preloading the packet cache, one load per sixteen bytes the
-// program reaches into.
+// The JIT follows this by zeroing the EXEC-save scalars, one per pair the
+// program's control flow needs.
 
 #include "common.inc"
 #include "prologue.inc"
