@@ -24,12 +24,6 @@
 	s_waitcnt vmcnt(0) lgkmcnt(0)
 #endif
 
-#ifdef KNOD_CYCLES
-	// Where the shader's time goes.  s_getreg reads a register, so it waits
-	// on nothing and adds only its own issue to whichever part it closes.
-	s_getreg_b32 s[PROBE0], hwreg(HW_REG_SHADER_CYCLES, 0, 20)
-#endif
-
 	// Protected persistent-launch SGPRs: 0=physical wave TID base,
 	// 2=mailbox batch slot, 6:7=loop PC, 8:9=control,
 	// 10:11=expected sequence. The BPF body/helpers must not write them.
@@ -67,6 +61,16 @@
 .Lpersistent_exit\@:
 	s_endpgm
 .Lpersistent_ready\@:
+#ifdef KNOD_CYCLES
+	// Where the shader's time goes.  s_getreg reads a register, so it waits
+	// on nothing and adds only its own issue to whichever part it closes.
+	//
+	// It reads here, past the wait and inside the loop, so that the first
+	// part is what a batch costs rather than how long the mailbox sat
+	// empty - which no lane spends working, and which a twenty-bit counter
+	// would wrap on anyway.
+	s_getreg_b32 s[PROBE0], hwreg(HW_REG_SHADER_CYCLES, 0, 20)
+#endif
 	// Acquire the submitted batch before reading reused parameters/data.
 	buffer_gl1_inv
 	buffer_gl0_inv
