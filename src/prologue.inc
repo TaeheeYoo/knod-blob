@@ -68,9 +68,22 @@
 	s_endpgm
 .Lpersistent_ready\@:
 	// Acquire the submitted batch before reading reused parameters/data.
+	//
+	// One wave does it for the workgroup.  In CU mode all four share the
+	// CU's L0 and scalar cache, so three of the invalidates buy nothing,
+	// and because each wave arrives on its own reading of the mailbox a
+	// late one would throw away what an early one had already fetched.
+	// GL1 is wider than the workgroup - a whole shader array - so every
+	// extra invalidate is also paid by the queues running beside this one.
+	s_cmp_eq_u32 s0, 0
+	s_cbranch_scc0 .Lpersistent_acquired\@
 	buffer_gl1_inv
 	buffer_gl0_inv
 	s_dcache_inv
+	s_waitcnt vmcnt(0) lgkmcnt(0)
+.Lpersistent_acquired\@:
+	// Nobody reads the batch until that invalidate has landed.
+	s_barrier
 	global_load_dwordx2 v[P2:P2+1], v[P0:P0+1], off offset:KNOD_PERSIST_PARAM glc dlc
 	s_waitcnt vmcnt(0)
 	v_readfirstlane_b32 s[PARAM], v[P2]
