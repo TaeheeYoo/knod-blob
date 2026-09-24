@@ -393,6 +393,11 @@ struct knod_blob_map_desc {
  * uses, so it survives the program.
  */
 #define KNOD_BLOB_PRO_TX_PC_VREG	73
+/* GDA: what the ring-running prologue and epilogue keep across a program,
+ * v73-v75, in place of the TX WQE counter the batch path keeps there.
+ */
+#define KNOD_BLOB_PRO_GDA_VREG		73
+#define KNOD_BLOB_PRO_GDA_VREGS		3
 
 /* Scratch it may use while doing so, which is the same window a map routine
  * gets, plus the scalars nothing holds across a dispatch.
