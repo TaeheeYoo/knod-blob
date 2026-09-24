@@ -2,7 +2,7 @@
 #ifndef _KNOD_PERSISTENT_H
 #define _KNOD_PERSISTENT_H
 /* One workgroup per RX queue; no X dimension multiplier. */
-#define KNOD_PERSIST_VERSION 0x4b500004
+#define KNOD_PERSIST_VERSION 0x4b500005
 #define KNOD_PERSIST_SLOTS 3
 #define KNOD_PERSIST_SLOT_BASE 64
 #define KNOD_PERSIST_SLOT_BYTES 512
@@ -11,6 +11,11 @@
 #define KNOD_PERSIST_DONE 64
 #define KNOD_PERSIST_MAX_QUEUES 32
 #define KNOD_PERSIST_STOP 4
+/* u64 per queue: where this queue's NIC TX doorbell is in the GPU's address
+ * space.  Written once when a shader lifetime starts, zero when the NIC
+ * publishes none.  Sits past the slots, so no slot offset moves.
+ */
+#define KNOD_PERSIST_TX_DB 1600
 #ifndef __ASSEMBLY__
 #include <linux/types.h>
 struct knod_persistent_slot {
@@ -26,6 +31,7 @@ struct knod_persistent_control {
 	u32 stop;
 	u8 reserved[56];
 	struct knod_persistent_slot slots[KNOD_PERSIST_SLOTS];
+	u64 tx_db[KNOD_PERSIST_MAX_QUEUES];
 };
 #endif
 #endif
