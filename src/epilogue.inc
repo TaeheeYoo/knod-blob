@@ -107,17 +107,17 @@
 	// ctrl: opmod_idx_opcode and qpn_ds, both big endian, then fm_ce_se.
 	v_and_b32 v[P10], 0xffff, v[TX_PC]
 	v_lshlrev_b32 v[P10], 8, v[P10]
-	v_mov_b32 v[P11], KNOD_MLX5_OPCODE_SEND
-	v_cndmask_b32_e64 v[P11], KNOD_MLX5_OPCODE_NOP, v[P11], s[PS4:PS4+1]
-	v_or_b32 v[P10], v[P10], v[P11]
+	v_mov_b32 v[P10+1], KNOD_MLX5_OPCODE_SEND
+	v_cndmask_b32_e64 v[P10+1], KNOD_MLX5_OPCODE_NOP, v[P10+1], s[PS4:PS4+1]
+	v_or_b32 v[P10], v[P10], v[P10+1]
 	v_perm_b32 v[P0], v[P10], v[P10], 0x00010203
 	v_lshlrev_b32 v[P10], 8, v[P32]
-	v_mov_b32 v[P11], KNOD_MLX5_SEND_DS
-	v_cndmask_b32_e64 v[P11], KNOD_MLX5_NOP_DS, v[P11], s[PS4:PS4+1]
-	v_or_b32 v[P10], v[P10], v[P11]
+	v_mov_b32 v[P10+1], KNOD_MLX5_SEND_DS
+	v_cndmask_b32_e64 v[P10+1], KNOD_MLX5_NOP_DS, v[P10+1], s[PS4:PS4+1]
+	v_or_b32 v[P10], v[P10], v[P10+1]
 	v_perm_b32 v[P0+1], v[P10], v[P10], 0x00010203
-	v_mov_b32 v[P11], (KNOD_MLX5_CTRL_CQ_UPDATE << 24)
-	v_cndmask_b32_e64 v[P0+2], 0, v[P11], s[PS2:PS2+1]
+	v_mov_b32 v[P10+1], (KNOD_MLX5_CTRL_CQ_UPDATE << 24)
+	v_cndmask_b32_e64 v[P0+2], 0, v[P10+1], s[PS2:PS2+1]
 	v_mov_b32 v[P0+3], 0
 
 	// eth: nothing inlined, no offloads.
