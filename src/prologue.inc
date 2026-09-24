@@ -41,6 +41,51 @@
 	s_waitcnt lgkmcnt(0)
 	s_getpc_b64 s[6:7]
 .Lpersistent_poll\@:
+	// GDA spike: make the TX doorbell write the NIC left for this queue.
+	// The NIC has already moved the doorbell record past its WQEs and put
+	// the 8 bytes it would have written to the UAR in tx_kick.pending; the
+	// shader writes them.  pending and rung each have one writer, so the two
+	// differing is the whole signal and a publish the shader missed is simply
+	// covered by the next one.  One lane of one wave does it for the queue.
+	//
+	// Checked on every pass through the loop, ready batch or not: under load
+	// the next batch is often already waiting, and a check made only while
+	// idle would never run.
+	s_cmp_eq_u32 s0, 0
+	s_cbranch_scc0 .Lpersistent_kicked\@
+	s_mov_b64 exec, 1
+	s_lshl_b32 s[PS0], s[WG_Y], 4
+	s_add_u32 s[PS0], s[PS0], KNOD_PERSIST_TX_KICK
+	v_mov_b32 v[P0], s8
+	v_mov_b32 v[P1], s9
+	v_add_co_u32 v[P0], vcc, s[PS0], v[P0]
+	V_ADD_CI_U32 v[P1], vcc, 0, v[P1], vcc
+	global_load_dwordx4 v[P2:P2+3], v[P0:P0+1], off glc dlc
+	s_waitcnt vmcnt(0)
+	v_readfirstlane_b32 s[PS0], v[P2]
+	v_readfirstlane_b32 s[PS1], v[P3]
+	v_readfirstlane_b32 s[PS2], v[P4]
+	v_readfirstlane_b32 s[PS2+1], v[P5]
+	s_cmp_eq_u64 s[PS0:PS1], s[PS2:PS2+1]
+	s_cbranch_scc1 .Lpersistent_kicked\@
+	// Where this queue's doorbell sits in our address space; zero if the
+	// kernel could not map one, and then nothing is rung.
+	s_lshl_b32 s[PS4], s[WG_Y], 3
+	s_add_u32 s[PS4], s[PS4], KNOD_PERSIST_TX_DB
+	v_mov_b32 v[P6], s8
+	v_mov_b32 v[P7], s9
+	v_add_co_u32 v[P6], vcc, s[PS4], v[P6]
+	V_ADD_CI_U32 v[P7], vcc, 0, v[P7], vcc
+	global_load_dwordx2 v[P8:P8+1], v[P6:P6+1], off glc dlc
+	s_waitcnt vmcnt(0)
+	v_readfirstlane_b32 s[PS4], v[P8]
+	v_readfirstlane_b32 s[PS4+1], v[P9]
+	s_cmp_eq_u64 s[PS4:PS4+1], 0
+	s_cbranch_scc1 .Lpersistent_kicked\@
+	global_store_dwordx2 v[P8:P8+1], v[P2:P2+1], off glc dlc
+	global_store_dwordx2 v[P0:P0+1], v[P2:P2+1], off offset:8 glc dlc
+	s_waitcnt_vscnt null, 0
+.Lpersistent_kicked\@:
 	s_mov_b64 exec, -1
 	v_mov_b32 v[P0], s8
 	v_mov_b32 v[P1], s9
