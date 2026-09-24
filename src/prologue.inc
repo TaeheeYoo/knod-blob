@@ -168,6 +168,9 @@
 	global_load_dwordx4 v[P2:P2+3], v[P0:P0+1], off
 	global_load_dwordx4 v[P6:P6+3], v[P0:P0+1], off \
 			    offset:KNOD_BLOB_QUEUE_COUNT
+	// GDA: which ring position WQE counter 0 is, for the lane's counter.
+	global_load_dword v[P20], v[P0:P0+1], off \
+			  offset:KNOD_BLOB_QUEUE_TX_PC_BASE
 
 	s_mov_b64 s[DONE_MASK:DONE_MASK+1], 0
 
@@ -208,6 +211,10 @@
 
 	// slot = (ring_start + idx) & ring_mask, and the descriptor for it.
 	V_ADD_U32 v[P10], v[P6+2], v[P18]
+	// GDA: the lane's TX WQE counter, which the epilogue writes its WQE
+	// at when the queue's SQ is on accel memory.  Meaningless otherwise,
+	// and then nothing reads it.
+	V_SUB_U32 v[TX_PC], v[P10], v[P20]
 	v_and_b32 v[P10], v[P6+3], v[P10]
 	v_lshlrev_b32 v[SLOT], s[PS4+1], v[P10]
 	v_add_co_u32 v[SLOT], vcc, v[SLOT], v[P2]

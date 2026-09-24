@@ -7,6 +7,13 @@
 #define EPILOGUE_INC
 #include <linux/knod_persistent.h>
 
+// The mlx5 send WQE the GDA path writes: the fields it sets, nothing more.
+#define KNOD_MLX5_OPCODE_NOP		0x00
+#define KNOD_MLX5_OPCODE_SEND		0x0a
+#define KNOD_MLX5_CTRL_CQ_UPDATE	0x08	// fm_ce_se
+#define KNOD_MLX5_NOP_DS		1	// ctrl only
+#define KNOD_MLX5_SEND_DS		3	// ctrl, eth, one data segment
+
 	.macro KNOD_EPILOGUE_PRE_BODY
 #ifdef KNOD_CYCLES
 	// The program is over, so its count is known and both finished counts
@@ -50,6 +57,90 @@
 	v_mov_b32 v[P7], v[PAGE_IDX]
 	global_store_dwordx4 v[SLOT:SLOT+1], v[P4:P4+3], off \
 			     offset:KNOD_BLOB_BD_ACT glc slc
+
+	// GDA stage 1: the NIC's WQE for this lane's packet, when the queue's
+	// XDP SQ is on accel memory.  Every in-bounds lane writes one - a send
+	// for XDP_TX, a NOP for anything else - at its own counter, so the
+	// host's books, kept one slot per descriptor in ring order, line up
+	// with no count passed between them.  The SQ is uncached: a WQE is in
+	// memory, where the NIC reads it, once its store completes, and the
+	// wait before the batch is marked done covers these too.
+	v_mov_b32 v[P10], s[WG_Y]
+	v_mad_u64_u32 v[P8:P8+1], s[PS0:PS0+1], KNOD_BLOB_QUEUE_SIZE, \
+		      v[P10], s[PARAM:PARAM+1]
+	v_add_co_u32 v[P8], vcc, KNOD_BLOB_PARAM_QUEUES, v[P8]
+	V_ADD_CI_U32 v[P8+1], vcc, 0, v[P8+1], vcc
+	global_load_dwordx4 v[P24:P24+3], v[P8:P8+1], off \
+			    offset:KNOD_BLOB_QUEUE_COUNT
+	global_load_dwordx4 v[P28:P28+3], v[P8:P8+1], off \
+			    offset:KNOD_BLOB_QUEUE_TX_SQ
+	global_load_dwordx4 v[P32:P32+3], v[P8:P8+1], off \
+			    offset:KNOD_BLOB_QUEUE_TX_SQN
+	s_waitcnt vmcnt(0)
+	// Every live lane is on the same queue, so this goes one way for all.
+	v_cmp_ne_u64_e32 vcc, 0, v[P28:P28+1]
+	s_and_b64 vcc, vcc, exec
+	s_cbranch_vccz .Lgda_wqe_done\@
+
+	// sq + ((counter & mask) << 6): one 64-byte basic block each.
+	v_and_b32 v[P10], v[TX_PC], v[P32+3]
+	v_lshlrev_b32 v[P10], 6, v[P10]
+	v_add_co_u32 v[P8], vcc, v[P28], v[P10]
+	V_ADD_CI_U32 v[P8+1], vcc, 0, v[P28+1], vcc
+
+	// The NIC's address for the packet: rx_dma[page_idx] + its offset.
+	v_lshlrev_b32 v[P10], 3, v[PAGE_IDX]
+	v_add_co_u32 v[P20], vcc, v[P28+2], v[P10]
+	V_ADD_CI_U32 v[P20+1], vcc, 0, v[P28+3], vcc
+	global_load_dwordx2 v[P12:P12+1], v[P20:P20+1], off
+	V_SUB_U32 v[P22], v[DATA], v[PAGE_BASE]		// offset
+	V_SUB_U32 v[P22+1], v[DATA_END], v[DATA]		// length
+
+	// A send or a NOP; and whether this is the batch's last WQE, the one
+	// that asks the NIC for a completion.
+	v_cmp_eq_u32_e64 s[PS4:PS4+1], XDP_TX, v[BPF_R0]
+	V_ADD_U32 v[P10], v[P24+2], v[P24]		// ring_start + count
+	V_SUB_U32 v[P10], v[P10], v[P32+2]		// - pc_base
+	V_ADD_U32 v[P10], -1, v[P10]
+	v_cmp_eq_u32_e64 s[PS2:PS2+1], v[P10], v[TX_PC]
+
+	// ctrl: opmod_idx_opcode and qpn_ds, both big endian, then fm_ce_se.
+	v_and_b32 v[P10], 0xffff, v[TX_PC]
+	v_lshlrev_b32 v[P10], 8, v[P10]
+	v_mov_b32 v[P11], KNOD_MLX5_OPCODE_SEND
+	v_cndmask_b32_e64 v[P11], KNOD_MLX5_OPCODE_NOP, v[P11], s[PS4:PS4+1]
+	v_or_b32 v[P10], v[P10], v[P11]
+	v_perm_b32 v[P0], v[P10], v[P10], 0x00010203
+	v_lshlrev_b32 v[P10], 8, v[P32]
+	v_mov_b32 v[P11], KNOD_MLX5_SEND_DS
+	v_cndmask_b32_e64 v[P11], KNOD_MLX5_NOP_DS, v[P11], s[PS4:PS4+1]
+	v_or_b32 v[P10], v[P10], v[P11]
+	v_perm_b32 v[P0+1], v[P10], v[P10], 0x00010203
+	v_mov_b32 v[P11], (KNOD_MLX5_CTRL_CQ_UPDATE << 24)
+	v_cndmask_b32_e64 v[P0+2], 0, v[P11], s[PS2:PS2+1]
+	v_mov_b32 v[P0+3], 0
+
+	// eth: nothing inlined, no offloads.
+	v_mov_b32 v[P4], 0
+	v_mov_b32 v[P5], 0
+	v_mov_b32 v[P6], 0
+	v_mov_b32 v[P7], 0
+
+	// data: byte count, lkey, address.  Big endian, but for the lkey,
+	// which the NIC handed over already swapped.  A NOP's data segment is
+	// past its ds count and goes unread.
+	s_waitcnt vmcnt(0)
+	v_add_co_u32 v[P12], vcc, v[P12], v[P22]
+	V_ADD_CI_U32 v[P12+1], vcc, 0, v[P12+1], vcc
+	v_perm_b32 v[P16], v[P22+1], v[P22+1], 0x00010203
+	v_mov_b32 v[P16+1], v[P32+1]
+	v_perm_b32 v[P16+2], v[P12+1], v[P12+1], 0x00010203
+	v_perm_b32 v[P16+3], v[P12], v[P12], 0x00010203
+
+	global_store_dwordx4 v[P8:P8+1], v[P0:P0+3], off glc slc
+	global_store_dwordx4 v[P8:P8+1], v[P4:P4+3], off offset:16 glc slc
+	global_store_dwordx4 v[P8:P8+1], v[P16:P16+3], off offset:32 glc slc
+.Lgda_wqe_done\@:
 
 #if defined(KNOD_HWID_PROBE)
 	// Which compute unit ran this wave, so the host can count how many one

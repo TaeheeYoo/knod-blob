@@ -73,6 +73,7 @@
 #define DATA_END	KNOD_BLOB_PRO_DATA_END_VREG
 #define PAGE_BASE	KNOD_BLOB_PRO_PAGE_BASE_VREG
 #define PAGE_IDX	KNOD_BLOB_PRO_PAGE_IDX_VREG
+#define TX_PC		KNOD_BLOB_PRO_TX_PC_VREG
 
 // A probe build times three parts of the shader.
 #if defined(KNOD_CYCLE_PROBE)
@@ -98,6 +99,9 @@
 #define P18		KNOD_BLOB_PRO_LOCAL_IDX_VREG
 #define P20		(KNOD_BLOB_PRO_TMP_VREG + 20)
 #define P22		(KNOD_BLOB_PRO_TMP_VREG + 22)
+#define P24		(KNOD_BLOB_PRO_TMP_VREG + 24)
+#define P28		(KNOD_BLOB_PRO_TMP_VREG + 28)
+#define P32		(KNOD_BLOB_PRO_TMP_VREG + 32)
 
 #define PS0		(KNOD_BLOB_PRO_TMP_SREG + 0)
 #define PS1		(KNOD_BLOB_PRO_TMP_SREG + 1)
@@ -116,6 +120,7 @@
 #define XDP_ABORTED	0
 #define XDP_DROP	1
 #define XDP_PASS	2
+#define XDP_TX		3
 
 // The JIT's own scalars.
 #define DONE_MASK	KNOD_BLOB_DONE_MASK_SREG
