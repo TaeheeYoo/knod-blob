@@ -2,7 +2,10 @@
 //
 // GDA stage 2, M1: the receive kernel.  One wave per queue runs the queue's
 // receive rings itself - polls the NIC's CQ and keeps its RQ posted - and
-// drops everything, with no program and no host in the loop.
+// drops everything, with no program and no host in the loop.  It is what
+// runs in a program's place while there is none, so it leaves the rings for
+// whatever comes next exactly as the program's prologue expects to find them:
+// posted for this build of the rings, and the consumer index where it got to.
 //
 // The rings live in accel memory the NIC reads and writes directly (the
 // KNOD_PERSIST_RING_* layout), and the NIC has set them up: doorbell records
@@ -24,6 +27,9 @@
 #define GR_HEADROOM	24
 #define GR_MKEY		25	// already big endian
 #define GR_LIVE		26
+#define GR_GEN		27
+#define GR_CI		28	// carried over from the last shader
+#define GR_POSTED	29	// the build the RQ was posted for
 
 // State.
 #define GS_CI		32	// CQ consumer index, free-running
@@ -70,6 +76,8 @@ knod_gda_rx_kernel:
 			    offset:KNOD_PERSIST_GDA_RQ_LOG glc dlc
 	global_load_dwordx4 v[12:15], v[2:3], off \
 			    offset:KNOD_PERSIST_GDA_HEADROOM glc dlc
+	global_load_dwordx2 v[16:17], v[2:3], off \
+			    offset:KNOD_PERSIST_GDA_CI glc dlc
 	s_waitcnt vmcnt(0)
 	v_readfirstlane_b32 s[GR_RING], v4
 	v_readfirstlane_b32 s[GR_RING+1], v5
@@ -82,6 +90,9 @@ knod_gda_rx_kernel:
 	v_readfirstlane_b32 s[GR_HEADROOM], v12
 	v_readfirstlane_b32 s[GR_MKEY], v13
 	v_readfirstlane_b32 s[GR_LIVE], v14
+	v_readfirstlane_b32 s[GR_GEN], v15
+	v_readfirstlane_b32 s[GR_CI], v16
+	v_readfirstlane_b32 s[GR_POSTED], v17
 	// Not a queue whose rings the NIC gave us.
 	s_cmp_eq_u32 s[GR_LIVE], 0
 	s_cbranch_scc1 .Lgda_rx_end
@@ -89,6 +100,18 @@ knod_gda_rx_kernel:
 	s_lshl_b32 s[GS_RQ_SIZE], 1, s[GR_RQ_LOG]
 	s_lshl_b32 s[GS_CQ_MASK], 1, s[GR_CQ_LOG]
 	s_sub_u32 s[GS_CQ_MASK], s[GS_CQ_MASK], 1
+	s_mov_b64 s[GS_PKTS:GS_PKTS+1], 0
+	s_mov_b64 s[GS_ERRS:GS_ERRS+1], 0
+
+	// A build of the rings an earlier shader already posted: its RQ is
+	// up and its CQ is where that shader left it.  Carry on from there.
+	s_cmp_eq_u32 s[GR_POSTED], s[GR_GEN]
+	s_cbranch_scc0 .Lgda_rx_fresh
+	s_mov_b32 s[GS_CI], s[GR_CI]
+	s_add_u32 s[GS_PC], s[GR_CI], s[GS_RQ_SIZE]
+	s_mov_b32 s[GS_I], 0
+	s_branch .Lgda_rx_poll
+.Lgda_rx_fresh:
 
 	// Post every RQ entry, 64 at a time: entry i to RX page i, past the
 	// headroom.  Nothing here ever takes a page from its entry, so this is
@@ -143,8 +166,6 @@ knod_gda_rx_kernel:
 	s_waitcnt_vscnt null, 0
 	s_mov_b32 s[GS_CI], 0
 	s_mov_b32 s[GS_PC], s[GS_RQ_SIZE]
-	s_mov_b64 s[GS_PKTS:GS_PKTS+1], 0
-	s_mov_b64 s[GS_ERRS:GS_ERRS+1], 0
 	s_mov_b32 s[GS_I], 0
 	s_mov_b64 exec, 1
 	v_mov_b32 v2, s[GS_PC]
@@ -153,6 +174,14 @@ knod_gda_rx_kernel:
 	v_mov_b32 v4, s[GR_RING]
 	v_mov_b32 v5, s[GR_RING+1]
 	global_store_dword v[4:5], v2, off offset:KNOD_PERSIST_RING_RQ_DB glc slc
+	// Posted for this build, from the start of its CQ.
+	v_mov_b32 v2, s8
+	v_mov_b32 v3, s9
+	v_add_co_u32 v4, vcc, s[GS_ENTRY], v2
+	V_ADD_CI_U32 v5, vcc, 0, v3, vcc
+	v_mov_b32 v6, 0
+	v_mov_b32 v7, s[GR_GEN]
+	global_store_dwordx2 v[4:5], v[6:7], off offset:KNOD_PERSIST_GDA_CI glc slc
 	s_waitcnt_vscnt null, 0
 
 .Lgda_rx_poll:
@@ -236,6 +265,8 @@ knod_gda_rx_kernel:
 	v_mov_b32 v9, s[GS_ERRS+1]
 	global_store_dwordx4 v[4:5], v[6:9], off \
 			     offset:KNOD_PERSIST_GDA_PACKETS glc slc
+	v_mov_b32 v6, s[GS_CI]
+	global_store_dword v[4:5], v6, off offset:KNOD_PERSIST_GDA_CI glc slc
 	global_load_dwordx2 v[10:11], v[2:3], off glc dlc
 	s_waitcnt vmcnt(0)
 	v_readfirstlane_b32 s[GS_T], v10
