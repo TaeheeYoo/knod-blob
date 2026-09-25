@@ -58,6 +58,7 @@
 #define GL_WAVES	29
 #define GL_PAGE_SHIFT	30
 #define GL_N		31	// packets this round, all waves
+#define GL_ROUNDS	32	// and 33: rounds that took packets
 
 // The meeting place in LDS.
 #define L_CMD		0	// nonzero: stop
@@ -109,6 +110,12 @@
 			   offset:KNOD_PERSIST_GDA_CI glc slc
 	global_store_dwordx2 v[P0:P1], v[GDA_PKTS:GDA_PKTS+1], off \
 			     offset:KNOD_PERSIST_GDA_PACKETS glc slc
+	v_readlane_b32 s[GT], v[GS], GL_ROUNDS
+	v_readlane_b32 s[GT+1], v[GS], GL_ROUNDS + 1
+	v_mov_b32 v[P24], s[GT]
+	v_mov_b32 v[P24+1], s[GT+1]
+	global_store_dwordx2 v[P0:P1], v[P24:P24+1], off \
+			     offset:KNOD_PERSIST_GDA_ROUNDS glc slc
 	v_readlane_b32 s[GT], v[GS], GL_TX_PKTS
 	v_readlane_b32 s[GT+1], v[GS], GL_TX_PKTS + 1
 	v_mov_b32 v[P24], s[GT]
@@ -431,8 +438,14 @@
 			    offset:KNOD_PERSIST_GDA_PARAM glc dlc
 	global_load_dwordx4 v[P32:P32+3], v[P0:P1], off \
 			    offset:KNOD_PERSIST_GDA_RX_BASE glc dlc	// rx_base, bds
+	global_load_dwordx2 v[P20:P20+1], v[P0:P1], off \
+			    offset:KNOD_PERSIST_GDA_ROUNDS glc dlc
 	s_waitcnt vmcnt(0)
 	s_mov_b64 exec, -1
+	v_readfirstlane_b32 s[PS0], v[P20]
+	v_readfirstlane_b32 s[PS1], v[P20+1]
+	v_writelane_b32 v[GS], s[PS0], GL_ROUNDS
+	v_writelane_b32 v[GS], s[PS1], GL_ROUNDS + 1
 	v_readfirstlane_b32 s[PS0], v[P28+3]		// waves
 	v_writelane_b32 v[GS], s[PS0], GL_WAVES
 	s_lshr_b32 s[PS1], s0, 6
@@ -936,6 +949,12 @@
 	GDA_RQ_RELEASE
 	v_add_co_u32 v[GDA_PKTS], vcc, s[E_N], v[GDA_PKTS]
 	V_ADD_CI_U32 v[GDA_PKTS+1], vcc, 0, v[GDA_PKTS+1], vcc
+	v_readlane_b32 s[GT], v[GS], GL_ROUNDS
+	v_readlane_b32 s[GT+1], v[GS], GL_ROUNDS + 1
+	s_add_u32 s[GT], s[GT], 1
+	s_addc_u32 s[GT+1], s[GT+1], 0
+	v_writelane_b32 v[GS], s[GT], GL_ROUNDS
+	v_writelane_b32 v[GS], s[GT+1], GL_ROUNDS + 1
 	GDA_ENTRY_ADDR
 	GDA_SAVE
 .Lgda_next\@:

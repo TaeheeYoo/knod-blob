@@ -46,7 +46,7 @@
 #define KNOD_PERSIST_GDA_RING 0
 #define KNOD_PERSIST_GDA_RX_DMA 8
 #define KNOD_PERSIST_GDA_PACKETS 16
-#define KNOD_PERSIST_GDA_ERRORS 24
+#define KNOD_PERSIST_GDA_ROUNDS 24	/* rounds that took packets */
 #define KNOD_PERSIST_GDA_RQ_LOG 32
 #define KNOD_PERSIST_GDA_RQ_LOG_STRIDE 36
 #define KNOD_PERSIST_GDA_CQ_LOG 40
@@ -117,7 +117,7 @@ struct knod_persistent_gda {
 	u64 ring;
 	u64 rx_dma;
 	u64 packets;
-	u64 errors;
+	u64 rounds;
 	u32 rq_log;
 	u32 rq_log_stride;
 	u32 cq_log;
