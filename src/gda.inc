@@ -61,13 +61,20 @@
 #define GL_ROUNDS	32	// and 33: rounds that took packets
 #define GL_STAGGER	34	// page i's data starts stagger * (i & mask)
 #define GL_STAGGER_MASK	35	// past the headroom
+#define GL_PASS_PC	36	// PASS entries appended, free-running
+#define GL_PASS_CC	37	// ...the host has finished with, or the floor
+#define GL_PASS_FLOOR	38	// entries before it are an earlier build's
+#define GL_PASS_RING	39	// and 40: in host memory
+#define GL_PASS_MASK	41
 
 // The meeting place in LDS.
 #define L_CMD		0	// nonzero: stop
+#define L_PASS_PC	4	// PASS entries appended before this round
 #define L_SQ_PC		8
 #define L_SQ_CC		12
 #define L_N		16	// each wave's run of CQEs, one dword each
 #define L_K		32	// each wave's XDP_TX count
+#define L_P		48	// each wave's XDP_PASS count
 
 // The epilogue's scalars.
 #define E_W		14	// waves
@@ -87,6 +94,15 @@
 #define X_GIVEN		51	// WQEs all waves got
 #define X_FIRST		52	// the first wave with one, or 4
 #define X_LAST		53	// the last wave with one
+#define X_PBASE		54	// PASS entries the waves before append
+#define X_PTOTAL	55	// ...all waves
+#define X_PPC		56	// PASS entries appended before this round
+#define X_PMINE		57	// this wave's
+// GDA_RQ_RELEASE's, once the above are done with.
+#define R_PC		54
+#define R_CC		55
+#define R_T		56
+#define R_CAND		57
 
 // v[P0:P1] = this queue's control entry.  Scalar temp: PS0.
 	.macro GDA_ENTRY_ADDR
@@ -206,7 +222,7 @@
 	s_mov_b64 exec, 1
 	s_mov_b32 s[E_T], s2
 	s_cmp_eq_u32 s[E_PC], s[E_CC]
-	s_cbranch_scc1 .Lgda_bound\@
+	s_cbranch_scc1 .Lgda_tx_bound\@
 	s_and_b32 s[GT], s[E_CC], s[E_MASK]
 	s_lshl_b32 s[GT], s[GT], 2
 	s_add_u32 s[GT], s[GT], KNOD_PERSIST_RING_RQPOS_OFF
@@ -217,6 +233,43 @@
 	global_load_dword v[P4], v[P2:P3], off glc dlc
 	s_waitcnt vmcnt(0)
 	v_readfirstlane_b32 s[E_T], v[P4]
+.Lgda_tx_bound\@:
+	// The oldest packet the host is still copying out, if that is older.
+	v_readlane_b32 s[R_PC], v[GS], GL_PASS_PC
+	v_readlane_b32 s[R_CC], v[GS], GL_PASS_CC
+	s_cmp_eq_u32 s[R_PC], s[R_CC]
+	s_cbranch_scc1 .Lgda_bound\@
+	s_mul_i32 s[R_T], s[WG_Y], KNOD_PERSIST_GDA_BYTES
+	s_add_u32 s[R_T], s[R_T], (KNOD_PERSIST_GDA + KNOD_PERSIST_GDA_PASS_CC)
+	s_add_u32 s[GT], s8, s[R_T]
+	s_addc_u32 s[GT+1], s9, 0
+	v_mov_b32 v[P2], s[GT]
+	v_mov_b32 v[P3], s[GT+1]
+	global_load_dword v[P4], v[P2:P3], off glc dlc
+	s_waitcnt vmcnt(0)
+	v_readfirstlane_b32 s[R_CC], v[P4]
+	v_readlane_b32 s[R_T], v[GS], GL_PASS_FLOOR
+	s_sub_u32 s[GT], s[R_CC], s[R_T]
+	s_cmp_lt_i32 s[GT], 0
+	s_cselect_b32 s[R_CC], s[R_T], s[R_CC]
+	v_writelane_b32 v[GS], s[R_CC], GL_PASS_CC
+	s_cmp_eq_u32 s[R_PC], s[R_CC]
+	s_cbranch_scc1 .Lgda_bound\@
+	v_readlane_b32 s[GT], v[GS], GL_PASS_MASK
+	s_and_b32 s[GT], s[R_CC], s[GT]
+	s_lshl_b32 s[GT], s[GT], 2
+	s_add_u32 s[GT], s[GT], KNOD_PERSIST_RING_PASS_RQPOS_OFF
+	s_add_u32 s[GT], s10, s[GT]
+	s_addc_u32 s[GT+1], s11, 0
+	v_mov_b32 v[P2], s[GT]
+	v_mov_b32 v[P3], s[GT+1]
+	global_load_dword v[P4], v[P2:P3], off glc dlc
+	s_waitcnt vmcnt(0)
+	v_readfirstlane_b32 s[R_CAND], v[P4]
+	s_sub_u32 s[GT], s2, s[R_CAND]
+	s_sub_u32 s[GT+1], s2, s[E_T]
+	s_cmp_gt_u32 s[GT], s[GT+1]
+	s_cselect_b32 s[E_T], s[R_CAND], s[E_T]
 .Lgda_bound\@:
 	v_readlane_b32 s[GT], v[GS], GL_RQ_SIZE
 	s_add_u32 s[E_T], s[E_T], s[GT]
@@ -322,6 +375,18 @@
 	s_cselect_b32 s[GT], \i, 4
 	s_min_u32 s[X_FIRST], s[X_FIRST], s[GT]
 	s_add_u32 s[X_PREFIX], s[X_PREFIX], s[E_T]
+	.endm
+
+// Wave \i's XDP_PASS count, v[P8+\i]: into the total, and into this wave's
+// base if it comes before.
+	.macro GDA_TALLY_P i
+	v_readfirstlane_b32 s[E_T], v[P8+\i]
+	s_cmp_gt_u32 s[E_W], \i
+	s_cselect_b32 s[E_T], s[E_T], 0
+	s_add_u32 s[X_PTOTAL], s[X_PTOTAL], s[E_T]
+	s_cmp_gt_u32 s[E_ME], \i
+	s_cselect_b32 s[E_T], s[E_T], 0
+	s_add_u32 s[X_PBASE], s[X_PBASE], s[E_T]
 	.endm
 
 	.macro KNOD_GDA_PROLOGUE_BODY
@@ -444,8 +509,27 @@
 			    offset:KNOD_PERSIST_GDA_ROUNDS glc dlc
 	global_load_dwordx2 v[P22:P22+1], v[P0:P1], off \
 			    offset:KNOD_PERSIST_GDA_STAGGER glc dlc
+	global_load_dwordx4 v[P24:P24+3], v[P0:P1], off \
+			    offset:KNOD_PERSIST_GDA_PASS_RING glc dlc	// ring, mask, pc
+	global_load_dwordx2 v[P10:P10+1], v[P0:P1], off \
+			    offset:KNOD_PERSIST_GDA_PASS_CC glc dlc	// cc, floor
 	s_waitcnt vmcnt(0)
 	s_mov_b64 exec, -1
+	v_readfirstlane_b32 s[PS0], v[P24]
+	v_readfirstlane_b32 s[PS1], v[P24+1]
+	v_writelane_b32 v[GS], s[PS0], GL_PASS_RING
+	v_writelane_b32 v[GS], s[PS1], GL_PASS_RING + 1
+	v_readfirstlane_b32 s[PS0], v[P24+2]
+	v_writelane_b32 v[GS], s[PS0], GL_PASS_MASK
+	v_readfirstlane_b32 s[PS0], v[P24+3]
+	v_writelane_b32 v[GS], s[PS0], GL_PASS_PC
+	v_readfirstlane_b32 s[PS0], v[P10]		// cc
+	v_readfirstlane_b32 s[PS1], v[P10+1]		// floor
+	v_writelane_b32 v[GS], s[PS1], GL_PASS_FLOOR
+	s_sub_u32 s[GT], s[PS0], s[PS1]
+	s_cmp_lt_i32 s[GT], 0
+	s_cselect_b32 s[PS0], s[PS1], s[PS0]
+	v_writelane_b32 v[GS], s[PS0], GL_PASS_CC
 	v_readfirstlane_b32 s[PS0], v[P22]
 	v_readfirstlane_b32 s[PS1], v[P22+1]
 	v_writelane_b32 v[GS], s[PS0], GL_STAGGER
@@ -498,6 +582,10 @@
 	s_cmp_eq_u32 s[PS0], s[PS1]
 	s_cbranch_scc1 .Lgda_posted\@
 	s_mov_b32 s2, 0
+	// What the host still copies out came in on the last build's RQ.
+	v_readlane_b32 s[GT], v[GS], GL_PASS_PC
+	v_writelane_b32 v[GS], s[GT], GL_PASS_FLOOR
+	v_writelane_b32 v[GS], s[GT], GL_PASS_CC
 	s_cmp_eq_u32 s0, 0
 	s_cbranch_scc0 .Lgda_posted\@
 
@@ -552,6 +640,10 @@
 	v_mov_b32 v[P9], v[P12+3]
 	global_store_dwordx2 v[P0:P1], v[P8:P9], off \
 			     offset:KNOD_PERSIST_GDA_CI glc slc
+	v_readlane_b32 s[GT], v[GS], GL_PASS_FLOOR
+	v_mov_b32 v[P8], s[GT]
+	global_store_dword v[P0:P1], v[P8], off \
+			   offset:KNOD_PERSIST_GDA_PASS_FLOOR glc slc
 	s_waitcnt_vscnt null, 0
 .Lgda_posted\@:
 	s_getpc_b64 s[6:7]
@@ -654,13 +746,21 @@
 	s_cbranch_scc0 .Lgda_idle\@
 	v_readlane_b32 s[E_PC], v[GS], GL_SQ_PC
 	v_readlane_b32 s[E_CC], v[GS], GL_SQ_CC
-	s_cmp_eq_u32 s[E_PC], s[E_CC]
-	s_cbranch_scc1 .Lgda_idle\@
 	v_readlane_b32 s[E_TXCI], v[GS], GL_TX_CI
 	v_readlane_b32 s[E_MASK], v[GS], GL_SQ_MASK
+	v_readlane_b32 s[GT], v[GS], GL_PASS_PC
+	v_readlane_b32 s[GT+1], v[GS], GL_PASS_CC
+	s_cmp_lg_u32 s[GT], s[GT+1]
+	s_cbranch_scc1 .Lgda_held\@
+	s_cmp_eq_u32 s[E_PC], s[E_CC]
+	s_cbranch_scc1 .Lgda_idle\@
+.Lgda_held\@:
+	s_cmp_eq_u32 s[E_PC], s[E_CC]
+	s_cbranch_scc1 .Lgda_reaped_idle\@
 	GDA_TX_REAP
 	v_writelane_b32 v[GS], s[E_CC], GL_SQ_CC
 	v_writelane_b32 v[GS], s[E_TXCI], GL_TX_CI
+.Lgda_reaped_idle\@:
 	GDA_RQ_RELEASE
 .Lgda_idle\@:
 	s_sleep 1
@@ -761,23 +861,31 @@
 	v_readlane_b32 s[E_TXCI], v[GS], GL_TX_CI
 	v_readlane_b32 s[E_MASK], v[GS], GL_SQ_MASK
 	v_readlane_b32 s[E_N], v[GS], GL_N
-	s_cmp_eq_u32 s[E_MASK], 0
-	s_cbranch_scc1 .Lgda_sent\@
 
-	// What this wave would send, for the others to see.  Wave 0 takes what
-	// the NIC has sent since the last look, and says where the SQ stands.
+	// What this wave sends and hands to the host, for the others to see.
+	// With no SQ an XDP_TX drops.  Wave 0 takes what the NIC has sent
+	// since the last look, and says where the SQ and the PASS ring stand.
 	v_cmp_eq_u32_e64 s[E_TX:E_TX+1], XDP_TX, v[BPF_R0]
 	s_and_b64 s[E_TX:E_TX+1], s[E_TX:E_TX+1], exec
+	s_cmp_eq_u32 s[E_MASK], 0
+	s_cselect_b64 s[E_TX:E_TX+1], 0, s[E_TX:E_TX+1]
 	s_bcnt1_i32_b64 s[E_T], s[E_TX:E_TX+1]
+	v_cmp_eq_u32_e64 s[GT:GT+1], XDP_PASS, v[BPF_R0]
+	s_and_b64 s[GT:GT+1], s[GT:GT+1], exec
+	s_bcnt1_i32_b64 s[X_PMINE], s[GT:GT+1]
 	s_mov_b64 exec, 1
 	GDA_LDS_ADDR P2
 	v_mov_b32 v[P3], s[E_T]
+	v_mov_b32 v[P5], s[X_PMINE]
 	s_lshr_b32 s[GT], s0, 4
 	V_ADD_U32 v[P4], s[GT], v[P2]
 	ds_write_b32 v[P4], v[P3] offset:L_K
+	ds_write_b32 v[P4], v[P5] offset:L_P
 	s_waitcnt lgkmcnt(0)
 	s_cmp_eq_u32 s0, 0
 	s_cbranch_scc0 .Lgda_asked\@
+	s_cmp_eq_u32 s[E_MASK], 0
+	s_cbranch_scc1 .Lgda_room\@
 	s_cmp_eq_u32 s[E_PC], s[E_CC]
 	s_cbranch_scc1 .Lgda_room\@
 	GDA_TX_REAP
@@ -788,6 +896,9 @@
 	v_mov_b32 v[P4], s[E_CC]
 	ds_write2_b32 v[P2], v[P3], v[P4] offset0:(L_SQ_PC / 4) \
 		      offset1:(L_SQ_CC / 4)
+	v_readlane_b32 s[GT], v[GS], GL_PASS_PC
+	v_mov_b32 v[P3], s[GT]
+	ds_write_b32 v[P2], v[P3] offset:L_PASS_PC
 	v_writelane_b32 v[GS], s[E_CC], GL_SQ_CC
 	v_writelane_b32 v[GS], s[E_TXCI], GL_TX_CI
 .Lgda_asked\@:
@@ -800,7 +911,16 @@
 	ds_read2_b32 v[P0:P1], v[P2] offset0:(L_SQ_PC / 4) \
 		     offset1:(L_SQ_CC / 4)
 	ds_read_b128 v[P4:P4+3], v[P2] offset:L_K
+	ds_read_b128 v[P8:P8+3], v[P2] offset:L_P
+	ds_read_b32 v[P12], v[P2] offset:L_PASS_PC
 	s_waitcnt lgkmcnt(0)
+	v_readfirstlane_b32 s[X_PPC], v[P12]
+	s_mov_b32 s[X_PBASE], 0
+	s_mov_b32 s[X_PTOTAL], 0
+	GDA_TALLY_P 0
+	GDA_TALLY_P 1
+	GDA_TALLY_P 2
+	GDA_TALLY_P 3
 	v_readfirstlane_b32 s[E_PC], v[P0]
 	v_readfirstlane_b32 s[E_CC], v[P1]
 	s_sub_u32 s[X_LEFT], s[E_PC], s[E_CC]
@@ -818,7 +938,7 @@
 	GDA_TALLY_K 3
 	s_mov_b32 s[X_GIVEN], s[X_PREFIX]
 	s_cmp_eq_u32 s[X_MINE], 0
-	s_cbranch_scc1 .Lgda_written\@
+	s_cbranch_scc1 .Lgda_txdone\@
 
 	// One send WQE per lane that goes, at pc + base + its rank.
 	s_mov_b64 exec, s[INITIAL_EXEC:INITIAL_EXEC+1]
@@ -892,7 +1012,7 @@
 
 	// The round's first WQE says which RQ position it came in on.
 	s_cmp_eq_u32 s[E_ME], s[X_FIRST]
-	s_cbranch_scc0 .Lgda_written\@
+	s_cbranch_scc0 .Lgda_txdone\@
 	s_ff1_i32_b64 s[GT], s[E_TX:E_TX+1]
 	s_add_u32 s[GT], s[GT], s0
 	s_add_u32 s[GT+1], s2, s[GT]
@@ -906,6 +1026,43 @@
 	v_mov_b32 v[P4], s[GT]
 	v_mov_b32 v[P5], s[GT+1]
 	global_store_dword v[P4:P5], v[P2], off glc slc
+.Lgda_txdone\@:
+	// One PASS entry per lane that passes, at pass_pc + base + its rank:
+	// the page, where the packet is in it and how long; and in the ring
+	// buffer, the RQ position it holds until the host is done.
+	s_cmp_eq_u32 s[X_PMINE], 0
+	s_cbranch_scc1 .Lgda_written\@
+	s_mov_b64 exec, s[INITIAL_EXEC:INITIAL_EXEC+1]
+	v_cmp_eq_u32_e64 s[GT:GT+1], XDP_PASS, v[BPF_R0]
+	s_and_b64 exec, s[GT:GT+1], exec
+	v_mbcnt_lo_u32_b32 v[P2], exec_lo, 0
+	v_mbcnt_hi_u32_b32 v[P2], exec_hi, v[P2]
+	s_add_u32 s[GT], s[X_PPC], s[X_PBASE]
+	V_ADD_U32 v[P3], s[GT], v[P2]
+	v_readlane_b32 s[GT], v[GS], GL_PASS_MASK
+	v_and_b32 v[P3], s[GT], v[P3]			// slot
+	v_lshlrev_b32 v[P4], 3, v[P3]
+	v_readlane_b32 s[GT], v[GS], GL_PASS_RING
+	v_readlane_b32 s[GT+1], v[GS], GL_PASS_RING + 1
+	v_add_co_u32 v[P4], vcc, s[GT], v[P4]
+	v_mov_b32 v[P5], s[GT+1]
+	V_ADD_CI_U32 v[P5], vcc, 0, v[P5], vcc
+	v_mov_b32 v[P6], v[PAGE_IDX]
+	V_SUB_U32 v[P7], v[DATA], v[PAGE_BASE]		// offset
+	V_SUB_U32 v[P8], v[DATA_END], v[DATA]		// length
+	v_lshlrev_b32 v[P8], 16, v[P8]
+	v_or_b32 v[P7], v[P7], v[P8]
+	global_store_dwordx2 v[P4:P5], v[P6:P7], off glc slc
+	v_lshlrev_b32 v[P3], 2, v[P3]
+	v_add_co_u32 v[P3], vcc, KNOD_PERSIST_RING_PASS_RQPOS_OFF, v[P3]
+	v_add_co_u32 v[P4], vcc, s10, v[P3]
+	v_mov_b32 v[P5], s11
+	V_ADD_CI_U32 v[P5], vcc, 0, v[P5], vcc
+	v_mbcnt_lo_u32_b32 v[P6], -1, 0
+	v_mbcnt_hi_u32_b32 v[P6], -1, v[P6]
+	s_add_u32 s[GT], s2, s0
+	V_ADD_U32 v[P6], s[GT], v[P6]			// RQ position
+	global_store_dword v[P4:P5], v[P6], off glc slc
 .Lgda_written\@:
 	// Every wave's WQEs are in memory before wave 0 says they are there.
 	s_waitcnt_vscnt null, 0
@@ -913,6 +1070,16 @@
 	s_cmp_eq_u32 s0, 0
 	s_cbranch_scc0 .Lgda_sent\@
 	s_mov_b64 exec, 1
+	// Every wave's PASS entries are in memory: say they are there.
+	s_cmp_eq_u32 s[X_PTOTAL], 0
+	s_cbranch_scc1 .Lgda_passed\@
+	s_add_u32 s[X_PPC], s[X_PPC], s[X_PTOTAL]
+	v_writelane_b32 v[GS], s[X_PPC], GL_PASS_PC
+	GDA_ENTRY_ADDR
+	v_mov_b32 v[P2], s[X_PPC]
+	global_store_dword v[P0:P1], v[P2], off \
+			   offset:KNOD_PERSIST_GDA_PASS_PC glc slc
+.Lgda_passed\@:
 	s_sub_u32 s[GT], s[X_ASKED], s[X_GIVEN]
 	v_readlane_b32 s[GT+1], v[GS], GL_TX_FULL
 	s_add_u32 s[GT+1], s[GT+1], s[GT]
