@@ -2,7 +2,7 @@
 #ifndef _KNOD_PERSISTENT_H
 #define _KNOD_PERSISTENT_H
 /* One workgroup per RX queue; no X dimension multiplier. */
-#define KNOD_PERSIST_VERSION 0x4b500009
+#define KNOD_PERSIST_VERSION 0x4b50000a
 #define KNOD_PERSIST_SLOTS 3
 #define KNOD_PERSIST_SLOT_BASE 64
 #define KNOD_PERSIST_SLOT_BYTES 512
@@ -19,6 +19,13 @@
  * shader's lifetime rather than one per batch.
  */
 #define KNOD_PERSIST_GDA_PARAM 16
+/* GDA stage 2: where past the program's stack the waves of a queue meet in
+ * LDS, KNOD_PERSIST_GDA_LDS_BYTES of it, and how many of them take packets.
+ */
+#define KNOD_PERSIST_GDA_LDS 24
+#define KNOD_PERSIST_GDA_WAVES 28
+#define KNOD_PERSIST_GDA_LDS_BYTES 64
+#define KNOD_PERSIST_GDA_WAVES_MAX 4
 /* u64 per queue: where this queue's NIC TX doorbell is in the GPU's address
  * space.  Written once when a shader lifetime starts, zero when the NIC
  * publishes none.  Sits past the slots, so no slot offset moves.
@@ -147,7 +154,9 @@ struct knod_persistent_control {
 	u32 pause;
 	u32 pad0;
 	u64 gda_param;
-	u8 reserved[40];
+	u32 gda_lds;
+	u32 gda_waves;
+	u8 reserved[32];
 	struct knod_persistent_slot slots[KNOD_PERSIST_SLOTS];
 	u64 tx_db[KNOD_PERSIST_MAX_QUEUES];
 	struct knod_persistent_kick tx_kick[KNOD_PERSIST_MAX_QUEUES];
