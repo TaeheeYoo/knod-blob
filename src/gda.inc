@@ -59,6 +59,8 @@
 #define GL_PAGE_SHIFT	30
 #define GL_N		31	// packets this round, all waves
 #define GL_ROUNDS	32	// and 33: rounds that took packets
+#define GL_STAGGER	34	// page i's data starts stagger * (i & mask)
+#define GL_STAGGER_MASK	35	// past the headroom
 
 // The meeting place in LDS.
 #define L_CMD		0	// nonzero: stop
@@ -440,8 +442,14 @@
 			    offset:KNOD_PERSIST_GDA_RX_BASE glc dlc	// rx_base, bds
 	global_load_dwordx2 v[P20:P20+1], v[P0:P1], off \
 			    offset:KNOD_PERSIST_GDA_ROUNDS glc dlc
+	global_load_dwordx2 v[P22:P22+1], v[P0:P1], off \
+			    offset:KNOD_PERSIST_GDA_STAGGER glc dlc
 	s_waitcnt vmcnt(0)
 	s_mov_b64 exec, -1
+	v_readfirstlane_b32 s[PS0], v[P22]
+	v_readfirstlane_b32 s[PS1], v[P22+1]
+	v_writelane_b32 v[GS], s[PS0], GL_STAGGER
+	v_writelane_b32 v[GS], s[PS1], GL_STAGGER_MASK
 	v_readfirstlane_b32 s[PS0], v[P20]
 	v_readfirstlane_b32 s[PS1], v[P20+1]
 	v_writelane_b32 v[GS], s[PS0], GL_ROUNDS
@@ -502,9 +510,14 @@
 	v_readlane_b32 s[PS6], v[GS], GL_RX_DMA
 	v_readlane_b32 s[PS6+1], v[GS], GL_RX_DMA + 1
 	v_readlane_b32 s[PS6+2], v[GS], GL_RQ_SIZE
+	v_readlane_b32 s[PS6+3], v[GS], GL_STAGGER
+	v_readlane_b32 s[PS1], v[GS], GL_STAGGER_MASK
 	s_mov_b32 s[PS0], 0
 .Lgda_post\@:
 	V_ADD_U32 v[P8], s[PS0], v[P10]			// entry
+	v_and_b32 v[P9+2], s[PS1], v[P8]
+	v_mul_u32_u24 v[P9+2], s[PS6+3], v[P9+2]
+	V_ADD_U32 v[P9+2], s[PS4], v[P9+2]		// headroom + stagger
 	v_lshlrev_b32 v[P9], 3, v[P8]
 	v_add_co_u32 v[P20], vcc, s[PS6], v[P9]
 	v_mov_b32 v[P20+1], s[PS6+1]
@@ -516,7 +529,7 @@
 	v_mov_b32 v[P20+1], s11
 	V_ADD_CI_U32 v[P20+1], vcc, 0, v[P20+1], vcc
 	s_waitcnt vmcnt(0)
-	v_add_co_u32 v[P22], vcc, s[PS4], v[P22]
+	v_add_co_u32 v[P22], vcc, v[P9+2], v[P22]
 	V_ADD_CI_U32 v[P22+1], vcc, 0, v[P22+1], vcc
 	v_mov_b32 v[P24], s[PS2+1]
 	v_perm_b32 v[P24], v[P24], v[P24], 0x00010203
@@ -680,7 +693,12 @@
 	v_mov_b32 v[PAGE_BASE+1], s[GT+1]
 	V_ADD_CI_U32 v[PAGE_BASE+1], vcc, v[P16], v[PAGE_BASE+1], vcc
 	v_readlane_b32 s[PS6], v[GS], GL_HEADROOM
-	v_add_co_u32 v[DATA], vcc, s[PS6], v[PAGE_BASE]
+	v_readlane_b32 s[GT], v[GS], GL_STAGGER_MASK
+	v_readlane_b32 s[GT+1], v[GS], GL_STAGGER
+	v_and_b32 v[P22], s[GT], v[PAGE_IDX]
+	v_mul_u32_u24 v[P22], s[GT+1], v[P22]
+	V_ADD_U32 v[P22], s[PS6], v[P22]		// headroom + stagger
+	v_add_co_u32 v[DATA], vcc, v[P22], v[PAGE_BASE]
 	V_ADD_CI_U32 v[DATA+1], vcc, 0, v[PAGE_BASE+1], vcc
 	v_add_co_u32 v[DATA_END], vcc, v[DATA], v[P14]
 	V_ADD_CI_U32 v[DATA_END+1], vcc, 0, v[DATA+1], vcc
@@ -695,7 +713,7 @@
 	v_mov_b32 v[SLOT+1], s[GT+1]
 	V_ADD_CI_U32 v[SLOT+1], vcc, 0, v[SLOT+1], vcc
 	v_lshlrev_b32 v[P20], 16, v[P14]
-	v_or_b32 v[P20], s[PS6], v[P20]
+	v_or_b32 v[P20], v[P22], v[P20]
 	v_mov_b32 v[P20+1], v[PAGE_IDX]
 	global_store_dwordx2 v[SLOT:SLOT+1], v[P20:P20+1], off \
 			     offset:KNOD_BLOB_BD_OFF glc slc

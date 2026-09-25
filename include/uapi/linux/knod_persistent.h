@@ -80,6 +80,11 @@
 #define KNOD_PERSIST_GDA_SQ_CC 148
 #define KNOD_PERSIST_GDA_TX_CI 152
 #define KNOD_PERSIST_GDA_TX_POSTED_GEN 156
+/* RX page i's data starts stagger * (i & stagger_mask) past the headroom,
+ * spreading packets over the memory channels.
+ */
+#define KNOD_PERSIST_GDA_STAGGER 160
+#define KNOD_PERSIST_GDA_STAGGER_MASK 164
 #define KNOD_PERSIST_BYTES 16384
 /* The ring buffer's layout, as net/knod.h lays it out for the NIC (the kernel
  * checks the two agree): doorbell records, then the RQ, then its CQ, then the
@@ -145,7 +150,9 @@ struct knod_persistent_gda {
 	u32 sq_cc;
 	u32 tx_ci;
 	u32 tx_posted_gen;
-	u8 reserved[96];
+	u32 stagger;
+	u32 stagger_mask;
+	u8 reserved[88];
 };
 
 struct knod_persistent_control {
