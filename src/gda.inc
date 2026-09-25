@@ -27,7 +27,11 @@
 #ifndef GDA_INC
 #define GDA_INC
 #include <linux/knod_persistent.h>
-#include "epilogue.inc"
+
+// The mlx5 send WQE the epilogue writes: the fields it sets, nothing more.
+#define KNOD_MLX5_OPCODE_SEND		0x0a
+#define KNOD_MLX5_CTRL_CQ_UPDATE	0x08	// fm_ce_se
+#define KNOD_MLX5_SEND_DS		3	// ctrl, eth, one data segment
 
 #define GS		KNOD_BLOB_PRO_GDA_VREG
 #define GDA_PKTS	(KNOD_BLOB_PRO_GDA_VREG + 1)	// v[74:75]

@@ -73,14 +73,7 @@
 #define DATA_END	KNOD_BLOB_PRO_DATA_END_VREG
 #define PAGE_BASE	KNOD_BLOB_PRO_PAGE_BASE_VREG
 #define PAGE_IDX	KNOD_BLOB_PRO_PAGE_IDX_VREG
-#define TX_PC		KNOD_BLOB_PRO_TX_PC_VREG
 
-// A probe build times three parts of the shader.
-#if defined(KNOD_CYCLE_PROBE)
-# define KNOD_CYCLES	1
-#endif
-#define PROBE0		(KNOD_BLOB_PROBE_SREG + 0)
-#define PROBE1		(KNOD_BLOB_PROBE_SREG + 1)
 
 #define P0		(KNOD_BLOB_PRO_TMP_VREG + 0)
 #define P1		(KNOD_BLOB_PRO_TMP_VREG + 1)
