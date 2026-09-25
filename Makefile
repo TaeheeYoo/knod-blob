@@ -11,7 +11,9 @@ ASM_CPP		?= clang -x assembler-with-cpp -E
 # One container per feature, because the core has to bring up a queue before
 # any feature module is loaded and so cannot read the BPF JIT's blob.
 FEATURES	:= core
-SRC_core	:= src/default.S
+# The core's: what a queue comes up with, and the GDA engine's receive kernel,
+# which runs the NIC's rings with no feature's code in them.
+SRC_core	:= src/default.S src/gda_rx.S
 SRC_bpf-persistent := $(filter-out $(SRC_core),$(wildcard src/*.S))
 
 ABI_HDR		:= include/uapi/linux/knod_blob.h
@@ -72,7 +74,7 @@ $(BUILD)/$(1).$(2).text: $(BUILD)/$(1).$(2).o
 
 $(BUILD)/knod-$(1)-gfx$(2).bin: $(BUILD)/$(1).$(2).text $(BUILD)/$(1).$(2).o \
 				tools/pack.py $(ABI_HDR)
-	python3 tools/pack.py --isa $(2) --wave 64 $(if $(filter bpf-persistent,$(1)),--persistent-shader,) \
+	python3 tools/pack.py --isa $(2) --wave 64 --persistent-shader \
 		--text $$< --obj $(BUILD)/$(1).$(2).o -o $$@
 
 dis-$(1)-$(2): $(BUILD)/$(1).$(2).o
