@@ -53,7 +53,6 @@
 #define GL_TX_FULL	16	// and 17
 #define GL_TX_GEN	18
 #define GL_RX_BASE	19	// and 20
-#define GL_BDS		21	// and 22
 #define GL_HEADROOM	23
 #define GL_RQ_LOG	24
 #define GL_CQ_LOG	25
@@ -507,8 +506,8 @@
 	v_mov_b32 v[P24+1], s9
 	global_load_dwordx4 v[P28:P28+3], v[P24:P24+1], off \
 			    offset:KNOD_PERSIST_GDA_PARAM glc dlc
-	global_load_dwordx4 v[P32:P32+3], v[P0:P1], off \
-			    offset:KNOD_PERSIST_GDA_RX_BASE glc dlc	// rx_base, bds
+	global_load_dwordx2 v[P32:P32+1], v[P0:P1], off \
+			    offset:KNOD_PERSIST_GDA_RX_BASE glc dlc
 	global_load_dwordx2 v[P20:P20+1], v[P0:P1], off \
 			    offset:KNOD_PERSIST_GDA_ROUNDS glc dlc
 	global_load_dwordx2 v[P22:P22+1], v[P0:P1], off \
@@ -558,10 +557,6 @@
 	v_writelane_b32 v[GS], s[PS0], GL_RX_BASE
 	v_readfirstlane_b32 s[PS0], v[P32+1]
 	v_writelane_b32 v[GS], s[PS0], GL_RX_BASE + 1
-	v_readfirstlane_b32 s[PS0], v[P32+2]
-	v_writelane_b32 v[GS], s[PS0], GL_BDS
-	v_readfirstlane_b32 s[PS0], v[P32+3]
-	v_writelane_b32 v[GS], s[PS0], GL_BDS + 1
 	s_waitcnt lgkmcnt(0)
 	v_writelane_b32 v[GS], s[PS2], GL_PAGE_SHIFT
 
@@ -807,21 +802,10 @@
 	v_add_co_u32 v[DATA_END], vcc, v[DATA], v[P14]
 	V_ADD_CI_U32 v[DATA_END+1], vcc, 0, v[DATA+1], vcc
 
-	// The lane's index in the queue, and the descriptor a program's bounds
-	// are read from: offset and length sharing a dword, then the page.
+	// The lane's index in the queue, and where in the page the packet
+	// arrived, which a program's bounds are measured from.
 	V_ADD_U32 v[P18], s0, v[P10]
-	v_lshlrev_b32 v[P16+1], 6, v[P18]
-	v_readlane_b32 s[GT], v[GS], GL_BDS
-	v_readlane_b32 s[GT+1], v[GS], GL_BDS + 1
-	v_add_co_u32 v[SLOT], vcc, s[GT], v[P16+1]
-	v_mov_b32 v[SLOT+1], s[GT+1]
-	V_ADD_CI_U32 v[SLOT+1], vcc, 0, v[SLOT+1], vcc
-	v_lshlrev_b32 v[P20], 16, v[P14]
-	v_or_b32 v[P20], v[P22], v[P20]
-	v_mov_b32 v[P20+1], v[PAGE_IDX]
-	global_store_dwordx2 v[SLOT:SLOT+1], v[P20:P20+1], off \
-			     offset:KNOD_BLOB_BD_OFF glc slc
-	s_waitcnt_vscnt null, 0
+	v_mov_b32 v[PKT_OFF], v[P22]
 
 	// The rest of what KNOD_PROLOGUE_BODY leaves the program: which lane
 	// of which queue, r1 = &param->sub[idx], r10 at the top of the frame.
