@@ -69,6 +69,7 @@
 #define GL_PASS_FLOOR	38	// entries before it are an earlier build's
 #define GL_PASS_RING	39	// and 40: in host memory
 #define GL_PASS_MASK	41
+#define GL_WAKE		42	// the host waits for PASS entries, as of this round
 
 // The meeting place in LDS.
 #define L_CMD		0	// nonzero: stop
@@ -659,6 +660,8 @@
 	global_load_dwordx4 v[P4:P4+3], v[P2:P3], off glc dlc	// version, stop, pause
 	s_waitcnt vmcnt(0)
 	GDA_PARK_OR_STOP
+	v_readfirstlane_b32 s[PS0], v[P4+3]		// pass_wake
+	v_writelane_b32 v[GS], s[PS0], GL_WAKE
 .Lgda_met\@:
 	s_barrier
 	GDA_LDS_ADDR P2
@@ -1067,6 +1070,21 @@
 	v_mov_b32 v[P2], s[X_PPC]
 	global_store_dword v[P0:P1], v[P2], off \
 			   offset:KNOD_PERSIST_GDA_PASS_PC glc slc
+	// The host sleeps until PASS entries come: take the request, so the
+	// other rounds leave it be, and interrupt once they are in memory.
+	v_readlane_b32 s[GT], v[GS], GL_WAKE
+	s_cmp_eq_u32 s[GT], 0
+	s_cbranch_scc1 .Lgda_passed\@
+	s_mov_b32 s[GT], 0
+	v_writelane_b32 v[GS], s[GT], GL_WAKE
+	v_mov_b32 v[P2], s8
+	v_mov_b32 v[P3], s9
+	v_mov_b32 v[P4], 0
+	global_store_dword v[P2:P3], v[P4], off \
+			   offset:KNOD_PERSIST_PASS_WAKE glc slc
+	s_waitcnt_vscnt null, 0
+	s_mov_b32 m0, KNOD_PERSIST_PASS_IRQ
+	s_sendmsg sendmsg(MSG_INTERRUPT)
 .Lgda_passed\@:
 	s_sub_u32 s[GT], s[X_ASKED], s[X_GIVEN]
 	v_readlane_b32 s[GT+1], v[GS], GL_TX_FULL
