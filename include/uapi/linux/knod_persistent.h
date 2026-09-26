@@ -2,7 +2,7 @@
 #ifndef _KNOD_PERSISTENT_H
 #define _KNOD_PERSISTENT_H
 /* One workgroup per RX queue; no X dimension multiplier. */
-#define KNOD_PERSIST_VERSION 0x4b50000d
+#define KNOD_PERSIST_VERSION 0x4b50000e
 #define KNOD_PERSIST_MAX_QUEUES 32
 #define KNOD_PERSIST_STOP 4
 /* Nonzero asks every queue to park at its next round boundary
@@ -18,7 +18,7 @@
  */
 #define KNOD_PERSIST_GDA_LDS 24
 #define KNOD_PERSIST_GDA_WAVES 28
-#define KNOD_PERSIST_GDA_LDS_BYTES 64
+#define KNOD_PERSIST_GDA_LDS_BYTES 1152
 #define KNOD_PERSIST_GDA_WAVES_MAX 4
 /* u64 per queue: where this queue's NIC TX doorbell is in the GPU's address
  * space.  Written once when a shader lifetime starts, zero when the NIC
@@ -51,6 +51,10 @@
 #define KNOD_PERSIST_GDA_CI 72		/* CQ consumer index, carried over */
 #define KNOD_PERSIST_GDA_POSTED_GEN 76	/* the generation the RQ was posted for */
 #define KNOD_PERSIST_GDA_PAUSE_ACK 80
+/* The RQ position, in packets: with the CQ compressed, a CQ entry may
+ * complete several, so this and ci move apart.
+ */
+#define KNOD_PERSIST_GDA_RX_POS 84
 /* The queue's XDP SQ and its CQ, when those are the accel's too; sq zero when
  * they are not, and XDP_TX then drops.
  */
@@ -82,6 +86,8 @@
 #define KNOD_PERSIST_GDA_PASS_PC 172
 #define KNOD_PERSIST_GDA_PASS_CC 176
 #define KNOD_PERSIST_GDA_PASS_FLOOR 180
+/* Nonzero: the NIC compresses the receive CQ, in the enhanced layout. */
+#define KNOD_PERSIST_GDA_CQ_COMP 184
 #define KNOD_PERSIST_GDA_PASS_ENTRIES 8192
 #define KNOD_PERSIST_BYTES 16384
 /* The ring buffer's layout, as net/knod.h lays it out for the NIC (the kernel
@@ -121,7 +127,7 @@ struct knod_persistent_gda {
 	u32 ci;
 	u32 posted_gen;
 	u32 pause_ack;
-	u32 pad;
+	u32 rx_pos;
 	u64 sq;
 	u32 sqn;
 	u32 sq_mask;
@@ -142,7 +148,8 @@ struct knod_persistent_gda {
 	u32 pass_pc;
 	u32 pass_cc;
 	u32 pass_floor;
-	u8 reserved[72];
+	u32 cq_comp;
+	u8 reserved[68];
 };
 
 struct knod_persistent_control {

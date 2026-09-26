@@ -7,10 +7,12 @@
 // program sent on the queue's XDP SQ, and gives the rest back to the RQ.
 //
 // One workgroup per queue, and up to KNOD_PERSIST_GDA_WAVES_MAX of its waves
-// take packets, 64 CQEs each a round: wave w the ones at ci + 64w.  Wave 0
-// alone keeps the rings - the doorbell records, the SQ, the TX completions,
-// the control block - and the waves meet in a few bytes of LDS past the
-// program's stack, four barriers a round.  The rest of the workgroup ends.
+// take packets.  Wave w reads the 64 CQ entries at ci + 64w; an entry is a
+// packet, or with the CQ compressed a run of up to seven, and the round's
+// packets are laid out in LDS in order, 64 to a wave.  Wave 0 alone keeps the
+// rings - the doorbell records, the SQ, the TX completions, the control block
+// - and the waves meet in LDS past the program's stack, five barriers a
+// round.  The rest of the workgroup ends.
 //
 // RQ entry i always holds RX page i.  The NIC consumes the RQ in order and
 // completes the SQ in order, so no page ever needs to move between entries:
@@ -19,8 +21,8 @@
 // first WQE records the RQ position it came from, which is all that takes.
 //
 // Across a program only s0, s2, s[6:7], s[8:9], s[10:11] and the named
-// registers survive; here that is s0 = 64 x the wave, s2 = the CQ consumer
-// index (every wave keeps its own, in step) and s[10:11] = the ring buffer,
+// registers survive; here that is s0 = 64 x the wave, s2 = the RQ position
+// in packets (every wave keeps its own, in step) and s[10:11] = the ring buffer,
 // and v73-v75 (KNOD_BLOB_PRO_GDA_VREG), which no program reaches: v[74:75]
 // lane 0 the packet count, and v73 one value per lane.
 
@@ -53,6 +55,8 @@
 #define GL_TX_FULL	16	// and 17
 #define GL_TX_GEN	18
 #define GL_RX_BASE	19	// and 20
+#define GL_CQ_CI	21	// CQ consumer index, in entries
+#define GL_S		22	// CQ entries this round, all waves
 #define GL_HEADROOM	23
 #define GL_RQ_LOG	24
 #define GL_CQ_LOG	25
@@ -69,6 +73,7 @@
 #define GL_PASS_FLOOR	38	// entries before it are an earlier build's
 #define GL_PASS_RING	39	// and 40: in host memory
 #define GL_PASS_MASK	41
+#define GL_CQ_COMP	42	// the CQ is compressed, enhanced layout
 
 // The meeting place in LDS.
 #define L_CMD		0	// nonzero: stop
@@ -78,6 +83,10 @@
 #define L_N		16	// each wave's run of CQEs, one dword each
 #define L_K		32	// each wave's XDP_TX count
 #define L_P		48	// each wave's XDP_PASS count
+#define L_PK		64	// each wave's packets in its run
+#define L_TS		80	// each wave's CQ entries taken
+#define L_TP		96	// ...and their packets
+#define L_LEN		128	// the round's byte counts, a dword a packet
 
 // The epilogue's scalars.
 #define E_W		14	// waves
@@ -126,9 +135,13 @@
 // What outlives the shader, and what the host reads, to the queue's entry.
 // Wave 0, lane 0, v[P0:P1] = the entry.  Clobbers s[24:25] and v[P24:P31].
 	.macro GDA_SAVE
-	v_mov_b32 v[P24], s2
+	v_readlane_b32 s[GT], v[GS], GL_CQ_CI
+	v_mov_b32 v[P24], s[GT]
+	v_mov_b32 v[P24+1], s2
 	global_store_dword v[P0:P1], v[P24], off \
 			   offset:KNOD_PERSIST_GDA_CI glc slc
+	global_store_dword v[P0:P1], v[P24+1], off \
+			   offset:KNOD_PERSIST_GDA_RX_POS glc slc
 	global_store_dwordx2 v[P0:P1], v[GDA_PKTS:GDA_PKTS+1], off \
 			     offset:KNOD_PERSIST_GDA_PACKETS glc slc
 	v_readlane_b32 s[GT], v[GS], GL_ROUNDS
@@ -218,7 +231,7 @@
 .Lgda_reaped\@:
 	.endm
 
-// Hand the CQ entries back up to s2, and the RQ entries up to the oldest one
+// Hand the CQ entries back up to ci, and the RQ entries up to the oldest one
 // whose packet is still waiting to be sent.  Expects E_PC, E_CC, E_MASK.
 // Leaves EXEC at lane 0.  Clobbers E_T, s[24:25], v[P2:P4].
 	.macro GDA_RQ_RELEASE
@@ -279,7 +292,8 @@
 	s_and_b32 s[E_T], s[E_T], 0xffff
 	v_mov_b32 v[P3], s[E_T]
 	v_perm_b32 v[P3], v[P3], v[P3], 0x00010203
-	s_and_b32 s[GT], s2, 0xffffff
+	v_readlane_b32 s[GT], v[GS], GL_CQ_CI
+	s_and_b32 s[GT], s[GT], 0xffffff
 	v_mov_b32 v[P2], s[GT]
 	v_perm_b32 v[P2], v[P2], v[P2], 0x00010203
 	v_mov_b32 v[P4], s10
@@ -346,19 +360,57 @@
 .Lgda_parked\@:
 	.endm
 
-// Fold wave \i's run of CQEs into the round: it counts only if every wave
-// before it had a full one.  s[PS2] = waves, s[PS2+1] = this wave,
-// s[PS4] = N, s[PS4+1] = this wave's, s[PS6] = still full; v[P4+\i] = its run.
+// Fold wave \i's run of CQ entries into the round: it counts only if every
+// wave before it had a full one.  v[P4+\i] = its run, v[P14+\i] = the
+// packets in it; s[PS2] = waves, s[PS2+1] = this wave, s[PS6] = still full.
+// s[PS4] = packets so far, and this wave's own: s[PS4+1] = packets before it,
+// s[PS6+1] = whether it counts.  Clobbers PS0 and s[24:25].
 	.macro GDA_TALLY_N i
 	v_readfirstlane_b32 s[GT], v[P4+\i]
+	v_readfirstlane_b32 s[GT+1], v[P14+\i]
 	s_cmp_gt_u32 s[PS2], \i
-	s_cselect_b32 s[GT], s[GT], 0
-	s_mul_i32 s[GT], s[GT], s[PS6]
-	s_add_u32 s[PS4], s[PS4], s[GT]
+	s_cselect_b32 s[PS0], s[PS6], 0
+	s_mul_i32 s[GT], s[GT], s[PS0]
+	s_mul_i32 s[GT+1], s[GT+1], s[PS0]
 	s_cmp_eq_u32 s[PS2+1], \i
-	s_cselect_b32 s[PS4+1], s[GT], s[PS4+1]
+	s_cselect_b32 s[PS4+1], s[PS4], s[PS4+1]
+	s_cselect_b32 s[PS6+1], s[PS0], s[PS6+1]
+	s_add_u32 s[PS4], s[PS4], s[GT+1]
 	s_cmp_eq_u32 s[GT], 64
 	s_cselect_b32 s[PS6], s[PS6], 0
+	.endm
+
+// Wave \i's take, v[P4+\i] CQ entries and v[P14+\i] packets, into s[PS6] and
+// s[PS4].  s[PS2] = waves.
+	.macro GDA_TALLY_S i
+	v_readfirstlane_b32 s[GT], v[P4+\i]
+	v_readfirstlane_b32 s[GT+1], v[P14+\i]
+	s_cmp_gt_u32 s[PS2], \i
+	s_cselect_b32 s[GT], s[GT], 0
+	s_cselect_b32 s[GT+1], s[GT+1], 0
+	s_add_u32 s[PS6], s[PS6], s[GT]
+	s_add_u32 s[PS4], s[PS4], s[GT+1]
+	.endm
+
+// One step of the running sum of v[P9] across the wave, through its quarter
+// of L_LEN at v[P3]; v[P10] = the lane.  Clobbers v[P8], s[24:25].
+	.macro GDA_SCAN_STEP d
+	ds_write_b32 v[P3], v[P9] offset:L_LEN
+	s_waitcnt lgkmcnt(0)
+	ds_read_b32 v[P8], v[P3] offset:(L_LEN - 4 * \d)
+	s_waitcnt lgkmcnt(0)
+	v_cmp_le_u32_e64 s[GT:GT+1], \d, v[P10]
+	v_cndmask_b32_e64 v[P8], 0, v[P8], s[GT:GT+1]
+	V_ADD_U32 v[P9], v[P9], v[P8]
+	.endm
+
+// Entry \m of a compressed run, in v[\reg], to its place in L_LEN at
+// v[P3], in the lanes whose run is longer than \m; v[P22+1] = the run.
+	.macro GDA_MINI m, reg
+	v_cmp_lt_u32_e64 s[PS6:PS6+1], \m, v[P22+1]
+	s_and_b64 exec, exec, s[PS6:PS6+1]
+	v_perm_b32 v[\reg], v[\reg], v[\reg], 0x00010203
+	ds_write_b32 v[P3], v[\reg] offset:(L_LEN + 4 * \m)
 	.endm
 
 // Hand wave \i its share of the SQ's room, in wave order; v[P4+\i] = the
@@ -508,6 +560,10 @@
 			    offset:KNOD_PERSIST_GDA_PARAM glc dlc
 	global_load_dwordx2 v[P32:P32+1], v[P0:P1], off \
 			    offset:KNOD_PERSIST_GDA_RX_BASE glc dlc
+	global_load_dword v[P32+2], v[P0:P1], off \
+			  offset:KNOD_PERSIST_GDA_RX_POS glc dlc
+	global_load_dword v[P32+3], v[P0:P1], off \
+			  offset:KNOD_PERSIST_GDA_CQ_COMP glc dlc
 	global_load_dwordx2 v[P20:P20+1], v[P0:P1], off \
 			    offset:KNOD_PERSIST_GDA_ROUNDS glc dlc
 	global_load_dwordx2 v[P22:P22+1], v[P0:P1], off \
@@ -557,6 +613,8 @@
 	v_writelane_b32 v[GS], s[PS0], GL_RX_BASE
 	v_readfirstlane_b32 s[PS0], v[P32+1]
 	v_writelane_b32 v[GS], s[PS0], GL_RX_BASE + 1
+	v_readfirstlane_b32 s[PS0], v[P32+3]
+	v_writelane_b32 v[GS], s[PS0], GL_CQ_COMP
 	s_waitcnt lgkmcnt(0)
 	v_writelane_b32 v[GS], s[PS2], GL_PAGE_SHIFT
 
@@ -565,6 +623,8 @@
 	// to RX page i - a round only ever gives an entry back as it was.
 	// Every wave has read the entry before wave 0 writes it.
 	v_readfirstlane_b32 s2, v[P16]			// ci
+	v_writelane_b32 v[GS], s2, GL_CQ_CI
+	v_readfirstlane_b32 s2, v[P32+2]		// RQ position
 	v_readfirstlane_b32 s[PS0], v[P16+1]		// posted_gen
 	v_readfirstlane_b32 s[PS1], v[P12+3]		// gen
 	// LDS starts undefined: no stop until wave 0 says so.
@@ -581,6 +641,7 @@
 	s_cmp_eq_u32 s[PS0], s[PS1]
 	s_cbranch_scc1 .Lgda_posted\@
 	s_mov_b32 s2, 0
+	v_writelane_b32 v[GS], s2, GL_CQ_CI
 	// What the host still copies out came in on the last build's RQ.
 	v_readlane_b32 s[GT], v[GS], GL_PASS_PC
 	v_writelane_b32 v[GS], s[GT], GL_PASS_FLOOR
@@ -639,6 +700,8 @@
 	v_mov_b32 v[P9], v[P12+3]
 	global_store_dwordx2 v[P0:P1], v[P8:P9], off \
 			     offset:KNOD_PERSIST_GDA_CI glc slc
+	global_store_dword v[P0:P1], v[P8], off \
+			   offset:KNOD_PERSIST_GDA_RX_POS glc slc
 	v_readlane_b32 s[GT], v[GS], GL_PASS_FLOOR
 	v_mov_b32 v[P8], s[GT]
 	global_store_dword v[P0:P1], v[P8], off \
@@ -668,12 +731,15 @@
 	s_cmp_eq_u32 s[PS0], 0
 	s_cbranch_scc0 .Lgda_end\@
 
-	// Lane i of wave w reads CQE ci + 64w + i: its byte count, and its last
-	// dword - the RQ entry it completes, its opcode and its owner bit.
+	// Lane i of wave w reads CQ entry ci + 64w + i.  Its last dword says
+	// whether it is new, and whether it is one packet, its byte count at
+	// 44, or a compressed run of up to seven, eight bytes each with the
+	// byte count at 4 - the sixth of them at 44 too.
 	s_mov_b64 exec, -1
 	v_mbcnt_lo_u32_b32 v[P10], -1, 0
 	v_mbcnt_hi_u32_b32 v[P10], -1, v[P10]
-	s_add_u32 s[PS0], s2, s0
+	v_readlane_b32 s[PS0], v[GS], GL_CQ_CI
+	s_add_u32 s[PS0], s[PS0], s0
 	V_ADD_U32 v[P10+1], s[PS0], v[P10]		// position
 	v_readlane_b32 s[PS2+1], v[GS], GL_CQ_LOG
 	s_lshl_b32 s[PS0], 1, s[PS2+1]
@@ -686,28 +752,73 @@
 	V_ADD_CI_U32 v[P24+1], vcc, 0, v[P24+1], vcc
 	global_load_dword v[P28], v[P24:P24+1], off offset:44 glc dlc
 	global_load_dword v[P28+1], v[P24:P24+1], off offset:60 glc dlc
+	v_lshrrev_b32 v[P14], s[PS2+1], v[P10+1]	// pass round the ring
+	v_readlane_b32 s[GT], v[GS], GL_CQ_COMP
+	s_cmp_eq_u32 s[GT], 0
+	s_cbranch_scc1 .Lgda_owner\@
+	// Compressed: new when the NIC's count of passes, byte 62, is this
+	// one's.  The rest of a run's byte counts while that is checked.
+	global_load_dword v[P32], v[P24:P24+1], off offset:4 glc dlc
+	global_load_dword v[P32+1], v[P24:P24+1], off offset:12 glc dlc
+	global_load_dword v[P32+2], v[P24:P24+1], off offset:20 glc dlc
+	global_load_dword v[P32+3], v[P24:P24+1], off offset:28 glc dlc
+	global_load_dword v[P20], v[P24:P24+1], off offset:36 glc dlc
+	global_load_dword v[P20+1], v[P24:P24+1], off offset:52 glc dlc
+	s_waitcnt vmcnt(6)
+	v_and_b32 v[P14], 0xff, v[P14]
+	v_bfe_u32 v[P14+1], v[P28+1], 16, 8
+	v_cmp_eq_u32_e64 s[PS0:PS1], v[P14], v[P14+1]
+	s_branch .Lgda_valid\@
+.Lgda_owner\@:
+	// Otherwise when the owner bit is the pass round the ring the position
+	// is on and the opcode is not the invalid one a fresh ring holds.
 	s_waitcnt vmcnt(0)
-	// Ours when the owner bit is the pass round the ring the position is
-	// on and the opcode is not the invalid one a fresh ring holds.
 	v_lshrrev_b32 v[P12+1], 24, v[P28+1]		// op_own
-	v_lshrrev_b32 v[P14], s[PS2+1], v[P10+1]
 	v_and_b32 v[P14], 1, v[P14]
 	v_and_b32 v[P14+1], 1, v[P12+1]
 	v_cmp_eq_u32_e64 s[PS0:PS1], v[P14], v[P14+1]
 	v_lshrrev_b32 v[P12+1], 4, v[P12+1]
 	v_cmp_ne_u32_e64 s[GT:GT+1], 15, v[P12+1]
 	s_and_b64 s[PS0:PS1], s[PS0:PS1], s[GT:GT+1]
-	// This wave's unbroken run from its head.
+.Lgda_valid\@:
+	// This wave's unbroken run from its head, and the packets in each
+	// entry of it: a compressed run's count is its opcode plus one.
 	s_not_b64 s[GT:GT+1], s[PS0:PS1]
 	s_ff1_i32_b64 s[PS6+3], s[GT:GT+1]
 	s_cmp_lt_i32 s[PS6+3], 0
 	s_cselect_b32 s[PS6+3], 64, s[PS6+3]
+	v_lshrrev_b32 v[P12+1], 24, v[P28+1]		// op_own
+	v_bfe_u32 v[P22+1], v[P12+1], 2, 2		// format
+	v_cmp_eq_u32_e64 s[PS0:PS1], 3, v[P22+1]
+	v_lshrrev_b32 v[P22+1], 4, v[P12+1]
+	V_ADD_U32 v[P22+1], 1, v[P22+1]
+	v_cndmask_b32_e64 v[P22+1], 1, v[P22+1], s[PS0:PS1]
+	v_cmp_gt_u32_e64 s[PS0:PS1], s[PS6+3], v[P10]
+	v_cndmask_b32_e64 v[P22+1], 0, v[P22+1], s[PS0:PS1]
+	// Where in the wave's packets each entry's first one goes: a running
+	// sum, in this wave's quarter of L_LEN.
+	GDA_LDS_ADDR P2
+	v_lshlrev_b32 v[P3], 2, v[P10]
+	s_lshl_b32 s[PS0], s0, 2
+	V_ADD_U32 v[P3], s[PS0], v[P3]
+	V_ADD_U32 v[P3], v[P2], v[P3]
+	v_mov_b32 v[P9], v[P22+1]
+	GDA_SCAN_STEP 1
+	GDA_SCAN_STEP 2
+	GDA_SCAN_STEP 4
+	GDA_SCAN_STEP 8
+	GDA_SCAN_STEP 16
+	GDA_SCAN_STEP 32
+	V_SUB_U32 v[P22], v[P9], v[P22+1]
+	v_readlane_b32 s[PS6+2], v[P9], 63		// packets in the run
 	s_mov_b64 exec, 1
 	GDA_LDS_ADDR P2
 	v_mov_b32 v[P3], s[PS6+3]
+	v_mov_b32 v[P9], s[PS6+2]
 	s_lshr_b32 s[PS0], s0, 4
 	V_ADD_U32 v[P2], s[PS0], v[P2]
 	ds_write_b32 v[P2], v[P3] offset:L_N
+	ds_write_b32 v[P2], v[P9] offset:L_PK
 	// Maps the host changed while we were parked, and anything else a
 	// program reads that someone else writes; once, for the workgroup,
 	// before any wave's program runs.
@@ -723,19 +834,92 @@
 	s_waitcnt lgkmcnt(0)
 	s_barrier
 
-	// The round is the runs of every wave up to the first that was short.
+	// The round is the runs of every wave up to the first that was short,
+	// and of their packets as many as the waves have lanes for, whole
+	// entries only.
 	GDA_LDS_ADDR P2
 	ds_read_b128 v[P4:P4+3], v[P2] offset:L_N
+	ds_read_b128 v[P14:P14+3], v[P2] offset:L_PK
 	v_readlane_b32 s[PS2], v[GS], GL_WAVES
 	s_lshr_b32 s[PS2+1], s0, 6
 	s_mov_b32 s[PS4], 0
 	s_mov_b32 s[PS4+1], 0
 	s_mov_b32 s[PS6], 1
+	s_mov_b32 s[PS6+1], 0
 	s_waitcnt lgkmcnt(0)
 	GDA_TALLY_N 0
 	GDA_TALLY_N 1
 	GDA_TALLY_N 2
 	GDA_TALLY_N 3
+	// This wave's entries that fit, and their packets' byte counts to
+	// L_LEN, in the round's order.
+	s_mov_b64 exec, -1
+	s_lshl_b32 s[PS0], s[PS2], 6
+	V_ADD_U32 v[P8], v[P22], v[P22+1]
+	V_ADD_U32 v[P8], s[PS4+1], v[P8]
+	v_cmp_ge_u32_e64 s[INITIAL_EXEC:INITIAL_EXEC+1], s[PS0], v[P8]
+	v_cmp_ne_u32_e64 s[PS0:PS1], 0, v[P22+1]
+	s_and_b64 s[INITIAL_EXEC:INITIAL_EXEC+1], \
+		  s[INITIAL_EXEC:INITIAL_EXEC+1], s[PS0:PS1]
+	s_cmp_eq_u32 s[PS6+1], 0
+	s_cselect_b64 s[INITIAL_EXEC:INITIAL_EXEC+1], 0, \
+		      s[INITIAL_EXEC:INITIAL_EXEC+1]
+	s_bcnt1_i32_b64 s[PS6+3], s[INITIAL_EXEC:INITIAL_EXEC+1]
+	s_mov_b32 s[PS6+2], 0
+	s_cmp_eq_u32 s[PS6+3], 0
+	s_cbranch_scc1 .Lgda_lens\@
+	s_sub_u32 s[PS0], s[PS6+3], 1
+	v_readlane_b32 s[PS6+2], v[P8], s[PS0]
+	s_sub_u32 s[PS6+2], s[PS6+2], s[PS4+1]
+	s_mov_b64 exec, s[INITIAL_EXEC:INITIAL_EXEC+1]
+	GDA_LDS_ADDR P2
+	V_ADD_U32 v[P3], s[PS4+1], v[P22]
+	v_lshlrev_b32 v[P3], 2, v[P3]
+	V_ADD_U32 v[P3], v[P2], v[P3]
+	v_lshrrev_b32 v[P12+1], 24, v[P28+1]
+	v_bfe_u32 v[P12+1], v[P12+1], 2, 2
+	v_cmp_eq_u32_e64 s[PS4:PS4+1], 3, v[P12+1]	// compressed
+	s_andn2_b64 exec, exec, s[PS4:PS4+1]
+	v_perm_b32 v[P28], v[P28], v[P28], 0x00010203
+	ds_write_b32 v[P3], v[P28] offset:L_LEN
+	s_and_b64 exec, s[INITIAL_EXEC:INITIAL_EXEC+1], s[PS4:PS4+1]
+	s_cbranch_execz .Lgda_lens\@
+	s_waitcnt vmcnt(0)
+	GDA_MINI 0, P32
+	GDA_MINI 1, P32+1
+	GDA_MINI 2, P32+2
+	GDA_MINI 3, P32+3
+	GDA_MINI 4, P20
+	GDA_MINI 5, P28
+	GDA_MINI 6, P20+1
+.Lgda_lens\@:
+	s_waitcnt vmcnt(0)
+	s_mov_b64 exec, 1
+	GDA_LDS_ADDR P2
+	s_lshr_b32 s[PS0], s0, 4
+	V_ADD_U32 v[P2], s[PS0], v[P2]
+	v_mov_b32 v[P8], s[PS6+3]
+	v_mov_b32 v[P9], s[PS6+2]
+	ds_write_b32 v[P2], v[P8] offset:L_TS
+	ds_write_b32 v[P2], v[P9] offset:L_TP
+	s_waitcnt lgkmcnt(0)
+	s_barrier
+
+	// What the round took: CQ entries, and packets, 64 to a wave.
+	GDA_LDS_ADDR P2
+	ds_read_b128 v[P4:P4+3], v[P2] offset:L_TS
+	ds_read_b128 v[P14:P14+3], v[P2] offset:L_TP
+	s_mov_b32 s[PS4], 0
+	s_mov_b32 s[PS6], 0
+	s_waitcnt lgkmcnt(0)
+	GDA_TALLY_S 0
+	GDA_TALLY_S 1
+	GDA_TALLY_S 2
+	GDA_TALLY_S 3
+	s_sub_u32 s[PS4+1], s[PS4], s0
+	s_max_i32 s[PS4+1], s[PS4+1], 0
+	s_min_u32 s[PS4+1], s[PS4+1], 64
+	v_writelane_b32 v[GS], s[PS6], GL_S
 	v_writelane_b32 v[GS], s[PS4], GL_N
 	s_cmp_eq_u32 s[PS4], 0
 	s_cbranch_scc0 .Lgda_work\@
@@ -774,12 +958,21 @@
 	s_mov_b64 s[INITIAL_EXEC:INITIAL_EXEC+1], exec
 	s_mov_b64 s[DONE_MASK:DONE_MASK+1], 0
 
-	// The RQ entry this CQE completes, and so the page: entry i is page i.
-	v_perm_b32 v[P12+1], v[P28+1], v[P28+1], 0x0c0c0001
+	// The NIC fills the RQ in order, an entry a packet, and entry i is
+	// page i: the round's packet p came in on RQ position s2 + p.  Its
+	// byte count is where the CQ pass above left it.
+	V_ADD_U32 v[P12+1], s0, v[P10]
+	V_ADD_U32 v[P12+1], s2, v[P12+1]
 	v_readlane_b32 s[PS0], v[GS], GL_RQ_SIZE
 	s_sub_u32 s[PS0], s[PS0], 1
 	v_and_b32 v[PAGE_IDX], s[PS0], v[P12+1]
-	v_perm_b32 v[P14], v[P28], v[P28], 0x00010203	// byte count
+	GDA_LDS_ADDR P14
+	v_lshlrev_b32 v[P14+1], 2, v[P10]
+	s_lshl_b32 s[PS0], s0, 2
+	V_ADD_U32 v[P14+1], s[PS0], v[P14+1]
+	V_ADD_U32 v[P14], v[P14], v[P14+1]
+	ds_read_b32 v[P14], v[P14] offset:L_LEN
+	s_waitcnt lgkmcnt(0)
 
 	// page base = rx_base + (page << page_shift); data past the headroom.
 	v_readlane_b32 s[GT], v[GS], GL_PAGE_SHIFT
@@ -1112,9 +1305,13 @@
 	v_mov_b32 v[P5], s[GT+1]
 	global_store_dwordx2 v[P4:P5], v[P6:P7], off glc slc
 .Lgda_sent\@:
-	// Every wave moves its consumer index; wave 0 gives the CQ and RQ
-	// entries back - every verdict but a send as a drop does.
+	// Every wave moves its RQ position and CQ consumer index; wave 0 gives
+	// the CQ and RQ entries back - every verdict but a send as a drop does.
 	s_add_u32 s2, s2, s[E_N]
+	v_readlane_b32 s[GT], v[GS], GL_CQ_CI
+	v_readlane_b32 s[GT+1], v[GS], GL_S
+	s_add_u32 s[GT], s[GT], s[GT+1]
+	v_writelane_b32 v[GS], s[GT], GL_CQ_CI
 	s_cmp_eq_u32 s0, 0
 	s_cbranch_scc0 .Lgda_next\@
 	v_readlane_b32 s[E_PC], v[GS], GL_SQ_PC
