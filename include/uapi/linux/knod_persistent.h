@@ -18,7 +18,7 @@
  */
 #define KNOD_PERSIST_GDA_LDS 24
 #define KNOD_PERSIST_GDA_WAVES 28
-#define KNOD_PERSIST_GDA_LDS_BYTES 1152
+#define KNOD_PERSIST_GDA_LDS_BYTES 640
 #define KNOD_PERSIST_GDA_WAVES_MAX 4
 /* u64 per queue: where this queue's NIC TX doorbell is in the GPU's address
  * space.  Written once when a shader lifetime starts, zero when the NIC

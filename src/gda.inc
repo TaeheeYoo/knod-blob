@@ -86,7 +86,7 @@
 #define L_PK		64	// each wave's packets in its run
 #define L_TS		80	// each wave's CQ entries taken
 #define L_TP		96	// ...and their packets
-#define L_LEN		128	// the round's byte counts, a dword a packet
+#define L_LEN		128	// the round's byte counts, 16 bits a packet
 
 // The epilogue's scalars.
 #define E_W		14	// waves
@@ -393,11 +393,12 @@
 	.endm
 
 // One step of the running sum of v[P9] across the wave, through its quarter
-// of L_LEN at v[P3]; v[P10] = the lane.  Clobbers v[P8], s[24:25].
+// of L_LEN at v[P3]; v[P10] = the lane.  A wave's sum is at most 7 x 64, so
+// 16 bits hold it.  Clobbers v[P8], s[24:25].
 	.macro GDA_SCAN_STEP d
-	ds_write_b32 v[P3], v[P9] offset:L_LEN
+	ds_write_b16 v[P3], v[P9] offset:L_LEN
 	s_waitcnt lgkmcnt(0)
-	ds_read_b32 v[P8], v[P3] offset:(L_LEN - 4 * \d)
+	ds_read_u16 v[P8], v[P3] offset:(L_LEN - 2 * \d)
 	s_waitcnt lgkmcnt(0)
 	v_cmp_le_u32_e64 s[GT:GT+1], \d, v[P10]
 	v_cndmask_b32_e64 v[P8], 0, v[P8], s[GT:GT+1]
@@ -410,7 +411,7 @@
 	v_cmp_lt_u32_e64 s[PS6:PS6+1], \m, v[P22+1]
 	s_and_b64 exec, exec, s[PS6:PS6+1]
 	v_perm_b32 v[\reg], v[\reg], v[\reg], 0x00010203
-	ds_write_b32 v[P3], v[\reg] offset:(L_LEN + 4 * \m)
+	ds_write_b16 v[P3], v[\reg] offset:(L_LEN + 2 * \m)
 	.endm
 
 // Hand wave \i its share of the SQ's room, in wave order; v[P4+\i] = the
@@ -798,8 +799,8 @@
 	// Where in the wave's packets each entry's first one goes: a running
 	// sum, in this wave's quarter of L_LEN.
 	GDA_LDS_ADDR P2
-	v_lshlrev_b32 v[P3], 2, v[P10]
-	s_lshl_b32 s[PS0], s0, 2
+	v_lshlrev_b32 v[P3], 1, v[P10]
+	s_lshl_b32 s[PS0], s0, 1
 	V_ADD_U32 v[P3], s[PS0], v[P3]
 	V_ADD_U32 v[P3], v[P2], v[P3]
 	v_mov_b32 v[P9], v[P22+1]
@@ -874,14 +875,14 @@
 	s_mov_b64 exec, s[INITIAL_EXEC:INITIAL_EXEC+1]
 	GDA_LDS_ADDR P2
 	V_ADD_U32 v[P3], s[PS4+1], v[P22]
-	v_lshlrev_b32 v[P3], 2, v[P3]
+	v_lshlrev_b32 v[P3], 1, v[P3]
 	V_ADD_U32 v[P3], v[P2], v[P3]
 	v_lshrrev_b32 v[P12+1], 24, v[P28+1]
 	v_bfe_u32 v[P12+1], v[P12+1], 2, 2
 	v_cmp_eq_u32_e64 s[PS4:PS4+1], 3, v[P12+1]	// compressed
 	s_andn2_b64 exec, exec, s[PS4:PS4+1]
 	v_perm_b32 v[P28], v[P28], v[P28], 0x00010203
-	ds_write_b32 v[P3], v[P28] offset:L_LEN
+	ds_write_b16 v[P3], v[P28] offset:L_LEN
 	s_and_b64 exec, s[INITIAL_EXEC:INITIAL_EXEC+1], s[PS4:PS4+1]
 	s_cbranch_execz .Lgda_lens\@
 	s_waitcnt vmcnt(0)
@@ -967,11 +968,11 @@
 	s_sub_u32 s[PS0], s[PS0], 1
 	v_and_b32 v[PAGE_IDX], s[PS0], v[P12+1]
 	GDA_LDS_ADDR P14
-	v_lshlrev_b32 v[P14+1], 2, v[P10]
-	s_lshl_b32 s[PS0], s0, 2
+	v_lshlrev_b32 v[P14+1], 1, v[P10]
+	s_lshl_b32 s[PS0], s0, 1
 	V_ADD_U32 v[P14+1], s[PS0], v[P14+1]
 	V_ADD_U32 v[P14], v[P14], v[P14+1]
-	ds_read_b32 v[P14], v[P14] offset:L_LEN
+	ds_read_u16 v[P14], v[P14] offset:L_LEN
 	s_waitcnt lgkmcnt(0)
 
 	// page base = rx_base + (page << page_shift); data past the headroom.
