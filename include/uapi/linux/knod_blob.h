@@ -17,7 +17,7 @@
 #define _UAPI_LINUX_KNOD_BLOB_H
 
 #define KNOD_BLOB_MAGIC		0x4b4e4442	/* 'KNDB' */
-#define KNOD_BLOB_ABI_VERSION	20
+#define KNOD_BLOB_ABI_VERSION	21
 
 /*
  * How a routine is reached.  SPLICE is what the JIT does: the bytes are copied
@@ -340,6 +340,11 @@ struct knod_blob_map_desc {
  */
 #define KNOD_BLOB_PRO_GDA_VREG		73
 #define KNOD_BLOB_PRO_GDA_VREGS		3
+/* GDA: where the epilogue lays out a packet it sends inline, past everything
+ * a program reaches.  The kernel declares the wave's VGPRs up to its end.
+ */
+#define KNOD_BLOB_PRO_TX_INLINE_VREG	76
+#define KNOD_BLOB_PRO_TX_INLINE_VREGS	48
 
 /* Scratch it may use while doing so, which is the same window a map routine
  * gets, plus the scalars nothing holds across a dispatch.

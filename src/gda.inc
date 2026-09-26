@@ -32,6 +32,12 @@
 #define KNOD_MLX5_OPCODE_SEND		0x0a
 #define KNOD_MLX5_CTRL_CQ_UPDATE	0x08	// fm_ce_se
 #define KNOD_MLX5_SEND_DS		3	// ctrl, eth, one data segment
+#define KNOD_MLX5_OPCODE_NOP		0x00
+
+// A packet this long or shorter goes out inline, in at most four WQEBBs;
+// what it is read into, v[IL:IL+47], holds it from two bytes before.
+#define KNOD_GDA_INLINE_MAX		170
+#define IL		KNOD_BLOB_PRO_TX_INLINE_VREG
 
 #define GS		KNOD_BLOB_PRO_GDA_VREG
 #define GDA_PKTS	(KNOD_BLOB_PRO_GDA_VREG + 1)	// v[74:75]
@@ -78,6 +84,9 @@
 #define L_N		16	// each wave's run of CQEs, one dword each
 #define L_K		32	// each wave's XDP_TX count
 #define L_P		48	// each wave's XDP_PASS count
+#define L_U		64	// each wave's WQEBBs used
+#define L_S		80	// ...and packets sent in them
+#define L_KP		96	// each wave's XDP_TX, in packets
 
 // The epilogue's scalars.
 #define E_W		14	// waves
@@ -93,10 +102,10 @@
 #define X_PREFIX	47	// WQEs handed to the waves before
 #define X_BASE		48	// this wave's first WQE, from the round's
 #define X_MINE		49	// this wave's WQEs
-#define X_ASKED		50	// XDP_TX all waves asked for
-#define X_GIVEN		51	// WQEs all waves got
-#define X_FIRST		52	// the first wave with one, or 4
-#define X_LAST		53	// the last wave with one
+#define X_ASKED		50	// XDP_TX all waves asked for, in packets
+#define X_GIVEN		51	// WQEBBs all waves used
+#define X_FIRST		52	// the first wave with room, or 4
+#define X_SENT		53	// packets sent: this wave's, then all waves'
 #define X_PBASE		54	// PASS entries the waves before append
 #define X_PTOTAL	55	// ...all waves
 #define X_PPC		56	// PASS entries appended before this round
@@ -161,7 +170,7 @@
 
 // Take what the NIC has sent off the TX CQ: E_CC and E_TXCI move.  Expects
 // E_PC, E_CC, E_TXCI and a nonzero E_MASK.  One CQE per round that sent, on
-// its last WQE, so the run of new ones ends on a round boundary.
+// its closing NOP, so the run of new ones ends on a round boundary.
 // Clobbers EXEC, E_T, s[22:25], v[P2:P8].
 	.macro GDA_TX_REAP
 	s_mov_b64 exec, -1
@@ -362,19 +371,17 @@
 	.endm
 
 // Hand wave \i its share of the SQ's room, in wave order; v[P4+\i] = the
-// XDP_TX it asked for.  See X_*.
+// WQEBBs it asked for.  See X_*.
 	.macro GDA_TALLY_K i
 	v_readfirstlane_b32 s[E_T], v[P4+\i]
 	s_cmp_gt_u32 s[E_W], \i
 	s_cselect_b32 s[E_T], s[E_T], 0
-	s_add_u32 s[X_ASKED], s[X_ASKED], s[E_T]
 	s_min_u32 s[E_T], s[E_T], s[X_LEFT]
 	s_sub_u32 s[X_LEFT], s[X_LEFT], s[E_T]
 	s_cmp_eq_u32 s[E_ME], \i
 	s_cselect_b32 s[X_BASE], s[X_PREFIX], s[X_BASE]
 	s_cselect_b32 s[X_MINE], s[E_T], s[X_MINE]
 	s_cmp_lg_u32 s[E_T], 0
-	s_cselect_b32 s[X_LAST], \i, s[X_LAST]
 	s_cselect_b32 s[GT], \i, 4
 	s_min_u32 s[X_FIRST], s[X_FIRST], s[GT]
 	s_add_u32 s[X_PREFIX], s[X_PREFIX], s[E_T]
@@ -390,6 +397,68 @@
 	s_cmp_gt_u32 s[E_ME], \i
 	s_cselect_b32 s[E_T], s[E_T], 0
 	s_add_u32 s[X_PBASE], s[X_PBASE], s[E_T]
+	.endm
+
+// Wave \i's WQEBBs used, packets sent and XDP_TX asked, v[P4+\i],
+// v[P8+\i] and v[P12+\i], into X_GIVEN, X_SENT and X_ASKED.
+	.macro GDA_TALLY_U i
+	v_readfirstlane_b32 s[GT], v[P4+\i]
+	v_readfirstlane_b32 s[GT+1], v[P8+\i]
+	v_readfirstlane_b32 s[E_T], v[P12+\i]
+	s_cmp_gt_u32 s[E_W], \i
+	s_cselect_b32 s[GT], s[GT], 0
+	s_cselect_b32 s[GT+1], s[GT+1], 0
+	s_cselect_b32 s[E_T], s[E_T], 0
+	s_add_u32 s[X_GIVEN], s[X_GIVEN], s[GT]
+	s_add_u32 s[X_SENT], s[X_SENT], s[GT+1]
+	s_add_u32 s[X_ASKED], s[X_ASKED], s[E_T]
+	.endm
+
+// The sends before each one that need more than \k - 1 WQEBBs, into its
+// rank v[P22], and all of them into s[E_T]; v[P20] = each one's WQEBBs.
+	.macro GDA_WQEBB_RANK k
+	v_cmp_le_u32_e64 s[X_LEFT:X_LEFT+1], \k, v[P20]
+	v_mbcnt_lo_u32_b32 v[P22], s[X_LEFT], v[P22]
+	v_mbcnt_hi_u32_b32 v[P22], s[X_LEFT+1], v[P22]
+	s_bcnt1_i32_b64 s[X_BASE], s[X_LEFT:X_LEFT+1]
+	s_add_u32 s[E_T], s[E_T], s[X_BASE]
+	.endm
+
+// The sends in EXEC that need more than \k - 1 WQEBBs, into s[E_T].
+	.macro GDA_WQEBB_USED k
+	v_cmp_le_u32_e64 s[X_LEFT:X_LEFT+1], \k, v[P20]
+	s_bcnt1_i32_b64 s[X_LEFT], s[X_LEFT:X_LEFT+1]
+	s_add_u32 s[E_T], s[E_T], s[X_LEFT]
+	.endm
+
+// v[\reg:\reg+1] = WQEBB \b of the WQE at counter v[P3], which may wrap the
+// SQ's end.  s[24:25] = the SQ.
+	.macro GDA_WQEBB_ADDR b, reg
+	V_ADD_U32 v[\reg], \b, v[P3]
+	v_and_b32 v[\reg], s[E_MASK], v[\reg]
+	v_lshlrev_b32 v[\reg], 6, v[\reg]
+	v_add_co_u32 v[\reg], vcc, s[GT], v[\reg]
+	v_mov_b32 v[\reg+1], s[GT+1]
+	V_ADD_CI_U32 v[\reg+1], vcc, 0, v[\reg+1], vcc
+	.endm
+
+// Inline dwords \m to \m+3 into place, each the four bytes from its own
+// aligned dword on, v[P18] of them in; in order, so each still has the
+// next one as read.
+	.macro GDA_ALIGN4 m
+	v_alignbyte_b32 v[IL+\m], v[IL+\m+1], v[IL+\m], v[P18]
+	v_alignbyte_b32 v[IL+\m+1], v[IL+\m+2], v[IL+\m+1], v[P18]
+	v_alignbyte_b32 v[IL+\m+2], v[IL+\m+3], v[IL+\m+2], v[P18]
+	v_alignbyte_b32 v[IL+\m+3], v[IL+\m+4], v[IL+\m+3], v[P18]
+	.endm
+
+// Sixteen-byte chunk \c of an inline WQE, in the lanes whose WQE is longer;
+// v[P20+1] = each one's ds count, v[\addr:\addr+1] = the WQEBB it is in.
+	.macro GDA_INLINE_CHUNK c, addr
+	v_cmp_lt_u32_e64 s[X_LEFT:X_LEFT+1], \c, v[P20+1]
+	s_and_b64 exec, exec, s[X_LEFT:X_LEFT+1]
+	global_store_dwordx4 v[\addr:\addr+1], v[IL+4*\c-7:IL+4*\c-4], off \
+			     offset:(16 * (\c & 3)) glc slc
 	.endm
 
 	.macro KNOD_GDA_PROLOGUE_BODY
@@ -857,18 +926,43 @@
 	s_and_b64 s[E_TX:E_TX+1], s[E_TX:E_TX+1], exec
 	s_cmp_eq_u32 s[E_MASK], 0
 	s_cselect_b64 s[E_TX:E_TX+1], 0, s[E_TX:E_TX+1]
-	s_bcnt1_i32_b64 s[E_T], s[E_TX:E_TX+1]
 	v_cmp_eq_u32_e64 s[GT:GT+1], XDP_PASS, v[BPF_R0]
 	s_and_b64 s[GT:GT+1], s[GT:GT+1], exec
 	s_bcnt1_i32_b64 s[X_PMINE], s[GT:GT+1]
+	// Each send's WQE: the packet inline when it fits, a pointer to it when
+	// not.  Its size in WQEBBs, and where in the wave's run of them it
+	// starts: the sends before it, plus those before it that need a second
+	// WQEBB, a third and a fourth.
+	s_bcnt1_i32_b64 s[X_MINE], s[E_TX:E_TX+1]
+	s_mov_b32 s[E_T], s[X_MINE]
+	s_mov_b64 exec, s[E_TX:E_TX+1]
+	s_cbranch_execz .Lgda_sized\@
+	V_SUB_U32 v[P22+1], v[DATA_END], v[DATA]		// length
+	V_ADD_U32 v[P20+1], 13, v[P22+1]
+	v_lshrrev_b32 v[P20+1], 4, v[P20+1]
+	V_ADD_U32 v[P20+1], 2, v[P20+1]			// ds, inline
+	s_movk_i32 s[X_BASE], KNOD_GDA_INLINE_MAX
+	v_cmp_lt_u32_e64 s[X_LEFT:X_LEFT+1], s[X_BASE], v[P22+1]
+	v_cndmask_b32_e64 v[P20+1], v[P20+1], KNOD_MLX5_SEND_DS, \
+			  s[X_LEFT:X_LEFT+1]
+	V_ADD_U32 v[P20], 3, v[P20+1]
+	v_lshrrev_b32 v[P20], 2, v[P20]			// WQEBBs
+	v_mbcnt_lo_u32_b32 v[P22], exec_lo, 0
+	v_mbcnt_hi_u32_b32 v[P22], exec_hi, v[P22]
+	GDA_WQEBB_RANK 2
+	GDA_WQEBB_RANK 3
+	GDA_WQEBB_RANK 4
+.Lgda_sized\@:
 	s_mov_b64 exec, 1
 	GDA_LDS_ADDR P2
 	v_mov_b32 v[P3], s[E_T]
 	v_mov_b32 v[P5], s[X_PMINE]
+	v_mov_b32 v[P6], s[X_MINE]
 	s_lshr_b32 s[GT], s0, 4
 	V_ADD_U32 v[P4], s[GT], v[P2]
 	ds_write_b32 v[P4], v[P3] offset:L_K
 	ds_write_b32 v[P4], v[P5] offset:L_P
+	ds_write_b32 v[P4], v[P6] offset:L_KP
 	s_waitcnt lgkmcnt(0)
 	s_cmp_eq_u32 s0, 0
 	s_cbranch_scc0 .Lgda_asked\@
@@ -911,92 +1005,147 @@
 	GDA_TALLY_P 3
 	v_readfirstlane_b32 s[E_PC], v[P0]
 	v_readfirstlane_b32 s[E_CC], v[P1]
+	// The SQ's room, in WQEBBs, less one for the round's NOP.
 	s_sub_u32 s[X_LEFT], s[E_PC], s[E_CC]
 	s_sub_u32 s[X_LEFT], s[E_MASK], s[X_LEFT]
-	s_add_u32 s[X_LEFT], s[X_LEFT], 1
+	s_max_i32 s[X_LEFT], s[X_LEFT], 0
 	s_mov_b32 s[X_PREFIX], 0
 	s_mov_b32 s[X_BASE], 0
 	s_mov_b32 s[X_MINE], 0
-	s_mov_b32 s[X_ASKED], 0
 	s_mov_b32 s[X_FIRST], 4
-	s_mov_b32 s[X_LAST], 0
 	GDA_TALLY_K 0
 	GDA_TALLY_K 1
 	GDA_TALLY_K 2
 	GDA_TALLY_K 3
-	s_mov_b32 s[X_GIVEN], s[X_PREFIX]
+	s_mov_b32 s[E_T], 0
+	s_mov_b32 s[X_SENT], 0
 	s_cmp_eq_u32 s[X_MINE], 0
 	s_cbranch_scc1 .Lgda_txdone\@
 
-	// One send WQE per lane that goes, at pc + base + its rank.
+	// The sends that fit this wave's share, whole WQEs in lane order, each
+	// at pc + base + its rank.
 	s_mov_b64 exec, s[INITIAL_EXEC:INITIAL_EXEC+1]
 	v_cmp_eq_u32_e64 s[E_TX:E_TX+1], XDP_TX, v[BPF_R0]
 	s_and_b64 exec, s[E_TX:E_TX+1], exec
-	v_mbcnt_lo_u32_b32 v[P2], exec_lo, 0
-	v_mbcnt_hi_u32_b32 v[P2], exec_hi, v[P2]
-	v_cmp_gt_u32_e64 s[E_TX:E_TX+1], s[X_MINE], v[P2]
+	V_ADD_U32 v[P2], v[P22], v[P20]
+	v_cmp_ge_u32_e64 s[E_TX:E_TX+1], s[X_MINE], v[P2]
 	s_and_b64 exec, s[E_TX:E_TX+1], exec
 	s_mov_b64 s[E_TX:E_TX+1], exec
+	s_cbranch_execz .Lgda_txdone\@
+	s_bcnt1_i32_b64 s[X_SENT], exec
+	s_mov_b32 s[E_T], s[X_SENT]
+	GDA_WQEBB_USED 2
+	GDA_WQEBB_USED 3
+	GDA_WQEBB_USED 4
 	s_add_u32 s[GT], s[E_PC], s[X_BASE]
-	V_ADD_U32 v[P3], s[GT], v[P2]			// WQE counter
-	v_and_b32 v[P4], s[E_MASK], v[P3]
-	v_lshlrev_b32 v[P4], 6, v[P4]
+	V_ADD_U32 v[P3], s[GT], v[P22]			// WQE counter
 	v_readlane_b32 s[GT], v[GS], GL_SQ
 	v_readlane_b32 s[GT+1], v[GS], GL_SQ + 1
-	v_add_co_u32 v[P8], vcc, s[GT], v[P4]
-	v_mov_b32 v[P8+1], s[GT+1]
-	V_ADD_CI_U32 v[P8+1], vcc, 0, v[P8+1], vcc
+	GDA_WQEBB_ADDR 0, P8
+	GDA_WQEBB_ADDR 1, P10
+	GDA_WQEBB_ADDR 2, P12
+	GDA_WQEBB_ADDR 3, P14
 
-	// The NIC's address for the packet: rx_dma[page_idx] + its offset.
-	v_readlane_b32 s[GT], v[GS], GL_RX_DMA
-	v_readlane_b32 s[GT+1], v[GS], GL_RX_DMA + 1
-	v_lshlrev_b32 v[P4], 3, v[PAGE_IDX]
-	v_add_co_u32 v[P20], vcc, s[GT], v[P4]
-	v_mov_b32 v[P20+1], s[GT+1]
-	V_ADD_CI_U32 v[P20+1], vcc, 0, v[P20+1], vcc
-	global_load_dwordx2 v[P12:P12+1], v[P20:P20+1], off
-	V_SUB_U32 v[P22], v[DATA], v[PAGE_BASE]		// offset
-	V_SUB_U32 v[P22+1], v[DATA_END], v[DATA]		// length
-
-	// ctrl: opmod_idx_opcode and qpn_ds, both big endian, then fm_ce_se:
-	// a completion for the round's last WQE only.
+	// ctrl: opmod_idx_opcode and qpn_ds, big endian.  No completion: the
+	// round's NOP asks for that.
 	v_and_b32 v[P5], 0xffff, v[P3]
 	v_lshlrev_b32 v[P5], 8, v[P5]
 	v_or_b32 v[P5], KNOD_MLX5_OPCODE_SEND, v[P5]
-	v_perm_b32 v[P0], v[P5], v[P5], 0x00010203
+	v_perm_b32 v[P4], v[P5], v[P5], 0x00010203
 	v_readlane_b32 s[GT], v[GS], GL_SQN
 	s_lshl_b32 s[GT], s[GT], 8
-	s_or_b32 s[GT], s[GT], KNOD_MLX5_SEND_DS
-	v_mov_b32 v[P5], s[GT]
-	v_perm_b32 v[P0+1], v[P5], v[P5], 0x00010203
-	s_sub_u32 s[GT], s[X_MINE], 1
-	s_cmp_eq_u32 s[E_ME], s[X_LAST]
-	s_cselect_b32 s[GT], s[GT], 64
-	v_cmp_eq_u32_e64 s[GT:GT+1], s[GT], v[P2]
-	v_mov_b32 v[P5], (KNOD_MLX5_CTRL_CQ_UPDATE << 24)
-	v_cndmask_b32_e64 v[P0+2], 0, v[P5], s[GT:GT+1]
-	v_mov_b32 v[P0+3], 0
-
-	// eth: nothing inlined, no offloads.
-	v_mov_b32 v[P4], 0
-	v_mov_b32 v[P5], 0
+	v_or_b32 v[P5], s[GT], v[P20+1]
+	v_perm_b32 v[P5], v[P5], v[P5], 0x00010203
 	v_mov_b32 v[P6], 0
 	v_mov_b32 v[P7], 0
+	global_store_dwordx4 v[P8:P8+1], v[P4:P4+3], off glc slc
 
-	// data: byte count, lkey, address.  Big endian, but for the lkey,
-	// which the NIC handed over already swapped.
+	// Too long to inline: eth empty, then a data segment pointing at the
+	// packet, rx_dma[page_idx] + its offset.  Byte count, lkey, address, big
+	// endian but for the lkey, which the NIC handed over already swapped.
+	s_movk_i32 s[X_BASE], KNOD_GDA_INLINE_MAX
+	v_cmp_lt_u32_e64 s[X_LEFT:X_LEFT+1], s[X_BASE], v[P22+1]
+	s_and_b64 exec, s[E_TX:E_TX+1], s[X_LEFT:X_LEFT+1]
+	s_cbranch_execz .Lgda_ptr\@
+	v_readlane_b32 s[GT], v[GS], GL_RX_DMA
+	v_readlane_b32 s[GT+1], v[GS], GL_RX_DMA + 1
+	v_lshlrev_b32 v[P16], 3, v[PAGE_IDX]
+	v_add_co_u32 v[P16], vcc, s[GT], v[P16]
+	v_mov_b32 v[P16+1], s[GT+1]
+	V_ADD_CI_U32 v[P16+1], vcc, 0, v[P16+1], vcc
+	global_load_dwordx2 v[P16:P16+1], v[P16:P16+1], off
+	V_SUB_U32 v[P18], v[DATA], v[PAGE_BASE]		// offset
 	v_readlane_b32 s[GT], v[GS], GL_TX_MKEY
 	s_waitcnt vmcnt(0)
-	v_add_co_u32 v[P12], vcc, v[P12], v[P22]
-	V_ADD_CI_U32 v[P12+1], vcc, 0, v[P12+1], vcc
-	v_perm_b32 v[P16], v[P22+1], v[P22+1], 0x00010203
-	v_mov_b32 v[P16+1], s[GT]
-	v_perm_b32 v[P16+2], v[P12+1], v[P12+1], 0x00010203
-	v_perm_b32 v[P16+3], v[P12], v[P12], 0x00010203
+	v_add_co_u32 v[P16], vcc, v[P16], v[P18]
+	V_ADD_CI_U32 v[P16+1], vcc, 0, v[P16+1], vcc
+	v_perm_b32 v[P24], v[P22+1], v[P22+1], 0x00010203
+	v_mov_b32 v[P24+1], s[GT]
+	v_perm_b32 v[P24+2], v[P16+1], v[P16+1], 0x00010203
+	v_perm_b32 v[P24+3], v[P16], v[P16], 0x00010203
+	v_mov_b32 v[P28], 0
+	v_mov_b32 v[P28+1], 0
+	v_mov_b32 v[P28+2], 0
+	v_mov_b32 v[P28+3], 0
+	global_store_dwordx4 v[P8:P8+1], v[P28:P28+3], off offset:16 glc slc
+	global_store_dwordx4 v[P8:P8+1], v[P24:P24+3], off offset:32 glc slc
+.Lgda_ptr\@:
 
-	global_store_dwordx4 v[P8:P8+1], v[P0:P0+3], off glc slc
-	global_store_dwordx4 v[P8:P8+1], v[P4:P4+3], off offset:16 glc slc
-	global_store_dwordx4 v[P8:P8+1], v[P16:P16+3], off offset:32 glc slc
+	// Inline: the eth segment's inline header holds the length, big endian,
+	// and the packet's first two bytes, and the packet runs on from there.
+	// Read in aligned dwords from two bytes before it, and shifted into
+	// place.
+	s_andn2_b64 exec, s[E_TX:E_TX+1], s[X_LEFT:X_LEFT+1]
+	s_cbranch_execz .Lgda_inlined\@
+	v_add_co_u32 v[P16], vcc, -2, v[DATA]
+	V_ADD_CI_U32 v[P16+1], vcc, -1, v[DATA+1], vcc
+	v_and_b32 v[P18], 3, v[P16]			// shift
+	v_and_b32 v[P16], -4, v[P16]
+	global_load_dwordx4 v[IL+0:IL+3], v[P16:P16+1], off
+	global_load_dwordx4 v[IL+4:IL+7], v[P16:P16+1], off offset:16
+	global_load_dwordx4 v[IL+8:IL+11], v[P16:P16+1], off offset:32
+	global_load_dwordx4 v[IL+12:IL+15], v[P16:P16+1], off offset:48
+	global_load_dwordx4 v[IL+16:IL+19], v[P16:P16+1], off offset:64
+	global_load_dwordx4 v[IL+20:IL+23], v[P16:P16+1], off offset:80
+	global_load_dwordx4 v[IL+24:IL+27], v[P16:P16+1], off offset:96
+	global_load_dwordx4 v[IL+28:IL+31], v[P16:P16+1], off offset:112
+	global_load_dwordx4 v[IL+32:IL+35], v[P16:P16+1], off offset:128
+	global_load_dwordx4 v[IL+36:IL+39], v[P16:P16+1], off offset:144
+	global_load_dwordx4 v[IL+40:IL+43], v[P16:P16+1], off offset:160
+	global_load_dwordx4 v[IL+44:IL+47], v[P16:P16+1], off offset:176
+	s_waitcnt vmcnt(0)
+	GDA_ALIGN4 0
+	GDA_ALIGN4 4
+	GDA_ALIGN4 8
+	GDA_ALIGN4 12
+	GDA_ALIGN4 16
+	GDA_ALIGN4 20
+	GDA_ALIGN4 24
+	GDA_ALIGN4 28
+	GDA_ALIGN4 32
+	GDA_ALIGN4 36
+	GDA_ALIGN4 40
+	v_alignbyte_b32 v[IL+44], v[IL+45], v[IL+44], v[P18]
+	v_and_b32 v[P24+3], 0xffff0000, v[IL]
+	v_perm_b32 v[P24+2], v[P22+1], v[P22+1], 0x0c0c0001
+	v_or_b32 v[P24+3], v[P24+3], v[P24+2]
+	v_mov_b32 v[P24], 0
+	v_mov_b32 v[P24+1], 0
+	v_mov_b32 v[P24+2], 0
+	global_store_dwordx4 v[P8:P8+1], v[P24:P24+3], off offset:16 glc slc
+	global_store_dwordx4 v[P8:P8+1], v[IL+1:IL+4], off offset:32 glc slc
+	GDA_INLINE_CHUNK 3, P8
+	GDA_INLINE_CHUNK 4, P10
+	GDA_INLINE_CHUNK 5, P10
+	GDA_INLINE_CHUNK 6, P10
+	GDA_INLINE_CHUNK 7, P10
+	GDA_INLINE_CHUNK 8, P12
+	GDA_INLINE_CHUNK 9, P12
+	GDA_INLINE_CHUNK 10, P12
+	GDA_INLINE_CHUNK 11, P12
+	GDA_INLINE_CHUNK 12, P14
+.Lgda_inlined\@:
+	s_mov_b64 exec, s[E_TX:E_TX+1]
 
 	// The round's first WQE says which RQ position it came in on.
 	s_cmp_eq_u32 s[E_ME], s[X_FIRST]
@@ -1052,7 +1201,17 @@
 	V_ADD_U32 v[P6], s[GT], v[P6]			// RQ position
 	global_store_dword v[P4:P5], v[P6], off glc slc
 .Lgda_written\@:
-	// Every wave's WQEs are in memory before wave 0 says they are there.
+	// What this wave used of the SQ and sent in it, and every wave's WQEs
+	// in memory, before wave 0 says they are there.
+	s_mov_b64 exec, 1
+	GDA_LDS_ADDR P2
+	s_lshr_b32 s[GT], s0, 4
+	V_ADD_U32 v[P2], s[GT], v[P2]
+	v_mov_b32 v[P3], s[E_T]
+	v_mov_b32 v[P4], s[X_SENT]
+	ds_write_b32 v[P2], v[P3] offset:L_U
+	ds_write_b32 v[P2], v[P4] offset:L_S
+	s_waitcnt lgkmcnt(0)
 	s_waitcnt_vscnt null, 0
 	s_barrier
 	s_cmp_eq_u32 s0, 0
@@ -1068,7 +1227,19 @@
 	global_store_dword v[P0:P1], v[P2], off \
 			   offset:KNOD_PERSIST_GDA_PASS_PC glc slc
 .Lgda_passed\@:
-	s_sub_u32 s[GT], s[X_ASKED], s[X_GIVEN]
+	GDA_LDS_ADDR P2
+	ds_read_b128 v[P4:P4+3], v[P2] offset:L_U
+	ds_read_b128 v[P8:P8+3], v[P2] offset:L_S
+	ds_read_b128 v[P12:P12+3], v[P2] offset:L_KP
+	s_mov_b32 s[X_GIVEN], 0
+	s_mov_b32 s[X_SENT], 0
+	s_mov_b32 s[X_ASKED], 0
+	s_waitcnt lgkmcnt(0)
+	GDA_TALLY_U 0
+	GDA_TALLY_U 1
+	GDA_TALLY_U 2
+	GDA_TALLY_U 3
+	s_sub_u32 s[GT], s[X_ASKED], s[X_SENT]
 	v_readlane_b32 s[GT+1], v[GS], GL_TX_FULL
 	s_add_u32 s[GT+1], s[GT+1], s[GT]
 	v_writelane_b32 v[GS], s[GT+1], GL_TX_FULL
@@ -1079,32 +1250,46 @@
 	s_cbranch_scc1 .Lgda_sent\@
 	v_readlane_b32 s[GT], v[GS], GL_TX_PKTS
 	v_readlane_b32 s[GT+1], v[GS], GL_TX_PKTS + 1
-	s_add_u32 s[GT], s[GT], s[X_GIVEN]
+	s_add_u32 s[GT], s[GT], s[X_SENT]
 	s_addc_u32 s[GT+1], s[GT+1], 0
 	v_writelane_b32 v[GS], s[GT], GL_TX_PKTS
 	v_writelane_b32 v[GS], s[GT+1], GL_TX_PKTS + 1
-	// The record, then the doorbell: the last WQE's first eight bytes,
-	// which are all a function of its counter.
+	// After the sends the round's NOP, the one WQE that asks for a
+	// completion, one WQEBB long: the TX CQ then says how far the NIC got
+	// in whole rounds, whatever size the sends were.
 	s_add_u32 s[E_PC], s[E_PC], s[X_GIVEN]
+	s_and_b32 s[GT], s[E_PC], 0xffff
+	s_lshl_b32 s[GT], s[GT], 8
+	s_or_b32 s[GT], s[GT], KNOD_MLX5_OPCODE_NOP
+	v_mov_b32 v[P6], s[GT]
+	v_perm_b32 v[P6], v[P6], v[P6], 0x00010203
+	v_readlane_b32 s[GT], v[GS], GL_SQN
+	s_lshl_b32 s[GT], s[GT], 8
+	s_or_b32 s[GT], s[GT], 1
+	v_mov_b32 v[P7], s[GT]
+	v_perm_b32 v[P7], v[P7], v[P7], 0x00010203
+	v_mov_b32 v[P8], (KNOD_MLX5_CTRL_CQ_UPDATE << 24)
+	v_mov_b32 v[P9], 0
+	v_readlane_b32 s[X_BASE], v[GS], GL_SQ
+	v_readlane_b32 s[X_MINE], v[GS], GL_SQ + 1
+	s_and_b32 s[GT], s[E_PC], s[E_MASK]
+	s_lshl_b32 s[GT], s[GT], 6
+	s_add_u32 s[GT], s[X_BASE], s[GT]
+	s_addc_u32 s[GT+1], s[X_MINE], 0
+	v_mov_b32 v[P4], s[GT]
+	v_mov_b32 v[P5], s[GT+1]
+	global_store_dwordx4 v[P4:P5], v[P6:P9], off glc slc
+	s_add_u32 s[E_PC], s[E_PC], 1
 	v_writelane_b32 v[GS], s[E_PC], GL_SQ_PC
+	// The record, then the doorbell: the NOP's first eight bytes.
 	s_and_b32 s[GT], s[E_PC], 0xffff
 	v_mov_b32 v[P2], s[GT]
 	v_perm_b32 v[P2], v[P2], v[P2], 0x00010203
 	v_mov_b32 v[P4], s10
 	v_mov_b32 v[P5], s11
+	s_waitcnt_vscnt null, 0
 	global_store_dword v[P4:P5], v[P2], off \
 			   offset:KNOD_PERSIST_RING_SQ_DB glc slc
-	s_sub_u32 s[GT], s[E_PC], 1
-	s_and_b32 s[GT], s[GT], 0xffff
-	s_lshl_b32 s[GT], s[GT], 8
-	s_or_b32 s[GT], s[GT], KNOD_MLX5_OPCODE_SEND
-	v_mov_b32 v[P6], s[GT]
-	v_perm_b32 v[P6], v[P6], v[P6], 0x00010203
-	v_readlane_b32 s[GT], v[GS], GL_SQN
-	s_lshl_b32 s[GT], s[GT], 8
-	s_or_b32 s[GT], s[GT], KNOD_MLX5_SEND_DS
-	v_mov_b32 v[P7], s[GT]
-	v_perm_b32 v[P7], v[P7], v[P7], 0x00010203
 	s_waitcnt_vscnt null, 0
 	v_readlane_b32 s[GT], v[GS], GL_DB
 	v_readlane_b32 s[GT+1], v[GS], GL_DB + 1

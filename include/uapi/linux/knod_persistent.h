@@ -2,7 +2,7 @@
 #ifndef _KNOD_PERSISTENT_H
 #define _KNOD_PERSISTENT_H
 /* One workgroup per RX queue; no X dimension multiplier. */
-#define KNOD_PERSIST_VERSION 0x4b50000d
+#define KNOD_PERSIST_VERSION 0x4b50000e
 #define KNOD_PERSIST_MAX_QUEUES 32
 #define KNOD_PERSIST_STOP 4
 /* Nonzero asks every queue to park at its next round boundary
@@ -18,7 +18,7 @@
  */
 #define KNOD_PERSIST_GDA_LDS 24
 #define KNOD_PERSIST_GDA_WAVES 28
-#define KNOD_PERSIST_GDA_LDS_BYTES 64
+#define KNOD_PERSIST_GDA_LDS_BYTES 112
 #define KNOD_PERSIST_GDA_WAVES_MAX 4
 /* u64 per queue: where this queue's NIC TX doorbell is in the GPU's address
  * space.  Written once when a shader lifetime starts, zero when the NIC
