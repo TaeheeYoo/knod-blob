@@ -11,7 +11,9 @@ ASM_CPP		?= clang -x assembler-with-cpp -E
 # One container per feature, because the core has to bring up a queue before
 # any feature module is loaded and so cannot read the BPF JIT's blob.
 FEATURES	:= core
-SRC_core	:= src/default.S
+# The core's: what a queue comes up with, and the GDA engine's receive kernel,
+# which runs the NIC's rings with no feature's code in them.
+SRC_core	:= src/default.S src/gda_rx.S
 SRC_bpf-persistent := $(filter-out $(SRC_core),$(wildcard src/*.S))
 
 ABI_HDR		:= include/uapi/linux/knod_blob.h
@@ -21,10 +23,9 @@ BUILD		:= build
 # not the build being asked for with another.  Keep them in a stamp every
 # object depends on, and changing them becomes a reason to build again.
 FLAGS_STAMP	:= $(BUILD)/.cppflags
-# What the last build used, when nothing is given.  A configuration set once -
-# `make cycles` - then survives the `make install` that follows, which would
-# otherwise build with no flags and install the opposite of what was asked
-# for.  Give EXTRA_CPPFLAGS on the command line to change it, empty to clear.
+# What the last build used, when nothing is given.  A configuration set once
+# then survives the `make install` that follows, which would otherwise build
+# with no flags and install the opposite of what was asked for.  Give EXTRA_CPPFLAGS on the command line to change it, empty to clear.
 EXTRA_CPPFLAGS	?= $(shell cat $(FLAGS_STAMP) 2>/dev/null)
 # Every source, not just the ones that name themselves .S: the bodies live in
 # .inc files that the .S files include, and leaving them out meant editing a
@@ -73,7 +74,7 @@ $(BUILD)/$(1).$(2).text: $(BUILD)/$(1).$(2).o
 
 $(BUILD)/knod-$(1)-gfx$(2).bin: $(BUILD)/$(1).$(2).text $(BUILD)/$(1).$(2).o \
 				tools/pack.py $(ABI_HDR)
-	python3 tools/pack.py --isa $(2) --wave 64 $(if $(filter bpf-persistent,$(1)),--persistent-shader,) \
+	python3 tools/pack.py --isa $(2) --wave 64 --persistent-shader \
 		--text $$< --obj $(BUILD)/$(1).$(2).o -o $$@
 
 dis-$(1)-$(2): $(BUILD)/$(1).$(2).o
@@ -96,35 +97,11 @@ install: $(BLOBS)
 uninstall:
 	rm -f $(addprefix $(DESTDIR)$(FIRMWARE_DIR)/,$(notdir $(BLOBS)))
 
-# Rebuild with the HW_ID probe, which has every wave record the compute unit it
-# ran on.  Not the default: it is a store in the epilogue of every packet, on
-# the very path the probe exists to measure.  From scratch, because the flag
-# changes no file the build depends on, and checked, because a stale object
-# left the probe out once and the missing field read as a real answer.
-hwid:
-	$(MAKE) clean
-	$(MAKE) EXTRA_CPPFLAGS='-DKNOD_HWID_PROBE'
-	@grep -q s_getreg $(BUILD)/bpf-persistent.10.s || \
-		{ echo "hwid: probe is not in the build"; exit 1; }
-	@echo "hwid: probe built in; a plain 'make' leaves it out"
-
 clean:
 	rm -rf $(BUILD)
-
-# Rebuild with the cycle probe, which has every wave record what the prologue,
-# the program and the epilogue each took, in shader clocks, in the half of its
-# ring slot spsc_bd leaves free.  Not the default: it is four register reads
-# and two stores on the path it exists to measure.  From scratch, because the
-# flag changes no file the build depends on, and checked, because a stale
-# object left a probe out once and the missing field read as a real answer.
-cycles:
-	$(MAKE) EXTRA_CPPFLAGS='-DKNOD_CYCLE_PROBE'
-	@grep -q s_getreg $(BUILD)/bpf-persistent.10.s || { \
-		echo "cycles: probe missing from the build" >&2; exit 1; }
-	@echo "cycles: probe present"
 
 # Back to a blob with nothing extra in it.
 plain:
 	$(MAKE) EXTRA_CPPFLAGS=
 
-.PHONY: all install uninstall clean hwid cycles plain
+.PHONY: all install uninstall clean plain
