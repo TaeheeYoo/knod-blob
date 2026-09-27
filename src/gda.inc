@@ -30,6 +30,7 @@
 
 // The mlx5 send WQE the epilogue writes: the fields it sets, nothing more.
 #define KNOD_MLX5_OPCODE_SEND		0x0a
+#define KNOD_MLX5_CQE_REQ_ERR		0x0d
 #define KNOD_MLX5_CTRL_CQ_UPDATE	0x08	// fm_ce_se
 #define KNOD_MLX5_SEND_DS		3	// ctrl, eth, one data segment
 
@@ -70,6 +71,7 @@
 #define GL_PASS_RING	39	// and 40: in host memory
 #define GL_PASS_MASK	41
 #define GL_WAKE		42	// the host waits for PASS entries, as of this round
+#define GL_TX_DEAD	43	// the SQ went to error: nothing more goes on it
 
 // The meeting place in LDS.
 #define L_CMD		0	// nonzero: stop
@@ -195,6 +197,21 @@
 	s_cmp_eq_u32 s[E_T], 0
 	s_cbranch_scc1 .Lgda_reaped\@
 	s_add_u32 s[E_TXCI], s[E_TXCI], s[E_T]
+	// An error: the SQ has stopped for good and flushes the rest, a CQE
+	// each, off the rounds' boundaries.  None of it is sent, so nothing
+	// is held for it; and nothing more goes on it.
+	s_bfm_b64 s[GT:GT+1], s[E_T], 0
+	s_cmp_eq_u32 s[E_T], 64
+	s_cselect_b64 s[GT:GT+1], -1, s[GT:GT+1]
+	v_cmp_eq_u32_e64 s[22:23], KNOD_MLX5_CQE_REQ_ERR, v[P8]
+	s_and_b64 s[22:23], s[22:23], s[GT:GT+1]
+	s_cmp_eq_u64 s[22:23], 0
+	s_cbranch_scc1 .Lgda_tx_ok\@
+	s_mov_b32 s[E_CC], s[E_PC]
+	s_mov_b32 s[GT], 1
+	v_writelane_b32 v[GS], s[GT], GL_TX_DEAD
+	s_branch .Lgda_tx_ci\@
+.Lgda_tx_ok\@:
 	// The last one's WQE counter, big endian 16 bits at byte 60.
 	s_sub_u32 s[E_T], s[E_T], 1
 	v_readlane_b32 s[GT+1], v[P5], s[E_T]
@@ -208,6 +225,7 @@
 	s_sub_u32 s[GT+1], s[E_PC], s[GT]
 	s_and_b32 s[GT+1], s[GT+1], 0xffff
 	s_sub_u32 s[E_CC], s[E_PC], s[GT+1]
+.Lgda_tx_ci\@:
 	s_mov_b64 exec, 1
 	s_and_b32 s[GT], s[E_TXCI], 0xffffff
 	v_mov_b32 v[P2], s[GT]
@@ -885,6 +903,14 @@
 .Lgda_room\@:
 	v_mov_b32 v[P3], s[E_PC]
 	v_mov_b32 v[P4], s[E_CC]
+	// A dead SQ has room for none: the waves see it full.
+	v_readlane_b32 s[GT], v[GS], GL_TX_DEAD
+	s_cmp_eq_u32 s[GT], 0
+	s_cbranch_scc1 .Lgda_alive\@
+	s_sub_u32 s[GT], s[E_PC], s[E_MASK]
+	s_sub_u32 s[GT], s[GT], 1
+	v_mov_b32 v[P4], s[GT]
+.Lgda_alive\@:
 	ds_write2_b32 v[P2], v[P3], v[P4] offset0:(L_SQ_PC / 4) \
 		      offset1:(L_SQ_CC / 4)
 	v_readlane_b32 s[GT], v[GS], GL_PASS_PC
