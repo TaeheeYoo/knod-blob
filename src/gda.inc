@@ -305,6 +305,10 @@
 	v_mov_b32 v[P4+1], s11
 	global_store_dword v[P4:P4+1], v[P2], off \
 			   offset:KNOD_PERSIST_RING_CQ_DB glc slc
+	// The CQ's room is out before the RQ entries that fill it, as
+	// mlx5e_poll_rx_cq() orders them: a NIC that sees the entries first
+	// completes into a CQ it still thinks full, and overruns it.
+	s_waitcnt_vscnt null, 0
 	global_store_dword v[P4:P4+1], v[P3], off \
 			   offset:KNOD_PERSIST_RING_RQ_DB glc slc
 	.endm
