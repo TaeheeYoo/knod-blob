@@ -98,7 +98,6 @@
 #define X_MINE		49	// this wave's WQEs
 #define X_ASKED		50	// XDP_TX all waves asked for
 #define X_GIVEN		51	// WQEs all waves got
-#define X_FIRST		52	// the first wave with one, or 4
 #define X_LAST		53	// the last wave with one
 #define X_PBASE		54	// PASS entries the waves before append
 #define X_PTOTAL	55	// ...all waves
@@ -398,8 +397,6 @@
 	s_cselect_b32 s[X_MINE], s[E_T], s[X_MINE]
 	s_cmp_lg_u32 s[E_T], 0
 	s_cselect_b32 s[X_LAST], \i, s[X_LAST]
-	s_cselect_b32 s[GT], \i, 4
-	s_min_u32 s[X_FIRST], s[X_FIRST], s[GT]
 	s_add_u32 s[X_PREFIX], s[X_PREFIX], s[E_T]
 	.endm
 
@@ -951,7 +948,6 @@
 	s_mov_b32 s[X_BASE], 0
 	s_mov_b32 s[X_MINE], 0
 	s_mov_b32 s[X_ASKED], 0
-	s_mov_b32 s[X_FIRST], 4
 	s_mov_b32 s[X_LAST], 0
 	GDA_TALLY_K 0
 	GDA_TALLY_K 1
@@ -1031,22 +1027,25 @@
 	global_store_dwordx4 v[P8:P8+1], v[P4:P4+3], off offset:16 glc slc
 	global_store_dwordx4 v[P8:P8+1], v[P16:P16+3], off offset:32 glc slc
 
-	// The round's first WQE says which RQ position it came in on.
-	s_cmp_eq_u32 s[E_ME], s[X_FIRST]
-	s_cbranch_scc0 .Lgda_txdone\@
-	s_ff1_i32_b64 s[GT], s[E_TX:E_TX+1]
-	s_add_u32 s[GT], s[GT], s0
-	s_add_u32 s[GT+1], s2, s[GT]
-	s_mov_b64 exec, 1
-	v_mov_b32 v[P2], s[GT+1]
-	s_and_b32 s[GT], s[E_PC], s[E_MASK]
-	s_lshl_b32 s[GT], s[GT], 2
-	s_add_u32 s[GT], s[GT], KNOD_PERSIST_RING_RQPOS_OFF
-	s_add_u32 s[GT], s10, s[GT]
-	s_addc_u32 s[GT+1], s11, 0
-	v_mov_b32 v[P4], s[GT]
-	v_mov_b32 v[P5], s[GT+1]
-	global_store_dword v[P4:P5], v[P2], off glc slc
+	// Each WQE says which RQ position its packet came in on, so that
+	// whatever WQE the NIC's completions stop at, the RQ is held from
+	// the right place.
+	v_mbcnt_lo_u32_b32 v[P5], -1, 0
+	v_mbcnt_hi_u32_b32 v[P5], -1, v[P5]
+	s_add_u32 s[GT], s2, s0
+	V_ADD_U32 v[P5], s[GT], v[P5]
+	// The WQE counter again: the ctrl segment went over it.
+	v_mbcnt_lo_u32_b32 v[P4], exec_lo, 0
+	v_mbcnt_hi_u32_b32 v[P4], exec_hi, v[P4]
+	s_add_u32 s[GT], s[E_PC], s[X_BASE]
+	V_ADD_U32 v[P4], s[GT], v[P4]
+	v_and_b32 v[P4], s[E_MASK], v[P4]
+	v_lshlrev_b32 v[P4], 2, v[P4]
+	v_add_co_u32 v[P4], vcc, KNOD_PERSIST_RING_RQPOS_OFF, v[P4]
+	v_add_co_u32 v[P6], vcc, s10, v[P4]
+	v_mov_b32 v[P7], s11
+	V_ADD_CI_U32 v[P7], vcc, 0, v[P7], vcc
+	global_store_dword v[P6:P7], v[P5], off glc slc
 .Lgda_txdone\@:
 	// One PASS entry per lane that passes, at pass_pc + base + its rank:
 	// the page, where the packet is in it and how long; and in the ring

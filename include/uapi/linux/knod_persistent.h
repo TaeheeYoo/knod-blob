@@ -102,8 +102,8 @@
 #define KNOD_PERSIST_RING_RQ_OFF 4096
 #define KNOD_PERSIST_RING_CQ_OFF (4096 + 8192 * 64)
 #define KNOD_PERSIST_RING_TX_CQ_OFF (KNOD_PERSIST_RING_CQ_OFF + 8192 * 64)
-/* u32 per SQ entry: for the first WQE of each round, the RQ position its
- * packet came in on.  Nothing past it goes back to the RQ until it is sent.
+/* u32 per SQ entry: the RQ position its packet came in on.  Nothing past it
+ * goes back to the RQ until it is sent.
  */
 #define KNOD_PERSIST_RING_RQPOS_OFF (KNOD_PERSIST_RING_TX_CQ_OFF + 8192 * 64)
 /* u32 per PASS ring entry: the RQ position its packet came in on. */
