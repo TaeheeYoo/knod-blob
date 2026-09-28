@@ -72,6 +72,7 @@
 #define GL_PASS_MASK	41
 #define GL_WAKE		42	// the host waits for PASS entries, as of this round
 #define GL_TX_DEAD	43	// the SQ went to error: nothing more goes on it
+#define GL_LAST_BOUND	44	// debug: the RQ bound last written
 
 // The meeting place in LDS.
 #define L_CMD		0	// nonzero: stop
@@ -293,6 +294,37 @@
 	s_cselect_b32 s[E_T], s[R_CAND], s[E_T]
 .Lgda_bound\@:
 	v_readlane_b32 s[GT], v[GS], GL_RQ_SIZE
+	// Debug: the bound only ever moves on; count one that goes back.
+	v_readlane_b32 s[GT+1], v[GS], GL_LAST_BOUND
+	v_writelane_b32 v[GS], s[E_T], GL_LAST_BOUND
+	s_sub_u32 s[GT+1], s[E_T], s[GT+1]
+	s_cmp_ge_i32 s[GT+1], 0
+	s_cbranch_scc1 .Lgda_bound_fwd\@
+	v_mov_b32 v[P2], s[GT+1]			// bound - the one before
+	s_mul_i32 s[R_T], s[WG_Y], KNOD_PERSIST_GDA_BYTES
+	s_add_u32 s[R_T], s[R_T], (KNOD_PERSIST_GDA + KNOD_PERSIST_GDA_REGRESS_DBG)
+	s_add_u32 s[GT], s8, s[R_T]
+	s_addc_u32 s[GT+1], s9, 0
+	v_mov_b32 v[P3], s[GT]
+	v_mov_b32 v[P4], s[GT+1]
+	global_store_dword v[P3:P4], v[P2], off offset:8 glc slc
+	v_mov_b32 v[P2], 1
+	global_atomic_add v[P3:P4], v[P2], off
+	v_mov_b32 v[P2], s2
+	global_store_dword v[P3:P4], v[P2], off offset:4 glc slc
+	v_readlane_b32 s[GT], v[GS], GL_LAST_BOUND
+	v_mov_b32 v[P2], s[GT]
+	global_store_dword v[P3:P4], v[P2], off offset:12 glc slc
+	v_mov_b32 v[P2], s[E_PC]
+	global_store_dword v[P3:P4], v[P2], off offset:16 glc slc
+	v_mov_b32 v[P2], s[E_CC]
+	global_store_dword v[P3:P4], v[P2], off offset:20 glc slc
+	v_mov_b32 v[P2], s[R_CC]
+	global_store_dword v[P3:P4], v[P2], off offset:24 glc slc
+	v_mov_b32 v[P2], s[R_CAND]
+	global_store_dword v[P3:P4], v[P2], off offset:28 glc slc
+	v_readlane_b32 s[GT], v[GS], GL_RQ_SIZE
+.Lgda_bound_fwd\@:
 	s_add_u32 s[E_T], s[E_T], s[GT]
 	s_and_b32 s[E_T], s[E_T], 0xffff
 	v_mov_b32 v[P3], s[E_T]
@@ -798,6 +830,31 @@
 
 	// The RQ entry this CQE completes, and so the page: entry i is page i.
 	v_perm_b32 v[P12+1], v[P28+1], v[P28+1], 0x0c0c0001
+	// Debug: the CQE's RQ entry is the position's, or the NIC and s2
+	// disagree about where the RQ is.
+	v_and_b32 v[P14], 0xffff, v[P10+1]
+	v_cmp_ne_u32_e64 s[GT:GT+1], v[P14], v[P12+1]
+	s_and_b64 s[GT:GT+1], s[GT:GT+1], exec
+	s_cmp_eq_u64 s[GT:GT+1], 0
+	s_cbranch_scc1 .Lgda_insync\@
+	s_ff1_i32_b64 s[PS6], s[GT:GT+1]
+	v_readlane_b32 s[PS6+1], v[P12+1], s[PS6]
+	v_readlane_b32 s[PS6], v[P14], s[PS6]
+	s_lshl_b32 s[PS6+1], s[PS6+1], 16
+	s_or_b32 s[PS6], s[PS6], s[PS6+1]
+	s_mul_i32 s[GT], s[WG_Y], KNOD_PERSIST_GDA_BYTES
+	s_add_u32 s[GT], s[GT], (KNOD_PERSIST_GDA + KNOD_PERSIST_GDA_SYNC_DBG)
+	s_add_u32 s[GT], s8, s[GT]
+	s_addc_u32 s[GT+1], s9, 0
+	s_mov_b64 exec, 1
+	v_mov_b32 v[P16], s[GT]
+	v_mov_b32 v[P16+1], s[GT+1]
+	v_mov_b32 v[P14], 1
+	global_atomic_add v[P16:P16+1], v[P14], off
+	v_mov_b32 v[P14], s[PS6]
+	global_store_dword v[P16:P16+1], v[P14], off offset:4 glc slc
+	s_mov_b64 exec, s[INITIAL_EXEC:INITIAL_EXEC+1]
+.Lgda_insync\@:
 	v_readlane_b32 s[PS0], v[GS], GL_RQ_SIZE
 	s_sub_u32 s[PS0], s[PS0], 1
 	v_and_b32 v[PAGE_IDX], s[PS0], v[P12+1]

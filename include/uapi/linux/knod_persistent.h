@@ -88,6 +88,15 @@
 #define KNOD_PERSIST_GDA_PASS_PC 172
 #define KNOD_PERSIST_GDA_PASS_CC 176
 #define KNOD_PERSIST_GDA_PASS_FLOOR 180
+/* Debug: an RQ bound older than the one before it.  u32 hits, then as of the
+ * last one s2, the bound before, the bound, sq_pc, sq_cc, pass_cc and the
+ * PASS candidate.
+ */
+#define KNOD_PERSIST_GDA_REGRESS_DBG 184
+/* Debug: an RX CQE for another RQ entry than s2 says.  u32 hits, then as of
+ * the last one the entry s2 says in the low half and the CQE's in the high.
+ */
+#define KNOD_PERSIST_GDA_SYNC_DBG 216
 #define KNOD_PERSIST_GDA_PASS_ENTRIES 8192
 #define KNOD_PERSIST_BYTES 16384
 /* The ring buffer's layout, as net/knod.h lays it out for the NIC (the kernel
@@ -148,7 +157,9 @@ struct knod_persistent_gda {
 	u32 pass_pc;
 	u32 pass_cc;
 	u32 pass_floor;
-	u8 reserved[72];
+	u32 regress_dbg[8];
+	u32 sync_dbg[2];
+	u8 reserved[32];
 };
 
 struct knod_persistent_control {
