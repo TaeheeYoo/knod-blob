@@ -30,6 +30,7 @@
 
 // The mlx5 send WQE the epilogue writes: the fields it sets, nothing more.
 #define KNOD_MLX5_OPCODE_SEND		0x0a
+#define KNOD_MLX5_CQE_REQ_ERR		0x0d
 #define KNOD_MLX5_CTRL_CQ_UPDATE	0x08	// fm_ce_se
 #define KNOD_MLX5_SEND_DS		3	// ctrl, eth, one data segment
 
@@ -70,6 +71,8 @@
 #define GL_PASS_RING	39	// and 40: in host memory
 #define GL_PASS_MASK	41
 #define GL_WAKE		42	// the host waits for PASS entries, as of this round
+#define GL_TX_DEAD	43	// the SQ went to error: nothing more goes on it
+#define GL_LAST_BOUND	44	// debug: the RQ bound last written
 
 // The meeting place in LDS.
 #define L_CMD		0	// nonzero: stop
@@ -96,7 +99,6 @@
 #define X_MINE		49	// this wave's WQEs
 #define X_ASKED		50	// XDP_TX all waves asked for
 #define X_GIVEN		51	// WQEs all waves got
-#define X_FIRST		52	// the first wave with one, or 4
 #define X_LAST		53	// the last wave with one
 #define X_PBASE		54	// PASS entries the waves before append
 #define X_PTOTAL	55	// ...all waves
@@ -195,6 +197,21 @@
 	s_cmp_eq_u32 s[E_T], 0
 	s_cbranch_scc1 .Lgda_reaped\@
 	s_add_u32 s[E_TXCI], s[E_TXCI], s[E_T]
+	// An error: the SQ has stopped for good and flushes the rest, a CQE
+	// each, off the rounds' boundaries.  None of it is sent, so nothing
+	// is held for it; and nothing more goes on it.
+	s_bfm_b64 s[GT:GT+1], s[E_T], 0
+	s_cmp_eq_u32 s[E_T], 64
+	s_cselect_b64 s[GT:GT+1], -1, s[GT:GT+1]
+	v_cmp_eq_u32_e64 s[22:23], KNOD_MLX5_CQE_REQ_ERR, v[P8]
+	s_and_b64 s[22:23], s[22:23], s[GT:GT+1]
+	s_cmp_eq_u64 s[22:23], 0
+	s_cbranch_scc1 .Lgda_tx_ok\@
+	s_mov_b32 s[E_CC], s[E_PC]
+	s_mov_b32 s[GT], 1
+	v_writelane_b32 v[GS], s[GT], GL_TX_DEAD
+	s_branch .Lgda_tx_ci\@
+.Lgda_tx_ok\@:
 	// The last one's WQE counter, big endian 16 bits at byte 60.
 	s_sub_u32 s[E_T], s[E_T], 1
 	v_readlane_b32 s[GT+1], v[P5], s[E_T]
@@ -208,6 +225,7 @@
 	s_sub_u32 s[GT+1], s[E_PC], s[GT]
 	s_and_b32 s[GT+1], s[GT+1], 0xffff
 	s_sub_u32 s[E_CC], s[E_PC], s[GT+1]
+.Lgda_tx_ci\@:
 	s_mov_b64 exec, 1
 	s_and_b32 s[GT], s[E_TXCI], 0xffffff
 	v_mov_b32 v[P2], s[GT]
@@ -276,6 +294,37 @@
 	s_cselect_b32 s[E_T], s[R_CAND], s[E_T]
 .Lgda_bound\@:
 	v_readlane_b32 s[GT], v[GS], GL_RQ_SIZE
+	// Debug: the bound only ever moves on; count one that goes back.
+	v_readlane_b32 s[GT+1], v[GS], GL_LAST_BOUND
+	v_writelane_b32 v[GS], s[E_T], GL_LAST_BOUND
+	s_sub_u32 s[GT+1], s[E_T], s[GT+1]
+	s_cmp_ge_i32 s[GT+1], 0
+	s_cbranch_scc1 .Lgda_bound_fwd\@
+	v_mov_b32 v[P2], s[GT+1]			// bound - the one before
+	s_mul_i32 s[R_T], s[WG_Y], KNOD_PERSIST_GDA_BYTES
+	s_add_u32 s[R_T], s[R_T], (KNOD_PERSIST_GDA + KNOD_PERSIST_GDA_REGRESS_DBG)
+	s_add_u32 s[GT], s8, s[R_T]
+	s_addc_u32 s[GT+1], s9, 0
+	v_mov_b32 v[P3], s[GT]
+	v_mov_b32 v[P4], s[GT+1]
+	global_store_dword v[P3:P4], v[P2], off offset:8 glc slc
+	v_mov_b32 v[P2], 1
+	global_atomic_add v[P3:P4], v[P2], off
+	v_mov_b32 v[P2], s2
+	global_store_dword v[P3:P4], v[P2], off offset:4 glc slc
+	v_readlane_b32 s[GT], v[GS], GL_LAST_BOUND
+	v_mov_b32 v[P2], s[GT]
+	global_store_dword v[P3:P4], v[P2], off offset:12 glc slc
+	v_mov_b32 v[P2], s[E_PC]
+	global_store_dword v[P3:P4], v[P2], off offset:16 glc slc
+	v_mov_b32 v[P2], s[E_CC]
+	global_store_dword v[P3:P4], v[P2], off offset:20 glc slc
+	v_mov_b32 v[P2], s[R_CC]
+	global_store_dword v[P3:P4], v[P2], off offset:24 glc slc
+	v_mov_b32 v[P2], s[R_CAND]
+	global_store_dword v[P3:P4], v[P2], off offset:28 glc slc
+	v_readlane_b32 s[GT], v[GS], GL_RQ_SIZE
+.Lgda_bound_fwd\@:
 	s_add_u32 s[E_T], s[E_T], s[GT]
 	s_and_b32 s[E_T], s[E_T], 0xffff
 	v_mov_b32 v[P3], s[E_T]
@@ -287,6 +336,10 @@
 	v_mov_b32 v[P4+1], s11
 	global_store_dword v[P4:P4+1], v[P2], off \
 			   offset:KNOD_PERSIST_RING_CQ_DB glc slc
+	// The CQ's room is out before the RQ entries that fill it, as
+	// mlx5e_poll_rx_cq() orders them: a NIC that sees the entries first
+	// completes into a CQ it still thinks full, and overruns it.
+	s_waitcnt_vscnt null, 0
 	global_store_dword v[P4:P4+1], v[P3], off \
 			   offset:KNOD_PERSIST_RING_RQ_DB glc slc
 	.endm
@@ -376,8 +429,6 @@
 	s_cselect_b32 s[X_MINE], s[E_T], s[X_MINE]
 	s_cmp_lg_u32 s[E_T], 0
 	s_cselect_b32 s[X_LAST], \i, s[X_LAST]
-	s_cselect_b32 s[GT], \i, 4
-	s_min_u32 s[X_FIRST], s[X_FIRST], s[GT]
 	s_add_u32 s[X_PREFIX], s[X_PREFIX], s[E_T]
 	.endm
 
@@ -779,6 +830,31 @@
 
 	// The RQ entry this CQE completes, and so the page: entry i is page i.
 	v_perm_b32 v[P12+1], v[P28+1], v[P28+1], 0x0c0c0001
+	// Debug: the CQE's RQ entry is the position's, or the NIC and s2
+	// disagree about where the RQ is.
+	v_and_b32 v[P14], 0xffff, v[P10+1]
+	v_cmp_ne_u32_e64 s[GT:GT+1], v[P14], v[P12+1]
+	s_and_b64 s[GT:GT+1], s[GT:GT+1], exec
+	s_cmp_eq_u64 s[GT:GT+1], 0
+	s_cbranch_scc1 .Lgda_insync\@
+	s_ff1_i32_b64 s[PS6], s[GT:GT+1]
+	v_readlane_b32 s[PS6+1], v[P12+1], s[PS6]
+	v_readlane_b32 s[PS6], v[P14], s[PS6]
+	s_lshl_b32 s[PS6+1], s[PS6+1], 16
+	s_or_b32 s[PS6], s[PS6], s[PS6+1]
+	s_mul_i32 s[GT], s[WG_Y], KNOD_PERSIST_GDA_BYTES
+	s_add_u32 s[GT], s[GT], (KNOD_PERSIST_GDA + KNOD_PERSIST_GDA_SYNC_DBG)
+	s_add_u32 s[GT], s8, s[GT]
+	s_addc_u32 s[GT+1], s9, 0
+	s_mov_b64 exec, 1
+	v_mov_b32 v[P16], s[GT]
+	v_mov_b32 v[P16+1], s[GT+1]
+	v_mov_b32 v[P14], 1
+	global_atomic_add v[P16:P16+1], v[P14], off
+	v_mov_b32 v[P14], s[PS6]
+	global_store_dword v[P16:P16+1], v[P14], off offset:4 glc slc
+	s_mov_b64 exec, s[INITIAL_EXEC:INITIAL_EXEC+1]
+.Lgda_insync\@:
 	v_readlane_b32 s[PS0], v[GS], GL_RQ_SIZE
 	s_sub_u32 s[PS0], s[PS0], 1
 	v_and_b32 v[PAGE_IDX], s[PS0], v[P12+1]
@@ -885,6 +961,14 @@
 .Lgda_room\@:
 	v_mov_b32 v[P3], s[E_PC]
 	v_mov_b32 v[P4], s[E_CC]
+	// A dead SQ has room for none: the waves see it full.
+	v_readlane_b32 s[GT], v[GS], GL_TX_DEAD
+	s_cmp_eq_u32 s[GT], 0
+	s_cbranch_scc1 .Lgda_alive\@
+	s_sub_u32 s[GT], s[E_PC], s[E_MASK]
+	s_sub_u32 s[GT], s[GT], 1
+	v_mov_b32 v[P4], s[GT]
+.Lgda_alive\@:
 	ds_write2_b32 v[P2], v[P3], v[P4] offset0:(L_SQ_PC / 4) \
 		      offset1:(L_SQ_CC / 4)
 	v_readlane_b32 s[GT], v[GS], GL_PASS_PC
@@ -921,7 +1005,6 @@
 	s_mov_b32 s[X_BASE], 0
 	s_mov_b32 s[X_MINE], 0
 	s_mov_b32 s[X_ASKED], 0
-	s_mov_b32 s[X_FIRST], 4
 	s_mov_b32 s[X_LAST], 0
 	GDA_TALLY_K 0
 	GDA_TALLY_K 1
@@ -1001,22 +1084,25 @@
 	global_store_dwordx4 v[P8:P8+1], v[P4:P4+3], off offset:16 glc slc
 	global_store_dwordx4 v[P8:P8+1], v[P16:P16+3], off offset:32 glc slc
 
-	// The round's first WQE says which RQ position it came in on.
-	s_cmp_eq_u32 s[E_ME], s[X_FIRST]
-	s_cbranch_scc0 .Lgda_txdone\@
-	s_ff1_i32_b64 s[GT], s[E_TX:E_TX+1]
-	s_add_u32 s[GT], s[GT], s0
-	s_add_u32 s[GT+1], s2, s[GT]
-	s_mov_b64 exec, 1
-	v_mov_b32 v[P2], s[GT+1]
-	s_and_b32 s[GT], s[E_PC], s[E_MASK]
-	s_lshl_b32 s[GT], s[GT], 2
-	s_add_u32 s[GT], s[GT], KNOD_PERSIST_RING_RQPOS_OFF
-	s_add_u32 s[GT], s10, s[GT]
-	s_addc_u32 s[GT+1], s11, 0
-	v_mov_b32 v[P4], s[GT]
-	v_mov_b32 v[P5], s[GT+1]
-	global_store_dword v[P4:P5], v[P2], off glc slc
+	// Each WQE says which RQ position its packet came in on, so that
+	// whatever WQE the NIC's completions stop at, the RQ is held from
+	// the right place.
+	v_mbcnt_lo_u32_b32 v[P5], -1, 0
+	v_mbcnt_hi_u32_b32 v[P5], -1, v[P5]
+	s_add_u32 s[GT], s2, s0
+	V_ADD_U32 v[P5], s[GT], v[P5]
+	// The WQE counter again: the ctrl segment went over it.
+	v_mbcnt_lo_u32_b32 v[P4], exec_lo, 0
+	v_mbcnt_hi_u32_b32 v[P4], exec_hi, v[P4]
+	s_add_u32 s[GT], s[E_PC], s[X_BASE]
+	V_ADD_U32 v[P4], s[GT], v[P4]
+	v_and_b32 v[P4], s[E_MASK], v[P4]
+	v_lshlrev_b32 v[P4], 2, v[P4]
+	v_add_co_u32 v[P4], vcc, KNOD_PERSIST_RING_RQPOS_OFF, v[P4]
+	v_add_co_u32 v[P6], vcc, s10, v[P4]
+	v_mov_b32 v[P7], s11
+	V_ADD_CI_U32 v[P7], vcc, 0, v[P7], vcc
+	global_store_dword v[P6:P7], v[P5], off glc slc
 .Lgda_txdone\@:
 	// One PASS entry per lane that passes, at pass_pc + base + its rank:
 	// the page, where the packet is in it and how long; and in the ring
