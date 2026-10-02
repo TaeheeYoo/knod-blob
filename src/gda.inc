@@ -71,6 +71,7 @@
 #define GL_PASS_RING	39	// and 40: in host memory
 #define GL_PASS_MASK	41
 #define GL_WAKE		42	// the host waits for PASS entries, as of this round
+#define GL_IDLE_ROUNDS	50	// consecutive empty rounds
 #define GL_TX_DEAD	43	// the SQ went to error: nothing more goes on it
 #define GL_LAST_BOUND	44	// debug: the RQ bound last written
 
@@ -816,9 +817,24 @@
 .Lgda_reaped_idle\@:
 	GDA_RQ_RELEASE
 .Lgda_idle\@:
+	v_readlane_b32 s[GT], v[GS], GL_IDLE_ROUNDS
+	s_cmp_ge_u32 s[GT], 64
+	s_cbranch_scc1 .Lgda_long_idle\@
+	s_add_u32 s[GT], s[GT], 1
+	v_writelane_b32 v[GS], s[GT], GL_IDLE_ROUNDS
 	s_sleep 1
 	s_setpc_b64 s[6:7]
+.Lgda_long_idle\@:
+	s_mov_b32 s[GT], 1024
+.Lgda_sleep_loop\@:
+	s_sleep 15
+	s_sub_u32 s[GT], s[GT], 1
+	s_cmp_lg_u32 s[GT], 0
+	s_cbranch_scc1 .Lgda_sleep_loop\@
+	s_setpc_b64 s[6:7]
 .Lgda_work\@:
+	s_mov_b32 s[GT], 0
+	v_writelane_b32 v[GS], s[GT], GL_IDLE_ROUNDS
 	// This wave's share, which may be none; its program still runs, with
 	// no lanes, to meet the others at the epilogue's barriers.
 	s_bfm_b64 s[PS0:PS1], s[PS4+1], 0
