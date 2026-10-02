@@ -68,7 +68,7 @@
 #define GL_PASS_PC	36	// PASS entries appended, free-running
 #define GL_PASS_CC	37	// ...the host has finished with, or the floor
 #define GL_PASS_FLOOR	38	// entries before it are an earlier build's
-#define GL_PASS_RING	39	// and 40: in host memory
+#define GL_PASS_RING	39	// and 40: PASS descriptor ring
 #define GL_PASS_MASK	41
 #define GL_WAKE		42	// the host waits for PASS entries, as of this round
 #define GL_IDLE_ROUNDS	50	// consecutive empty rounds
@@ -739,7 +739,6 @@
 	v_add_co_u32 v[P24], vcc, s10, v[P12]
 	v_mov_b32 v[P24+1], s11
 	V_ADD_CI_U32 v[P24+1], vcc, 0, v[P24+1], vcc
-	global_load_dword v[P28], v[P24:P24+1], off offset:44 glc dlc
 	global_load_dword v[P28+1], v[P24:P24+1], off offset:60 glc dlc
 	s_waitcnt vmcnt(0)
 	// Ours when the owner bit is the pass round the ring the position is
@@ -843,6 +842,12 @@
 	s_mov_b64 exec, s[PS0:PS1]
 	s_mov_b64 s[INITIAL_EXEC:INITIAL_EXEC+1], exec
 	s_mov_b64 s[DONE_MASK:DONE_MASK+1], 0
+
+	// Acquire the CQE through its owner word before reading its payload.
+	// Issuing both loads together can accept a new owner with the previous
+	// byte count when the NIC completes the CQE between those loads.
+	global_load_dword v[P28], v[P24:P24+1], off offset:44 glc dlc
+	s_waitcnt vmcnt(0)
 
 	// The RQ entry this CQE completes, and so the page: entry i is page i.
 	v_perm_b32 v[P12+1], v[P28+1], v[P28+1], 0x0c0c0001
