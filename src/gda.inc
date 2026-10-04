@@ -450,6 +450,20 @@
 	s_icache_inv
 	s_waitcnt vmcnt(0) lgkmcnt(0)
 #endif
+#if KNOD_ISA == 10
+	// FLAT_SCRATCH is the ring's base, out of the descriptor, plus this
+	// wave's slot in it.  Set once: it lasts as long as the wave.
+	s_and_b32 s[KNOD_BLOB_PRO_SCRATCH_DESC_SREG + 1], \
+		  s[KNOD_BLOB_PRO_SCRATCH_DESC_SREG + 1], 0xffff
+	s_add_u32 s[KNOD_BLOB_PRO_SCRATCH_DESC_SREG], \
+		  s[KNOD_BLOB_PRO_SCRATCH_DESC_SREG], \
+		  s[KNOD_BLOB_PRO_SCRATCH_WAVE_SREG]
+	s_addc_u32 s[KNOD_BLOB_PRO_SCRATCH_DESC_SREG + 1], \
+		   s[KNOD_BLOB_PRO_SCRATCH_DESC_SREG + 1], 0
+	s_setreg_b32 hwreg(HW_REG_FLAT_SCR_LO), s[KNOD_BLOB_PRO_SCRATCH_DESC_SREG]
+	s_setreg_b32 hwreg(HW_REG_FLAT_SCR_HI), \
+		     s[KNOD_BLOB_PRO_SCRATCH_DESC_SREG + 1]
+#endif
 	v_readfirstlane_b32 s0, v[TID]
 	s_and_b32 s0, s0, 1023
 
