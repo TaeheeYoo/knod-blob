@@ -9,12 +9,12 @@
 #include "common.inc"
 #include "gda.inc"
 
-	.text
+	.section .text.knod_gda_rx_kernel, "ax", @progbits
 	.globl knod_gda_rx_kernel
 	.p2align 2
 knod_gda_rx_kernel:
-	KNOD_GDA_PROLOGUE_BODY
+	KNOD_GDA_PROLOGUE_BODY knod_gda_rx_kernel
 	v_mov_b32 v[BPF_R0], XDP_PASS
 	s_mov_b64 s[DONE_MASK:DONE_MASK+1], exec
-	KNOD_GDA_EPILOGUE_BODY
-	.size knod_gda_rx_kernel, . - knod_gda_rx_kernel
+	KNOD_GDA_EPILOGUE_BODY knod_gda_rx_kernel
+	GDA_ROUTINE_END knod_gda_rx_kernel

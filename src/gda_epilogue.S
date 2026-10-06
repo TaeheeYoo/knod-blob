@@ -6,10 +6,9 @@
 #include "common.inc"
 #include "gda.inc"
 
-	.text
-
+	.section .text.knod_gda_epilogue, "ax", @progbits
 	.globl knod_gda_epilogue
 	.p2align 2
 knod_gda_epilogue:
-	KNOD_GDA_EPILOGUE_BODY
-	.size knod_gda_epilogue, . - knod_gda_epilogue
+	KNOD_GDA_EPILOGUE_BODY knod_gda_epilogue
+	GDA_ROUTINE_END knod_gda_epilogue

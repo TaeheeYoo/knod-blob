@@ -22,6 +22,28 @@ kernel checks the offsets it publishes against its structures at build time.
   packet ended up, publishes mailbox completion after the workgroup barrier,
   and returns to the persistent-shader poll loop.
 
+## The GDA engine is C
+
+When the shader runs the NIC's rings itself (GDA), what wraps the program is
+written in C, `src/gda/gda.c`, not assembly.  `src/gda.inc` is the glue between
+it and the JIT's register contract, about a hundred lines:
+
+- each routine is its glue (`.text.<routine>`), the C built for it
+  (`.text.<routine>.c`) and the rest of its glue (`.text.<routine>.~`), which
+  `tools/knod.ld` keeps together so the JIT can splice it as one piece;
+- the C entry points are built as kernels and jumped to, not called, so the
+  compiler keeps no register for the caller and never needs a stack; they take
+  their inputs from v0 upwards and jump back with their results there;
+- what outlives a round is in the lanes of v[KNOD_BLOB_PRO_GDA_VREG]
+  (`src/gda/gda_lanes.h`).
+
+`tools/check_c.py` holds what clang made of it to that: no scratch, no LDS of
+its own, no VGPR at or above v[KNOD_BLOB_PRO_GDA_VREG], inputs read before
+anything can overwrite them, nothing called or referred to outside itself.
+The link fails if anything is left for a loader to relocate.
+
+To change the engine, change the C; the glue only moves registers.
+
 ## Checking it
 
 The prologue has to come out the same as what the kernel's own JIT emits.
@@ -36,4 +58,5 @@ has confirmed it matches that generation's JIT output on hardware.
 
 ## Requires
 
-`llvm-mc`, `llvm-objcopy`, `clang` (as a preprocessor) and python3.
+`llvm-mc`, `llvm-objcopy`, `ld.lld`, `clang` with the AMDGPU target (18 or
+later) and python3.

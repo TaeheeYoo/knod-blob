@@ -6,10 +6,9 @@
 #include "common.inc"
 #include "gda.inc"
 
-	.text
-
+	.section .text.knod_gda_prologue, "ax", @progbits
 	.globl knod_gda_prologue
 	.p2align 2
 knod_gda_prologue:
-	KNOD_GDA_PROLOGUE_BODY
-	.size knod_gda_prologue, . - knod_gda_prologue
+	KNOD_GDA_PROLOGUE_BODY knod_gda_prologue
+	GDA_ROUTINE_END knod_gda_prologue

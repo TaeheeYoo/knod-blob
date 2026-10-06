@@ -55,18 +55,51 @@ def contract(path):
 
 
 
+END_PREFIX = "__end_"
+
+
+def text_base(obj):
+    """Where .text starts in obj: 0 in an object, wherever the linker put it."""
+    out = subprocess.run(["llvm-objdump", "-h", obj],
+                         capture_output=True, text=True, check=True).stdout
+    for line in out.splitlines():
+        f = line.split()
+        if len(f) >= 4 and f[1] == ".text":
+            return int(f[3], 16)
+    sys.exit(f"{obj}: no .text")
+
+
 def symbols(obj):
-    """Return {name: (offset, size)} for every knod_ routine in obj."""
+    """Return {name: (offset, size)} for every knod_ routine in obj.
+
+    A routine with C in it (src/gda.inc) runs past its own code into the C
+    the linker put after it, and marks where it really ends with
+    __end_<routine>: that, not its .size, is what it covers.
+    """
     out = subprocess.run(["llvm-nm", "--print-size", "--defined-only", obj],
                          capture_output=True, text=True, check=True).stdout
-    syms = {}
+    # A symbol's offset in the code is its address less where .text is.
+    base = text_base(obj)
+    syms, ends = {}, {}
     for line in out.splitlines():
         f = line.split()
         # "<addr> <size> T <name>" - a symbol without a size has three fields.
-        if len(f) == 4 and f[3].startswith("knod_"):
-            syms[f[3]] = (int(f[0], 16), int(f[1], 16))
-        elif len(f) == 3 and f[2].startswith("knod_"):
-            syms[f[2]] = (int(f[0], 16), 0)
+        name = f[-1] if len(f) in (3, 4) else ""
+        # An absolute symbol (knod_<routine>_xsave) is a number, not a place.
+        absolute = name and f[-2] in "aA"
+        addr = int(f[0], 16) - (0 if absolute else base) if name else 0
+        size = int(f[1], 16) if len(f) == 4 else 0
+        if name.startswith(END_PREFIX + "knod_"):
+            ends[name[len(END_PREFIX):]] = addr
+        elif name.startswith("knod_"):
+            syms[name] = (addr, size)
+    for name, end in ends.items():
+        if name not in syms:
+            sys.exit(f"{END_PREFIX}{name}: no routine {name}")
+        start = syms[name][0]
+        if end <= start:
+            sys.exit(f"{name}: ends at {end:#x}, before it starts at {start:#x}")
+        syms[name] = (start, end - start)
     return syms
 
 
@@ -114,6 +147,9 @@ def main():
             raise SystemExit(f"{name}: zero size, is .size missing?")
         if size % 4:
             raise SystemExit(f"{name}: size {size} is not a multiple of 4")
+        if off + size > len(code):
+            raise SystemExit(f"{name}: {off:#x}+{size:#x} is past the "
+                             f"{len(code):#x} bytes of code")
         kind, chunks = parse_name(name, kinds)
         # exec_save_pairs is not derivable from the object; the routines
         # declare it through a knod_<name>_xsave absolute symbol.
