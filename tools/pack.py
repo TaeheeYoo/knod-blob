@@ -122,8 +122,8 @@ def main():
         # goes, and the code it calls.
         patch = syms.get(name + "_call", (0, 0))[0]
         body_off, body_size = syms.get(name + "_body", (0, 0))
-        if bool(patch) != bool(body_size):
-            raise SystemExit(f"{name}: a call needs both _call and _body")
+        if body_size and not patch:
+            raise SystemExit(f"{name}: a _body nothing calls")
         entries.append((kind, chunks, off, size, pairs, patch, body_off,
                         body_size))
 
@@ -142,7 +142,8 @@ def main():
     for kind, chunks, off, size, pairs, patch, body_off, body_size in entries:
         name = next(k for k, v in kinds.items() if v == kind)
         suffix = f" k{chunks}" if chunks else ""
-        call = f" calls {body_size}" if body_size else ""
+        call = f" calls {body_size}" if body_size else \
+            f" calls out at {patch}" if patch else ""
         print(f"  {name}{suffix:<4} off={code_off + off:<6} size={size:<5} "
               f"xsave={pairs}{call}")
     return 0

@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// GDA stage 2: what wraps a program when the shader runs the NIC's rings
-// itself.  The prologue sets up exactly the registers KNOD_PROLOGUE_BODY sets
-// up - the program cannot tell the difference - but its packets come from the
-// NIC's CQ rather than a batch the host built.  The epilogue sends what the
-// program sent on the queue's XDP SQ, and gives the rest back to the RQ.
+// The GDA engine: what runs a queue's rings on the GPU and calls the program
+// once a round.  Its first half takes packets off the NIC's CQ and leaves
+// them in the registers a program reads them from; the second sends what the
+// program sent on the queue's XDP SQ, hands what it passed to the host, and
+// gives the rest back to the RQ.  A program's own two ends are here too, for
+// the JIT to splice around it.
 //
 // One workgroup per queue, and up to KNOD_PERSIST_GDA_WAVES_MAX of its waves
 // take packets, 64 CQEs each a round: wave w the ones at ci + 64w.  Wave 0
@@ -20,7 +21,8 @@
 //
 // Across a program only s0, s2, s[6:7], s[8:9], s[10:11] and the named
 // registers survive; here that is s0 = 64 x the wave, s2 = the CQ consumer
-// index (every wave keeps its own, in step) and s[10:11] = the ring buffer,
+// index (every wave keeps its own, in step), s[6:7] = where the program
+// returns to and s[10:11] = the ring buffer,
 // and v73-v75 (KNOD_BLOB_PRO_GDA_VREG), which no program reaches: v[74:75]
 // lane 0 the packet count, and v73 one value per lane.
 
@@ -456,7 +458,10 @@
 	s_add_u32 s[X_PBASE], s[X_PBASE], s[E_T]
 	.endm
 
-	.macro KNOD_GDA_PROLOGUE_BODY
+// The engine's first half: set up the rings, then every round wait for
+// packets and hand this wave's to the program in the registers it reads them
+// from.  Starts the round at .Lgda_round, which the second half comes back to.
+	.macro KNOD_GDA_ROUND_BEGIN
 #if !defined(KNOD_NO_ICACHE_INV)
 	s_icache_inv
 	s_waitcnt vmcnt(0) lgkmcnt(0)
@@ -723,7 +728,7 @@
 			   offset:KNOD_PERSIST_GDA_PASS_FLOOR glc slc
 	s_waitcnt_vscnt null, 0
 .Lgda_posted\@:
-	s_getpc_b64 s[6:7]
+.Lgda_round:
 
 	// ---- a round ----
 	// Wave 0 reads the control block and parks or stops for all of them;
@@ -848,7 +853,7 @@
 	s_add_u32 s[GT], s[GT], 1
 	v_writelane_b32 v[GS], s[GT], GL_IDLE_ROUNDS
 	s_sleep 1
-	s_setpc_b64 s[6:7]
+	s_branch .Lgda_round
 .Lgda_long_idle\@:
 	s_mov_b32 s[GT], 1024
 .Lgda_sleep_loop\@:
@@ -856,7 +861,7 @@
 	s_sub_u32 s[GT], s[GT], 1
 	s_cmp_lg_u32 s[GT], 0
 	s_cbranch_scc1 .Lgda_sleep_loop\@
-	s_setpc_b64 s[6:7]
+	s_branch .Lgda_round
 .Lgda_work\@:
 	s_mov_b32 s[GT], 0
 	v_writelane_b32 v[GS], s[GT], GL_IDLE_ROUNDS
@@ -949,17 +954,21 @@
 	V_ADD_CI_U32 v[BPF_R1+1], vcc, 0, v[BPF_R1+1], vcc
 	v_mov_b32 v[CTX], v[BPF_R1]
 	v_mov_b32 v[CTX+1], v[BPF_R1+1]
-	v_mov_b32 v[BPF_R10], KNOD_BLOB_BPF_STACK_SIZE
-	v_mov_b32 v[BPF_R10+1], 0
-	s_mov_b32 s[FRAME], 0
 	s_branch .Lgda_go\@
 .Lgda_end\@:
 	s_endpgm
 .Lgda_go\@:
 	.endm
 
-	.macro KNOD_GDA_EPILOGUE_BODY
-	// A lane that did not return drops, as in KNOD_EPILOGUE_PRE_BODY.
+// A program's two ends.  The engine calls it with s_swappc_b64 s[6:7].
+	.macro KNOD_GDA_PROGRAM_ENTRY
+	v_mov_b32 v[BPF_R10], KNOD_BLOB_BPF_STACK_SIZE
+	v_mov_b32 v[BPF_R10+1], 0
+	s_mov_b32 s[FRAME], 0
+	.endm
+
+	.macro KNOD_GDA_PROGRAM_EXIT
+	// A lane that did not return drops.
 	s_andn2_b64 exec, s[INITIAL_EXEC:INITIAL_EXEC+1], \
 		    s[DONE_MASK:DONE_MASK+1]
 	v_mov_b32 v[BPF_R0], XDP_DROP
@@ -969,7 +978,13 @@
 	// ends: parking is where the host reads and changes them.
 	s_waitcnt vmcnt(0) lgkmcnt(0)
 	s_waitcnt_vscnt null, 0
+	s_setpc_b64 s[6:7]
+	.endm
 
+// The engine's second half, on the program's verdicts: send what it sent on
+// the SQ, hand what it passed to the host, give the rest back to the RQ, and
+// round again.
+	.macro KNOD_GDA_ROUND_END
 	v_readlane_b32 s[E_W], v[GS], GL_WAVES
 	s_lshr_b32 s[E_ME], s0, 6
 	v_readlane_b32 s[E_PC], v[GS], GL_SQ_PC
@@ -1286,7 +1301,7 @@
 	GDA_ENTRY_ADDR
 	GDA_SAVE
 .Lgda_next\@:
-	s_setpc_b64 s[6:7]
+	s_branch .Lgda_round
 	.endm
 
 #endif /* GDA_INC */
