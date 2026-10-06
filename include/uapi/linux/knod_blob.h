@@ -17,7 +17,7 @@
 #define _UAPI_LINUX_KNOD_BLOB_H
 
 #define KNOD_BLOB_MAGIC		0x4b4e4442	/* 'KNDB' */
-#define KNOD_BLOB_ABI_VERSION	22
+#define KNOD_BLOB_ABI_VERSION	23
 
 /*
  * How a routine is reached.  SPLICE is what the JIT does: the bytes are copied
@@ -196,7 +196,7 @@ enum knod_blob_kind {
 #define KNOD_BLOB_SPLICE_TMP_SREG_END	49
 
 /*
- * A routine may call code compiled from C, placed inside it.  The call follows
+ * A routine may call code compiled from C, its entry's callee.  The call follows
  * the AMDGPU calling convention, which lets the callee destroy registers the
  * JIT keeps state in and gives it a stack, so the routine has to bring both:
  *
@@ -376,7 +376,15 @@ struct knod_blob_entry {
 	__le32	code_offset;		/* from the start of the file */
 	__le32	code_size;		/* bytes, a multiple of 4 */
 	__le32	exec_save_pairs;	/* of KNOD_BLOB_EXEC_SAVE_SREG */
-	__le32	reserved;
+	/* A routine that calls compiled code: where its callee is, and where
+	 * in the routine the call's 32-bit offset to it goes.  The JIT puts a
+	 * callee once after the program, however many places splice routines
+	 * calling it, and writes there callee - (routine + call_patch - 4).
+	 * All zero for a routine that calls nothing.
+	 */
+	__le32	call_patch;
+	__le32	callee_offset;		/* from the start of the file */
+	__le32	callee_size;
 };
 
 #endif /* !__ASSEMBLY__ */
