@@ -17,7 +17,7 @@
 #define _UAPI_LINUX_KNOD_BLOB_H
 
 #define KNOD_BLOB_MAGIC		0x4b4e4442	/* 'KNDB' */
-#define KNOD_BLOB_ABI_VERSION	21
+#define KNOD_BLOB_ABI_VERSION	22
 
 /*
  * How a routine is reached.  SPLICE is what the JIT does: the bytes are copied
@@ -194,6 +194,24 @@ enum knod_blob_kind {
 #define KNOD_BLOB_EXEC_SAVE_PAIRS_MAX	6
 #define KNOD_BLOB_SPLICE_TMP_SREG	46	/* s46-s49 clobberable */
 #define KNOD_BLOB_SPLICE_TMP_SREG_END	49
+
+/*
+ * A routine may call code compiled from C, placed inside it.  The call follows
+ * the AMDGPU calling convention, which lets the callee destroy registers the
+ * JIT keeps state in and gives it a stack, so the routine has to bring both:
+ *
+ * - The stack is each lane's scratch from KNOD_BLOB_CALL_STACK_OFF, past the
+ *   BPF stack's place there, KNOD_BLOB_CALL_STACK_BYTES of it.  The routine
+ *   points s32 at it for the call.
+ * - What the callee destroys and the JIT still needs, the routine keeps in
+ *   v76-v127, which hold nothing across a routine, and puts back.
+ *
+ * The kernel sizes scratch and declares VGPRs to cover both.
+ */
+#define KNOD_BLOB_CALL_STACK_OFF	528
+#define KNOD_BLOB_CALL_STACK_BYTES	64
+#define KNOD_BLOB_CALL_SAVE_VREG	76
+#define KNOD_BLOB_CALL_SAVE_VREGS	52
 
 /*
  * The JIT's own scalars, at the same numbers on every generation so that a

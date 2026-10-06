@@ -48,6 +48,9 @@ CPU_10		:= gfx1030
 CPU_11		:= gfx1100
 ATTR_10		:= --mattr=+wavefrontsize64
 ATTR_11		:= --mattr=+wavefrontsize64
+# A call's stack is reached through FLAT_SCRATCH, which the GDA prologue sets
+# on gfx10 and the hardware on gfx11, rather than a buffer descriptor.
+CFN_ATTR_10	:= -Xclang -target-feature -Xclang +enable-flat-scratch
 
 BLOBS		:= $(foreach f,$(FEATURES),\
 		     $(foreach i,$(ISAS),$(BUILD)/knod-$(f)-gfx$(i).bin)) \
@@ -100,10 +103,10 @@ $(foreach i,$(ISAS),$(eval $(call isa_rules,bpf-persistent,$(i))))
 define cfn_rules
 $(BUILD)/cfn.$(1).s: $(CSRC) $(UAPI_HDRS) | $(BUILD)
 	$(CLANG) -target amdgcn-amd-amdhsa -mcpu=$(CPU_$(1)) -mwavefrontsize64 \
-		-O2 -nogpulib -ffreestanding -fno-builtin -Iinclude/uapi \
-		-S $(CSRC) -o $$@
+		$(CFN_ATTR_$(1)) -O2 -nogpulib -ffreestanding -fno-builtin \
+		-Wall -Werror -Iinclude/uapi -S $(CSRC) -o $$@
 
-$(BUILD)/cfn.$(1).inc: $(BUILD)/cfn.$(1).s tools/cfn.py
+$(BUILD)/cfn.$(1).inc: $(BUILD)/cfn.$(1).s tools/cfn.py $(ABI_HDR)
 	python3 tools/cfn.py $$< $$@
 endef
 

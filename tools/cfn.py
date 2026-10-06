@@ -1,102 +1,114 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Turn clang's assembly for csrc/ into macros a routine can call through.
+"""Turn clang's assembly for csrc/ into macros a routine calls through.
 
-For each cfn_<name> function, three macros:
+For each function cfn_<name>:
 
-  CFN_BODY_<name>	its instructions under a local label, .Lcfn_<name>,
-			with no symbol or metadata, to be placed inside the
-			routine that calls it so that the JIT splices both
-  CFN_SAVE_<name>	keeps every register the function writes that the
-  CFN_RESTORE_<name>	JIT may still need, and puts them back
+  CFN_BODY_<name>	its instructions under the label .Lcfn_<name>, with no
+			symbol or metadata, to be placed inside the routine that
+			calls it so that the JIT splices both
+  CFN_SAVE_<name>	keep what the call destroys that the JIT still needs,
+  CFN_RESTORE_<name>	and put it back
+  CFN_TMP_<name>	a scalar pair the save has kept, free to hold the
+			call's target
 
-and CFN_TMP_<name>, a scalar pair the function writes and the save has
-already kept, to hold the call target.
+The callee keeps s34 and up itself, as the calling convention has it.  Below
+that the save keeps every scalar the callee touches, and s32, which the routine
+points at the call's stack: in s34-s49, which a routine may destroy, then in
+lanes of the first call-save register.  Of the vectors it keeps the BPF
+registers the callee touches, other than r0, in the call-save registers after
+it; the window is the routine's to lose.
 
-The function is compiled to the AMDGPU calling convention, which lets it
-write registers knod keeps state in.  Rather than move knod's state, the
-caller keeps exactly what the function writes: scalars in the splice
-routine's free scalars where they are not the function's, in lanes of a
-window register past that; vectors other than the result in the window.
-
-Refuses a function that uses a stack, since nothing sets one up, one that
-uses the window, and one that uses a scalar past s49.
+Refuses a function that needs more stack than the routine gives it, or that
+touches a vector register past the window.
 """
 import re
 import sys
 
-WIN_VGPR = 22			# v22-v57 is the routine's
-WIN_VGPR_END = 57
-FREE_SGPR = range(34, 50)	# what a splice routine may destroy
-RET_ADDR = (30, 31)
-SPILL_VGPR = 22			# lanes of it hold scalars past the free ones
-VSAVE = list(range(42, 58)) + list(range(23, 28))
+HEADER = "include/uapi/linux/knod_blob.h"
+
+
+def contract():
+    text = open(HEADER).read()
+
+    def val(name):
+        return int(re.search(rf"^#define {name}\s+(\S+)", text, re.M)[1], 0)
+
+    return {n: val("KNOD_BLOB_" + n) for n in
+            ("CALL_STACK_BYTES", "CALL_SAVE_VREG", "CALL_SAVE_VREGS",
+             "SPLICE_TMP_VREG", "SPLICE_TMP_VREG_END", "EXEC_SAVE_SREG",
+             "SPLICE_TMP_SREG_END")}
+
+
 REG = re.compile(r"\b([sv])(?:\[(\d+):(\d+)\]|(\d+)\b)")
 
 
 def regs(lines):
     s, v = set(), set()
     for line in lines:
-        if re.match(r"^\s*(\.|[\w.$]+:)", line):
-            continue
         for kind, lo, hi, one in REG.findall(line):
             r = range(int(lo), int(hi) + 1) if lo else [int(one)]
             (s if kind == "s" else v).update(r)
     return s, v
 
 
-def emit(name, body, out):
+def emit(c, name, body, stack, out):
+    if stack > c["CALL_STACK_BYTES"]:
+        sys.exit(f"{name}: needs {stack} bytes of stack, the routine gives "
+                 f"{c['CALL_STACK_BYTES']}")
     sgprs, vgprs = regs(body)
-    if max(vgprs, default=0) >= WIN_VGPR:
-        sys.exit(f"{name}: uses v{max(vgprs)}, which is the routine's window")
-    if max(sgprs, default=0) >= FREE_SGPR[-1] + 1:
-        sys.exit(f"{name}: uses s{max(sgprs)}, past the routine's scalars")
+    if max(vgprs, default=0) > c["SPLICE_TMP_VREG_END"]:
+        sys.exit(f"{name}: touches v{max(vgprs)}, past the window")
 
-    keep = sorted(sgprs | set(RET_ADDR))
-    free = [r for r in FREE_SGPR if r not in sgprs]
+    keep = (sgprs & set(range(c["EXEC_SAVE_SREG"]))) | {30, 31, 32}
+    tmp = next((r for r in sorted(keep) if r % 2 == 0 and r + 1 in keep and
+                r not in (30, 32)), 4)
+    keep |= {tmp, tmp + 1}
+
+    free = list(range(c["EXEC_SAVE_SREG"], c["SPLICE_TMP_SREG_END"] + 1))
+    lanes = c["CALL_SAVE_VREG"]
     save, restore = [], []
     lane = 0
-    for r in keep:
+    for r in sorted(keep):
         if free:
             d = free.pop(0)
             save.append(f"\ts_mov_b32 s{d}, s{r}")
             restore.append(f"\ts_mov_b32 s{r}, s{d}")
         else:
-            save.append(f"\tv_writelane_b32 v{SPILL_VGPR}, s{r}, {lane}")
-            restore.append(f"\tv_readlane_b32 s{r}, v{SPILL_VGPR}, {lane}")
+            save.append(f"\tv_writelane_b32 v{lanes}, s{r}, {lane}")
+            restore.append(f"\tv_readlane_b32 s{r}, v{lanes}, {lane}")
             lane += 1
     if lane:
         # A scalar a VALU wrote is not safe to address memory with for
         # five more instructions.
         restore.append("\ts_nop 4")
-    vkeep = sorted(vgprs - {0, 1})
-    if len(vkeep) > len(VSAVE):
-        sys.exit(f"{name}: writes {len(vkeep)} vector registers")
-    for r, d in zip(vkeep, VSAVE):
+
+    vkeep = sorted(vgprs & set(range(2, c["SPLICE_TMP_VREG"])))
+    dest = range(lanes + 1, lanes + c["CALL_SAVE_VREGS"])
+    for r, d in zip(vkeep, dest):
         save.append(f"\tv_mov_b32 v{d}, v{r}")
         restore.append(f"\tv_mov_b32 v{r}, v{d}")
 
-    tmp = next(r for r in keep if r % 2 == 0 and r + 1 in keep and
-               r not in RET_ADDR)
     short = name[len("cfn_"):]
     out.append(f".set CFN_TMP_{short}, {tmp}")
-    out.append(f".macro CFN_SAVE_{short}")
-    out += save
-    out.append(".endm")
-    out.append(f".macro CFN_RESTORE_{short}")
-    out += restore
-    out.append(".endm")
-    out.append(f".macro CFN_BODY_{short}")
-    out.append(f".Lcfn_{short}:")
-    out += body
-    out.append(".endm")
+    for macro, lines in (("SAVE", save), ("RESTORE", restore),
+                         ("BODY", [f".Lcfn_{short}:"] + body)):
+        out.append(f".macro CFN_{macro}_{short}")
+        out += lines
+        out.append(".endm")
 
 
 def main():
     src, out_path = sys.argv[1], sys.argv[2]
+    c = contract()
     text = open(src).read()
-    out, name, body = [], None, []
+    funcs, name, body, last = [], None, [], None
     for line in text.splitlines():
+        # clang reports a function's stack in a comment after its end.
+        m = re.match(r"^; ScratchSize: (\d+)", line)
+        if m and last:
+            funcs.append((last[0], last[1], int(m.group(1))))
+            last = None
         code = line.split(";", 1)[0].rstrip()
         m = re.match(r"^(cfn_\w+):", code)
         if m:
@@ -105,14 +117,13 @@ def main():
         if name is None:
             continue
         if re.match(r"^\.Lfunc_end\d+:", code):
-            emit(name, body, out)
-            name = None
+            last, name = (name, body), None
             continue
         if code.strip():
             body.append(code)
-    for m in re.finditer(r"; ScratchSize: (\d+)", text):
-        if int(m.group(1)):
-            sys.exit(f"{src}: a function uses {m.group(1)} bytes of stack")
+    out = []
+    for name, body, stack in funcs:
+        emit(c, name, body, stack, out)
     open(out_path, "w").write("\n".join(out) + "\n")
 
 

@@ -1,33 +1,27 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// Hash map lookup.
+// Hash map lookup, update and delete: csrc/map_hash.c, called.
 //
-// One routine per key length, because the key is copied, hashed and compared a
-// dword at a time and the length decides how many times.  The JIT knows the
-// length when it splices, so it picks the routine rather than the routine
-// looping over a runtime count.
+// Each routine moves the descriptor and its key - for an update, the value
+// too - from where the splice linkage puts them to where the calling
+// convention wants them, calls the function placed right after it, and steps
+// over that on the way back.  The JIT splices the routine and the function
+// together.  One routine per key length, because the key arrives in registers
+// and the length decides how many.
 
 #include "common.inc"
-#include "jhash.inc"
 
-// KNOD_C_LOOKUP calls lookups compiled from csrc/map_hash.c instead, for
-// keys up to eight dwords; longer ones stay here.
-#ifdef KNOD_C_LOOKUP
-# define C_LOOKUP_MAX	8
-# if KNOD_ISA == 10
-#  include "cfn.10.inc"
-# else
-#  include "cfn.11.inc"
-# endif
+#if KNOD_ISA == 10
+# include "cfn.10.inc"
 #else
-# define C_LOOKUP_MAX	0
+# include "cfn.11.inc"
 #endif
 
-// Call a compiled function placed right after the call, and step over it on
-// the way back.  The key goes from the window to the arguments after the
-// save, which may have moved what the arguments' registers held into it.
-.macro	CFN_CALL fn, n
-	CFN_SAVE_\fn
+.macro	ROUTINE fn, n, val=0
+	.globl knod_\fn\()\n
+	.p2align 2
+knod_\fn\()\n:
+	CFN_SAVE_\fn\()\n
 	v_mov_b32 v0, s[DESC]
 	v_mov_b32 v1, s[DESC+1]
 	.set _i, 0
@@ -35,239 +29,38 @@
 	v_mov_b32 v[2 + _i], v[KEY + _i]
 	.set _i, _i + 1
 	.endr
-	s_getpc_b64 s[CFN_TMP_\fn:CFN_TMP_\fn+1]
-.Lcfn_pc_\fn:
-	s_add_u32 s[CFN_TMP_\fn], s[CFN_TMP_\fn], .Lcfn_\fn - .Lcfn_pc_\fn
-	s_addc_u32 s[CFN_TMP_\fn+1], s[CFN_TMP_\fn+1], 0
-	s_swappc_b64 s[30:31], s[CFN_TMP_\fn:CFN_TMP_\fn+1]
-	CFN_RESTORE_\fn
-	s_branch .Lcfn_end_\fn
-	CFN_BODY_\fn
-.Lcfn_end_\fn:
+.if \val
+	// After the key: for a fourteen-dword key the last of these land on
+	// its first two, which have been read by then.
+	.set _i, 0
+	.rept KNOD_BLOB_VALUE_CHUNKS_MAX
+	v_mov_b32 v[2 + \n + _i], v[VAL + _i]
+	.set _i, _i + 1
+	.endr
+.endif
+	s_mov_b32 s32, KNOD_BLOB_CALL_STACK_OFF
+	s_getpc_b64 s[CFN_TMP_\fn\()\n:CFN_TMP_\fn\()\n+1]
+.Lpc_\fn\()\n:
+	s_add_u32 s[CFN_TMP_\fn\()\n], s[CFN_TMP_\fn\()\n], \
+		  .Lcfn_\fn\()\n - .Lpc_\fn\()\n
+	s_addc_u32 s[CFN_TMP_\fn\()\n+1], s[CFN_TMP_\fn\()\n+1], 0
+	s_swappc_b64 s[30:31], s[CFN_TMP_\fn\()\n:CFN_TMP_\fn\()\n+1]
+	CFN_RESTORE_\fn\()\n
+	s_branch .Lend_\fn\()\n
+	CFN_BODY_\fn\()\n
+.Lend_\fn\()\n:
+	KNOD_BLOB_RET
+	.size knod_\fn\()\n, . - knod_\fn\()\n
+	.globl knod_\fn\()\n\()_xsave
+	.set knod_\fn\()\n\()_xsave, KNOD_BLOB_EXEC_SAVE_PAIRS_MAX
 .endm
-
-// A lookup is given no value, so it spends the value registers on holding the
-// stored key whole and comparing it a word at a time against the search key.
-// That is what sets the 56-byte key limit, not any property of hashing.
-#define K0		KEY			// v28-v41
-#define M0		VAL			// v42-v55
-
-// jhash state and its scratch borrow the stored-key registers, which are not
-// written until the walk starts and the hash is finished before then.
-#define HA		(M0 + 0)
-#define HB		(M0 + 1)
-#define HC		(M0 + 2)
-#define HT		(M0 + 3)
-
-#define EBASE		T0		// element storage base
-#define EADDR		T2		// the element being examined
-#define NEND		THI0
-#define CHAIN		THI1
-
-#define KNOD_BPF_HASH_NEXT_END		0x7FFFFFFF
-#define KNOD_BPF_HASH_NEXT_MASK		0x7FFFFFFF
-#define ELEM_OFF_NEXT			0
-#define ELEM_OFF_KV			KNOD_BLOB_ELEM_KV_OFF
 
 	.text
 
-//
-// knod_lookup_hash_k<n>
-//
-//   r0 = the value belonging to the key, or 0
-//
-// The chain is walked with the lanes still resident: a lane whose chain ends
-// is removed from EXEC rather than branched away, so lanes at different depths
-// share the walk and the loop runs as long as any lane is still looking.  The
-// mask is put back at the end and the lanes that dropped out keep the zero
-// written up front, which is what a miss looks like.
-//
-// @pc = 0 for a plain hash, 1 for a percpu hash whose value pointer is offset
-// by workgroup_id_y * per_instance_size to reach this instance's value slot.
-.macro	DEFINE_LOOKUP_HASH n, pc=0
-.if \pc
-	.globl knod_lookup_percpu_hash_k\n
-	.p2align 2
-knod_lookup_percpu_hash_k\n:
-.else
-	.globl knod_lookup_hash_k\n
-	.p2align 2
-knod_lookup_hash_k\n:
-.endif
-.if \n <= C_LOOKUP_MAX
-	.set _xs, KNOD_BLOB_EXEC_SAVE_PAIRS_MAX
-.if \pc
-	CFN_CALL lookup_percpu_hash_k\n, \n
-.else
-	CFN_CALL lookup_hash_k\n, \n
-.endif
-.else
-	.set _xs, 3
-	s_load_dwordx2 s[S0:S0+1], s[DESC:DESC+1], DESC_BUCKET
-	s_load_dwordx2 s[S2:S2+1], s[DESC:DESC+1], DESC_ELEMS
-
-	// The key is already in v[K0..], which is where the compares below
-	// want it.
-	v_mov_b32 v[RET], 0
-	v_mov_b32 v[RET+1], 0
-
-	s_waitcnt lgkmcnt(0)
-	v_mov_b32 v[NEND], s[S0]		// bucket heads, until .Lnext
-	v_mov_b32 v[CHAIN], s[S0+1]
-	v_mov_b32 v[EBASE], s[S2]
-	v_mov_b32 v[EBASE+1], s[S2+1]
-
-	// What jhash starts from is loaded here rather than with the rest
-	// because the scalars only come free on the line above.
-	s_load_dword s[S0], s[DESC:DESC+1], DESC_KEY_SIZE
-	s_load_dword s[S1], s[DESC:DESC+1], DESC_HASHRND
-	s_load_dword s[S3], s[DESC:DESC+1], DESC_N_BUCKETS
-	s_waitcnt lgkmcnt(0)
-	s_add_i32 s[S0], s[S0], s[S1]
-
-	JHASH HA, HB, HC, HT, K0, \n, S0
-
-	// bucket_id = hash & (n_buckets - 1)
-	s_add_i32 s[S3], s[S3], -1
-	v_and_b32 v[HC], s[S3], v[HC]
-
-	// &bucket[bucket_id].  s[S0:S0+1] is only the carry out; the bucket
-	// base it held is in v[NEND:CHAIN], which the mad may not write over.
-	v_mad_u64_u32 v[EADDR:EADDR+1], s[S0:S0+1], 4, v[HC], v[NEND:CHAIN]
-
-	// Every lane starts the walk; the mask comes back at .Lout.
-	s_mov_b64 s[XSAVE0:XSAVE0+1], exec
-	v_mov_b32 v[NEND], KNOD_BPF_HASH_NEXT_END
-
-.Lnext_\n\()_\pc:
-	global_load_dword v[CHAIN], v[EADDR:EADDR+1], off MAP_COHERENT
-	s_waitcnt vmcnt(0)
-	// The top bit marks a deleted element; it is not part of the index.
-	v_and_b32 v[CHAIN], KNOD_BPF_HASH_NEXT_MASK, v[CHAIN]
-
-	// Lanes that reached the end of their chain stop here.
-	v_cmp_eq_u32 vcc, v[NEND], v[CHAIN]
-	s_andn2_b64 exec, exec, vcc
-	s_cbranch_execz .Lout_\n\()_\pc
-
-	// elem = elems + elem_id * elem_size
-	s_load_dword s[S3], s[DESC:DESC+1], DESC_ELEM_SIZE
-	s_waitcnt lgkmcnt(0)
-	v_mad_u64_u32 v[EADDR:EADDR+1], s[S0:S0+1], s[S3], v[CHAIN], v[EBASE:EBASE+1]
-	// A concurrent delete can mark an element already reached by this
-	// walk.  Its next field carries the deletion mark, just as in the JIT.
-	global_load_dword v[CHAIN], v[EADDR:EADDR+1], off MAP_COHERENT
-
-	.set _i, 0
-	.rept \n
-	global_load_dword v[M0 + _i], v[EADDR:EADDR+1], off offset:(ELEM_OFF_KV + _i * 4) MAP_COHERENT
-	.set _i, _i + 1
-	.endr
-	s_waitcnt vmcnt(0)
-
-	// Fold the per-dword comparisons into one mask rather than branching
-	// on each: the padding is zero on both sides, so the last dword
-	// compares equal without masking.
-	v_cmp_eq_u32 vcc, v[K0], v[M0]
-	s_and_b64 s[XSAVE1:XSAVE1+1], exec, vcc
-	.set _i, 1
-	.rept (\n - 1)
-	v_cmp_eq_u32 vcc, v[K0 + _i], v[M0 + _i]
-	s_and_b64 s[XSAVE1:XSAVE1+1], s[XSAVE1:XSAVE1+1], vcc
-	.set _i, _i + 1
-	.endr
-
-	// Bit 31 marks a deleted element.  Keep walking through it instead of
-	// returning its value, even when the key compares equal.
-	v_cmp_le_i32 vcc, 0, v[CHAIN]
-	s_and_b64 s[XSAVE1:XSAVE1+1], s[XSAVE1:XSAVE1+1], vcc
-
-	// Matching lanes take the value and leave the walk.
-	s_and_saveexec_b64 s[XSAVE2:XSAVE2+1], s[XSAVE1:XSAVE1+1]
-	s_cbranch_execz .Lmiss_\n\()_\pc
-.if \pc
-	// This instance's slot: value_off + workgroup_id_y * per_instance_size.
-	s_load_dword s[S3], s[DESC:DESC+1], DESC_PER_INSTANCE
-	s_waitcnt lgkmcnt(0)
-	s_mul_i32 s[S3], s[S3], s[WG_Y]
-	s_add_i32 s[S3], s[S3], KNOD_BLOB_ELEM_VALUE_OFF(\n)
-	v_add_co_u32 v[RET], vcc, s[S3], v[EADDR]
-	V_ADD_CI_U32 v[RET+1], vcc, 0, v[EADDR+1], vcc
-.else
-	v_add_co_u32 v[RET], vcc, KNOD_BLOB_ELEM_VALUE_OFF(\n), v[EADDR]
-	V_ADD_CI_U32 v[RET+1], vcc, 0, v[EADDR+1], vcc
-.endif
-.Lmiss_\n\()_\pc:
-	// exec = lanes still walking = (those that were walking) - (matched)
-	s_andn2_b64 exec, s[XSAVE2:XSAVE2+1], s[XSAVE1:XSAVE1+1]
-	s_cbranch_execz .Lout_\n\()_\pc
-
-	// Follow the chain.  v[EADDR:EADDR+1] already points at the element
-	// and its next index sits at offset zero, which is what .Lnext reloads.
-	s_branch .Lnext_\n\()_\pc
-
-.Lout_\n\()_\pc:
-	s_mov_b64 exec, s[XSAVE0:XSAVE0+1]
-.endif
-	KNOD_BLOB_RET
-.if \pc
-	.size knod_lookup_percpu_hash_k\n, . - knod_lookup_percpu_hash_k\n
-	.globl knod_lookup_percpu_hash_k\n\()_xsave
-	.set knod_lookup_percpu_hash_k\n\()_xsave, _xs
-.else
-	.size knod_lookup_hash_k\n, . - knod_lookup_hash_k\n
-	.globl knod_lookup_hash_k\n\()_xsave
-	.set knod_lookup_hash_k\n\()_xsave, _xs
-.endif
-.endm
-
-// One per DIV_ROUND_UP(key_size, 4) the JIT will accept.  Spelled out rather
-// than generated, because the length is pasted into label names as well as
-// counted with, and only a literal does both.
-	DEFINE_LOOKUP_HASH 1
-	DEFINE_LOOKUP_HASH 2
-	DEFINE_LOOKUP_HASH 3
-	DEFINE_LOOKUP_HASH 4
-	DEFINE_LOOKUP_HASH 5
-	DEFINE_LOOKUP_HASH 6
-	DEFINE_LOOKUP_HASH 7
-	DEFINE_LOOKUP_HASH 8
-	DEFINE_LOOKUP_HASH 9
-	DEFINE_LOOKUP_HASH 10
-	DEFINE_LOOKUP_HASH 11
-	DEFINE_LOOKUP_HASH 12
-	DEFINE_LOOKUP_HASH 13
-	DEFINE_LOOKUP_HASH 14
-
-	DEFINE_LOOKUP_HASH 1, 1
-	DEFINE_LOOKUP_HASH 2, 1
-	DEFINE_LOOKUP_HASH 3, 1
-	DEFINE_LOOKUP_HASH 4, 1
-	DEFINE_LOOKUP_HASH 5, 1
-	DEFINE_LOOKUP_HASH 6, 1
-	DEFINE_LOOKUP_HASH 7, 1
-	DEFINE_LOOKUP_HASH 8, 1
-	DEFINE_LOOKUP_HASH 9, 1
-	DEFINE_LOOKUP_HASH 10, 1
-	DEFINE_LOOKUP_HASH 11, 1
-	DEFINE_LOOKUP_HASH 12, 1
-	DEFINE_LOOKUP_HASH 13, 1
-	DEFINE_LOOKUP_HASH 14, 1
-
-// The build concatenates every source into one file, so these names are
-// shared with whatever follows.  Handing them back keeps the next file's
-// meaning its own, and keeps a collision an error rather than an ordering.
-#undef K0
-#undef M0
-#undef HA
-#undef HB
-#undef HC
-#undef HT
-#undef EBASE
-#undef EADDR
-#undef NEND
-#undef CHAIN
-#undef KNOD_BPF_HASH_NEXT_END
-#undef KNOD_BPF_HASH_NEXT_MASK
-#undef ELEM_OFF_NEXT
-#undef ELEM_OFF_KV
+.irp n, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14
+	ROUTINE lookup_hash_k, \n
+	ROUTINE lookup_percpu_hash_k, \n
+	ROUTINE update_hash_k, \n, 1
+	ROUTINE update_percpu_hash_k, \n, 1
+	ROUTINE delete_hash_k, \n
+.endr

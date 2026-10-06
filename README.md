@@ -36,4 +36,5 @@ has confirmed it matches that generation's JIT output on hardware.
 
 ## Requires
 
-`llvm-mc`, `llvm-objcopy`, `clang` (as a preprocessor) and python3.
+`llvm-mc`, `llvm-objcopy`, `clang` (with the AMDGPU target, for the routines
+in csrc/), a host C compiler and python3.
