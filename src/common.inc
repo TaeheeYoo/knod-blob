@@ -11,6 +11,8 @@
 #define COMMON_INC
 
 #include <linux/knod_blob.h>
+// Offsets into the uapi structures, generated from them by tools/offsets.c.
+#include "knod_offsets.h"
 
 #define DESC		KNOD_BLOB_SPLICE_DESC_SREG
 #define KEY		KNOD_BLOB_SPLICE_KEY_VREG

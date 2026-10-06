@@ -27,12 +27,15 @@
 #ifndef GDA_INC
 #define GDA_INC
 #include <linux/knod_persistent.h>
+#include <linux/knod_mlx5.h>
 
-// The mlx5 send WQE the epilogue writes: the fields it sets, nothing more.
-#define KNOD_MLX5_OPCODE_SEND		0x0a
-#define KNOD_MLX5_CQE_REQ_ERR		0x0d
-#define KNOD_MLX5_CTRL_CQ_UPDATE	0x08	// fm_ce_se
-#define KNOD_MLX5_SEND_DS		3	// ctrl, eth, one data segment
+// A CQE is read a dword at a time.  The one at wqe_counter holds the counter,
+// the signature and op_own; these are op_own's place in it, and fm_ce_se's in
+// the third dword of a send WQE's ctrl segment.
+#define CQE_OP_OWN_SHIFT	(8 * (KNOD_MLX5_CQE_OP_OWN - KNOD_MLX5_CQE_WQE_COUNTER))
+#define CTRL_FM_CE_SE_SHIFT	(8 * (KNOD_MLX5_CTRL_FM_CE_SE % 4))
+// A u32 debug slot's byte offset.
+#define DBG_SLOT(i)		(4 * (i))
 
 #define GS		KNOD_BLOB_PRO_GDA_VREG
 #define GDA_PKTS	(KNOD_BLOB_PRO_GDA_VREG + 1)	// v[74:75]
@@ -176,8 +179,9 @@
 	s_lshl_b32 s[GT], 1, s[E_T]
 	s_sub_u32 s[GT], s[GT], 1
 	v_and_b32 v[P4], s[GT], v[P3]
-	v_lshlrev_b32 v[P4], 6, v[P4]
-	v_add_co_u32 v[P4], vcc, (KNOD_PERSIST_RING_TX_CQ_OFF + 60), v[P4]
+	v_lshlrev_b32 v[P4], KNOD_MLX5_CQE_SHIFT, v[P4]
+	v_add_co_u32 v[P4], vcc, \
+		     (KNOD_PERSIST_RING_TX_CQ_OFF + KNOD_MLX5_CQE_WQE_COUNTER), v[P4]
 	v_add_co_u32 v[P6], vcc, s10, v[P4]
 	v_mov_b32 v[P6+1], s11
 	V_ADD_CI_U32 v[P6+1], vcc, 0, v[P6+1], vcc
@@ -185,11 +189,11 @@
 	s_waitcnt vmcnt(0)
 	v_lshrrev_b32 v[P4], s[E_T], v[P3]
 	v_and_b32 v[P4], 1, v[P4]
-	v_lshrrev_b32 v[P8], 24, v[P5]
-	v_and_b32 v[P3], 1, v[P8]
+	v_lshrrev_b32 v[P8], CQE_OP_OWN_SHIFT, v[P5]
+	v_and_b32 v[P3], KNOD_MLX5_CQE_OWNER_MASK, v[P8]
 	v_cmp_eq_u32_e64 s[22:23], v[P4], v[P3]
-	v_lshrrev_b32 v[P8], 4, v[P8]
-	v_cmp_ne_u32_e64 s[GT:GT+1], 15, v[P8]
+	v_lshrrev_b32 v[P8], KNOD_MLX5_CQE_OPCODE_SHIFT, v[P8]
+	v_cmp_ne_u32_e64 s[GT:GT+1], KNOD_MLX5_CQE_INVALID, v[P8]
 	s_and_b64 s[22:23], s[22:23], s[GT:GT+1]
 	s_not_b64 s[GT:GT+1], s[22:23]
 	s_ff1_i32_b64 s[E_T], s[GT:GT+1]
@@ -213,7 +217,7 @@
 	v_writelane_b32 v[GS], s[GT], GL_TX_DEAD
 	s_branch .Lgda_tx_ci\@
 .Lgda_tx_ok\@:
-	// The last one's WQE counter, big endian 16 bits at byte 60.
+	// The last one's WQE counter, its wqe_counter: big endian 16 bits.
 	s_sub_u32 s[E_T], s[E_T], 1
 	v_readlane_b32 s[GT+1], v[P5], s[E_T]
 	s_and_b32 s[GT], s[GT+1], 0xff
@@ -308,22 +312,29 @@
 	s_addc_u32 s[GT+1], s9, 0
 	v_mov_b32 v[P3], s[GT]
 	v_mov_b32 v[P4], s[GT+1]
-	global_store_dword v[P3:P4], v[P2], off offset:8 glc slc
+	global_store_dword v[P3:P4], v[P2], off \
+			   offset:DBG_SLOT(KNOD_PERSIST_REGRESS_DELTA) glc slc
 	v_mov_b32 v[P2], 1
 	global_atomic_add v[P3:P4], v[P2], off
 	v_mov_b32 v[P2], s2
-	global_store_dword v[P3:P4], v[P2], off offset:4 glc slc
+	global_store_dword v[P3:P4], v[P2], off \
+			   offset:DBG_SLOT(KNOD_PERSIST_REGRESS_S2) glc slc
 	v_readlane_b32 s[GT], v[GS], GL_LAST_BOUND
 	v_mov_b32 v[P2], s[GT]
-	global_store_dword v[P3:P4], v[P2], off offset:12 glc slc
+	global_store_dword v[P3:P4], v[P2], off \
+			   offset:DBG_SLOT(KNOD_PERSIST_REGRESS_BOUND) glc slc
 	v_mov_b32 v[P2], s[E_PC]
-	global_store_dword v[P3:P4], v[P2], off offset:16 glc slc
+	global_store_dword v[P3:P4], v[P2], off \
+			   offset:DBG_SLOT(KNOD_PERSIST_REGRESS_SQ_PC) glc slc
 	v_mov_b32 v[P2], s[E_CC]
-	global_store_dword v[P3:P4], v[P2], off offset:20 glc slc
+	global_store_dword v[P3:P4], v[P2], off \
+			   offset:DBG_SLOT(KNOD_PERSIST_REGRESS_SQ_CC) glc slc
 	v_mov_b32 v[P2], s[R_CC]
-	global_store_dword v[P3:P4], v[P2], off offset:24 glc slc
+	global_store_dword v[P3:P4], v[P2], off \
+			   offset:DBG_SLOT(KNOD_PERSIST_REGRESS_PASS_CC) glc slc
 	v_mov_b32 v[P2], s[R_CAND]
-	global_store_dword v[P3:P4], v[P2], off offset:28 glc slc
+	global_store_dword v[P3:P4], v[P2], off \
+			   offset:DBG_SLOT(KNOD_PERSIST_REGRESS_CAND) glc slc
 	v_readlane_b32 s[GT], v[GS], GL_RQ_SIZE
 .Lgda_bound_fwd\@:
 	s_add_u32 s[E_T], s[E_T], s[GT]
@@ -748,22 +759,23 @@
 	s_lshl_b32 s[PS0], 1, s[PS2+1]
 	s_sub_u32 s[PS0], s[PS0], 1
 	v_and_b32 v[P12], s[PS0], v[P10+1]
-	v_lshlrev_b32 v[P12], 6, v[P12]
+	v_lshlrev_b32 v[P12], KNOD_MLX5_CQE_SHIFT, v[P12]
 	v_add_co_u32 v[P12], vcc, KNOD_PERSIST_RING_CQ_OFF, v[P12]
 	v_add_co_u32 v[P24], vcc, s10, v[P12]
 	v_mov_b32 v[P24+1], s11
 	V_ADD_CI_U32 v[P24+1], vcc, 0, v[P24+1], vcc
-	global_load_dword v[P28+1], v[P24:P24+1], off offset:60 glc dlc
+	global_load_dword v[P28+1], v[P24:P24+1], off \
+			  offset:KNOD_MLX5_CQE_WQE_COUNTER glc dlc
 	s_waitcnt vmcnt(0)
 	// Ours when the owner bit is the pass round the ring the position is
 	// on and the opcode is not the invalid one a fresh ring holds.
-	v_lshrrev_b32 v[P12+1], 24, v[P28+1]		// op_own
+	v_lshrrev_b32 v[P12+1], CQE_OP_OWN_SHIFT, v[P28+1]	// op_own
 	v_lshrrev_b32 v[P14], s[PS2+1], v[P10+1]
 	v_and_b32 v[P14], 1, v[P14]
-	v_and_b32 v[P14+1], 1, v[P12+1]
+	v_and_b32 v[P14+1], KNOD_MLX5_CQE_OWNER_MASK, v[P12+1]
 	v_cmp_eq_u32_e64 s[PS0:PS1], v[P14], v[P14+1]
-	v_lshrrev_b32 v[P12+1], 4, v[P12+1]
-	v_cmp_ne_u32_e64 s[GT:GT+1], 15, v[P12+1]
+	v_lshrrev_b32 v[P12+1], KNOD_MLX5_CQE_OPCODE_SHIFT, v[P12+1]
+	v_cmp_ne_u32_e64 s[GT:GT+1], KNOD_MLX5_CQE_INVALID, v[P12+1]
 	s_and_b64 s[PS0:PS1], s[PS0:PS1], s[GT:GT+1]
 	// This wave's unbroken run from its head.
 	s_not_b64 s[GT:GT+1], s[PS0:PS1]
@@ -860,7 +872,8 @@
 	// Acquire the CQE through its owner word before reading its payload.
 	// Issuing both loads together can accept a new owner with the previous
 	// byte count when the NIC completes the CQE between those loads.
-	global_load_dword v[P28], v[P24:P24+1], off offset:44 glc dlc
+	global_load_dword v[P28], v[P24:P24+1], off \
+			  offset:KNOD_MLX5_CQE_BYTE_CNT glc dlc
 	s_waitcnt vmcnt(0)
 
 	// The RQ entry this CQE completes, and so the page: entry i is page i.
@@ -887,7 +900,8 @@
 	v_mov_b32 v[P14], 1
 	global_atomic_add v[P16:P16+1], v[P14], off
 	v_mov_b32 v[P14], s[PS6]
-	global_store_dword v[P16:P16+1], v[P14], off offset:4 glc slc
+	global_store_dword v[P16:P16+1], v[P14], off \
+			   offset:DBG_SLOT(KNOD_PERSIST_SYNC_ENTRIES) glc slc
 	s_mov_b64 exec, s[INITIAL_EXEC:INITIAL_EXEC+1]
 .Lgda_insync\@:
 	v_readlane_b32 s[PS0], v[GS], GL_RQ_SIZE
@@ -1061,7 +1075,7 @@
 	s_add_u32 s[GT], s[E_PC], s[X_BASE]
 	V_ADD_U32 v[P3], s[GT], v[P2]			// WQE counter
 	v_and_b32 v[P4], s[E_MASK], v[P3]
-	v_lshlrev_b32 v[P4], 6, v[P4]
+	v_lshlrev_b32 v[P4], KNOD_MLX5_WQEBB_SHIFT, v[P4]
 	v_readlane_b32 s[GT], v[GS], GL_SQ
 	v_readlane_b32 s[GT+1], v[GS], GL_SQ + 1
 	v_add_co_u32 v[P8], vcc, s[GT], v[P4]
@@ -1094,7 +1108,7 @@
 	s_cmp_eq_u32 s[E_ME], s[X_LAST]
 	s_cselect_b32 s[GT], s[GT], 64
 	v_cmp_eq_u32_e64 s[GT:GT+1], s[GT], v[P2]
-	v_mov_b32 v[P5], (KNOD_MLX5_CTRL_CQ_UPDATE << 24)
+	v_mov_b32 v[P5], (KNOD_MLX5_CTRL_CQ_UPDATE << CTRL_FM_CE_SE_SHIFT)
 	v_cndmask_b32_e64 v[P0+2], 0, v[P5], s[GT:GT+1]
 	v_mov_b32 v[P0+3], 0
 
@@ -1116,8 +1130,10 @@
 	v_perm_b32 v[P16+3], v[P12], v[P12], 0x00010203
 
 	global_store_dwordx4 v[P8:P8+1], v[P0:P0+3], off glc slc
-	global_store_dwordx4 v[P8:P8+1], v[P4:P4+3], off offset:16 glc slc
-	global_store_dwordx4 v[P8:P8+1], v[P16:P16+3], off offset:32 glc slc
+	global_store_dwordx4 v[P8:P8+1], v[P4:P4+3], off \
+			     offset:KNOD_MLX5_SEND_ETH glc slc
+	global_store_dwordx4 v[P8:P8+1], v[P16:P16+3], off \
+			     offset:KNOD_MLX5_SEND_DATA glc slc
 
 	// Each WQE says which RQ position its packet came in on, so that
 	// whatever WQE the NIC's completions stop at, the RQ is held from
