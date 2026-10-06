@@ -48,7 +48,6 @@ knod_\fn:
 	s_addc_u32 s[CFN_TMP_\fn+1], s[CFN_TMP_\fn+1], 0
 	s_swappc_b64 s[30:31], s[CFN_TMP_\fn:CFN_TMP_\fn+1]
 	CFN_RESTORE_\fn
-	KNOD_BLOB_RET
 	.size knod_\fn, . - knod_\fn
 	.globl knod_\fn\()_xsave
 	.set knod_\fn\()_xsave, KNOD_BLOB_EXEC_SAVE_PAIRS_MAX

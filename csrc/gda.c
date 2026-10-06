@@ -121,7 +121,8 @@ struct gda {
 };
 
 #define GL(g, f)	__builtin_amdgcn_readlane((g)->s, GL_##f)
-#define GL64(g, f)	((uint64_t)__builtin_amdgcn_readlane((g)->s, GL_##f + 1) << 32 | \
+#define GL64(g, f)	((uint64_t)__builtin_amdgcn_readlane((g)->s,	\
+							 GL_##f + 1) << 32 |	\
 			 (uint32_t)__builtin_amdgcn_readlane((g)->s, GL_##f))
 #define SET(g, f, v)	((g)->s = writelane((g)->s, (v), GL_##f))
 #define SET64(g, f, v)	do {						\
@@ -432,7 +433,8 @@ static INLINE void gda_post_rq(struct gda *g)
 	stores_out();
 }
 
-static INLINE void gda_load(struct gda *g, ctl_t ctl, uint32_t queue, uint32_t wave)
+static INLINE void gda_load(struct gda *g, ctl_t ctl, uint32_t queue,
+			    uint32_t wave)
 {
 	g->ctl = ctl;
 	g->entry = &ctl->gda[queue];

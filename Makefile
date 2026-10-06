@@ -18,13 +18,9 @@ SRC_bpf-persistent := $(filter-out $(SRC_core),$(wildcard src/*.S))
 
 ABI_HDR		:= include/uapi/linux/knod_blob.h
 UAPI_HDRS	:= $(wildcard include/uapi/linux/*.h)
-HOSTCC		?= cc
 CLANG		?= clang
 CSRC		:= $(wildcard csrc/*.c)
 BUILD		:= build
-# The offsets the assembly reaches the uapi structures through, worked out
-# from the structures themselves so their layout is written down once.
-OFFSETS_HDR	:= $(BUILD)/knod_offsets.h
 # The preprocessor flags decide what goes in - a probe, or no probe - and they
 # are in no file, so nothing about the sources says a build made with one is
 # not the build being asked for with another.  Keep them in a stamp every
@@ -38,7 +34,7 @@ EXTRA_CPPFLAGS	?= $(shell cat $(FLAGS_STAMP) 2>/dev/null)
 # .inc files that the .S files include, and leaving them out meant editing a
 # prologue or an epilogue built nothing.
 DEPS		:= $(wildcard src/*.S) $(wildcard src/*.inc) \
-		   $(ABI_HDR) $(FLAGS_STAMP) $(UAPI_HDRS) $(OFFSETS_HDR)
+		   $(ABI_HDR) $(FLAGS_STAMP) $(UAPI_HDRS)
 FIRMWARE_DIR	?= /lib/firmware/knod
 
 # Persistent-shader KNOD supports RDNA generations in Wave64 mode.
@@ -76,7 +72,7 @@ $(BUILD)/$(1).$(2).s: $(DEPS) | $(BUILD)
 	$(ASM_CPP) -Isrc -I$(BUILD) -Iinclude/uapi -Werror=undef \
 		-Werror=macro-redefined \
 		$(EXTRA_CPPFLAGS) \
-		-DKNOD_BLOB_LINK=KNOD_BLOB_LINK_SPLICE -D__ASSEMBLY__ \
+		-D__ASSEMBLY__ \
 		-DKNOD_ISA=$(2) $(BUILD)/$(1).$(2).cat.S -o $$@
 
 $(BUILD)/$(1).$(2).o: $(BUILD)/$(1).$(2).s
@@ -114,10 +110,6 @@ $(BUILD)/cfn.$(1).inc: $(patsubst csrc/%.c,$(BUILD)/%.$(1).s,$(CSRC)) \
 endef
 
 $(foreach i,$(ISAS),$(eval $(call cfn_rules,$(i))))
-
-$(OFFSETS_HDR): tools/offsets.c $(UAPI_HDRS) | $(BUILD)
-	$(HOSTCC) -Wall -Werror -Iinclude/uapi $< -o $(BUILD)/offsets
-	$(BUILD)/offsets > $@.new && mv $@.new $@
 
 $(BUILD):
 	mkdir -p $@

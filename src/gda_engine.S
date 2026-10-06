@@ -15,7 +15,7 @@
 #include "cfn.inc"
 
 #define GS		KNOD_BLOB_PRO_GDA_VREG
-#define GT		(KNOD_BLOB_PRO_TMP_SREG + 10)	// s[24:25]
+#define GT		24		// s[24:25], which nothing holds here
 #define E_CTL		8
 #define E_QUEUE		0
 #define E_WAVE		2
