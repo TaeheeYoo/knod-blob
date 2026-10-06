@@ -84,9 +84,10 @@ knod_gda_engine:
 	v_mov_b32 v[GS+2], v15
 
 	// What the program reads its packets from.  v0 is the page, v1 the
-	// packet's offset in it, v2 its length, v3 the lane in the queue, v4
-	// in all queues, v[5:6] the page, v[7:8] its xdp_md; v[9:10] are the
-	// lanes that have one and v[11:12] the parameter block.
+	// packet's offset in it, v2 its length, v3 the lane in the queue -
+	// which the JIT also finds the lane's LDS stack by - v4 in all queues,
+	// v[5:6] the page, v[7:8] its xdp_md; v[9:10] are the lanes that have
+	// one and v[11:12] the parameter block.
 	v_readfirstlane_b32 s[INITIAL_EXEC], v9
 	v_readfirstlane_b32 s[INITIAL_EXEC+1], v10
 	v_readfirstlane_b32 s[PARAM], v11
@@ -104,6 +105,7 @@ knod_gda_engine:
 	v_mov_b32 v[CTX], v7
 	v_mov_b32 v[CTX+1], v8
 	v_mov_b32 v[TID], v3
+	v_mov_b32 v[KNOD_BLOB_PRO_LOCAL_IDX_VREG], v3
 	v_mov_b32 v[BPF_R1], v7
 	v_mov_b32 v[BPF_R1+1], v8
 	s_mov_b64 s[DONE_MASK:DONE_MASK+1], 0
