@@ -90,6 +90,9 @@ def emit(c, name, body, stack, out):
         restore.append(f"\tv_mov_b32 v{r}, v{d}")
 
     short = name[len("cfn_"):]
+    # Local labels are numbered per file; every function gets its own.
+    body = [re.sub(r"\.L([\w$.]+)", rf".Lcfn_{short}_\1", line)
+            for line in body]
     out.append(f".set CFN_TMP_{short}, {tmp}")
     for macro, lines in (("SAVE", save), ("RESTORE", restore),
                          ("BODY", [f".Lcfn_{short}:"] + body)):
@@ -99,9 +102,9 @@ def emit(c, name, body, stack, out):
 
 
 def main():
-    src, out_path = sys.argv[1], sys.argv[2]
+    out_path, srcs = sys.argv[1], sys.argv[2:]
     c = contract()
-    text = open(src).read()
+    text = "\n".join(open(src).read() for src in srcs)
     funcs, name, body, last = [], None, [], None
     for line in text.splitlines():
         # clang reports a function's stack in a comment after its end.

@@ -20,7 +20,7 @@ ABI_HDR		:= include/uapi/linux/knod_blob.h
 UAPI_HDRS	:= $(wildcard include/uapi/linux/*.h)
 HOSTCC		?= cc
 CLANG		?= clang
-CSRC		:= csrc/map_hash.c
+CSRC		:= $(wildcard csrc/*.c)
 BUILD		:= build
 # The offsets the assembly reaches the uapi structures through, worked out
 # from the structures themselves so their layout is written down once.
@@ -101,13 +101,14 @@ $(foreach i,$(ISAS),$(eval $(call isa_rules,bpf-persistent,$(i))))
 # Routines written in C: compiled to assembly, then turned by cfn.py into
 # macros a routine in src/ calls through.
 define cfn_rules
-$(BUILD)/cfn.$(1).s: $(CSRC) $(UAPI_HDRS) | $(BUILD)
+$(BUILD)/%.$(1).s: csrc/%.c $(wildcard csrc/*.h) $(UAPI_HDRS) | $(BUILD)
 	$(CLANG) -target amdgcn-amd-amdhsa -mcpu=$(CPU_$(1)) -mwavefrontsize64 \
 		$(CFN_ATTR_$(1)) -O2 -nogpulib -ffreestanding -fno-builtin \
-		-Wall -Werror -Iinclude/uapi -S $(CSRC) -o $$@
+		-Wall -Werror -Iinclude/uapi -S $$< -o $$@
 
-$(BUILD)/cfn.$(1).inc: $(BUILD)/cfn.$(1).s tools/cfn.py $(ABI_HDR)
-	python3 tools/cfn.py $$< $$@
+$(BUILD)/cfn.$(1).inc: $(patsubst csrc/%.c,$(BUILD)/%.$(1).s,$(CSRC)) \
+		       tools/cfn.py $(ABI_HDR)
+	python3 tools/cfn.py $$@ $$(filter %.s,$$^)
 endef
 
 $(foreach i,$(ISAS),$(eval $(call cfn_rules,$(i))))
