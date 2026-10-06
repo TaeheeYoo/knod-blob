@@ -38,12 +38,12 @@ EXTRA_CPPFLAGS	?= $(shell cat $(FLAGS_STAMP) 2>/dev/null)
 # .inc files that the .S files include, and leaving them out meant editing a
 # prologue or an epilogue built nothing.
 DEPS		:= $(wildcard src/*.S) $(wildcard src/*.inc) \
-		   $(ABI_HDR) $(FLAGS_STAMP) $(UAPI_HDRS) $(OFFSETS_HDR) \
-		   $(foreach i,$(ISAS),$(BUILD)/cfn.$(i).inc)
+		   $(ABI_HDR) $(FLAGS_STAMP) $(UAPI_HDRS) $(OFFSETS_HDR)
 FIRMWARE_DIR	?= /lib/firmware/knod
 
 # Persistent-shader KNOD supports RDNA generations in Wave64 mode.
 ISAS		:= 10 11
+DEPS		+= $(foreach i,$(ISAS),$(BUILD)/cfn.$(i).inc)
 CPU_10		:= gfx1030
 CPU_11		:= gfx1100
 ATTR_10		:= --mattr=+wavefrontsize64
