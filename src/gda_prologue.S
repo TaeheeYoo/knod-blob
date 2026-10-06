@@ -3,7 +3,7 @@
 // A program's way in: its frame.  The engine has its packets in place.
 
 #include "common.inc"
-#include "gda.inc"
+#include "gda_program.inc"
 
 	.text
 

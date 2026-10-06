@@ -4,7 +4,7 @@
 // out, and back to the engine.
 
 #include "common.inc"
-#include "gda.inc"
+#include "gda_program.inc"
 
 	.text
 

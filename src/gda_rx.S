@@ -6,7 +6,7 @@
 // leaves them for the next one the same way.
 
 #include "common.inc"
-#include "gda.inc"
+#include "gda_program.inc"
 
 	.text
 	.globl knod_gda_rx_kernel

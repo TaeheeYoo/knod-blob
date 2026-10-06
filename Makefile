@@ -48,6 +48,8 @@ CPU_10		:= gfx1030
 CPU_11		:= gfx1100
 ATTR_10		:= --mattr=+wavefrontsize64
 ATTR_11		:= --mattr=+wavefrontsize64
+# CU mode, as the kernel launches every GDA shader: a workgroup's waves share
+# one CU's L0, so what one writes another reads without invalidating it.
 # A call's stack is reached through FLAT_SCRATCH, which the GDA prologue sets
 # on gfx10 and the hardware on gfx11, rather than a buffer descriptor.
 CFN_ATTR_10	:= -Xclang -target-feature -Xclang +enable-flat-scratch
@@ -103,7 +105,7 @@ $(foreach i,$(ISAS),$(eval $(call isa_rules,bpf-persistent,$(i))))
 define cfn_rules
 $(BUILD)/%.$(1).s: csrc/%.c $(wildcard csrc/*.h) $(UAPI_HDRS) | $(BUILD)
 	$(CLANG) -target amdgcn-amd-amdhsa -mcpu=$(CPU_$(1)) -mwavefrontsize64 \
-		$(CFN_ATTR_$(1)) -O2 -nogpulib -ffreestanding -fno-builtin \
+		-mcumode $(CFN_ATTR_$(1)) -O2 -nogpulib -ffreestanding -fno-builtin \
 		-Wall -Werror -Iinclude/uapi -S $$< -o $$@
 
 $(BUILD)/cfn.$(1).inc: $(patsubst csrc/%.c,$(BUILD)/%.$(1).s,$(CSRC)) \

@@ -21,6 +21,10 @@ it; the window is the routine's to lose.
 
 Refuses a function that needs more stack than the routine gives it, or that
 touches a vector register past the window.
+
+The engine's functions, cfn_gda_*, run between programs with nothing live
+but their arguments, so they get only the body, and may use any register the
+wave has.
 """
 import re
 import sys
@@ -57,6 +61,19 @@ def emit(c, name, body, stack, out):
         sys.exit(f"{name}: needs {stack} bytes of stack, the routine gives "
                  f"{c['CALL_STACK_BYTES']}")
     sgprs, vgprs = regs(body)
+    short = name[len("cfn_"):]
+    body = [re.sub(r"\.L([\w$.]+)", rf".Lcfn_{short}_\1", line)
+            for line in body]
+    if short.startswith("gda_"):
+        # The engine's: called between programs, when nothing but what it
+        # is handed is live, so it keeps nothing.  It has the wave's VGPRs.
+        if max(vgprs, default=0) >= c["CALL_SAVE_VREG"] + c["CALL_SAVE_VREGS"]:
+            sys.exit(f"{name}: touches v{max(vgprs)}, past the wave's")
+        out.append(f".macro CFN_BODY_{short}")
+        out.append(f".Lcfn_{short}:")
+        out += body
+        out.append(".endm")
+        return
     if max(vgprs, default=0) > c["SPLICE_TMP_VREG_END"]:
         sys.exit(f"{name}: touches v{max(vgprs)}, past the window")
 
@@ -89,10 +106,6 @@ def emit(c, name, body, stack, out):
         save.append(f"\tv_mov_b32 v{d}, v{r}")
         restore.append(f"\tv_mov_b32 v{r}, v{d}")
 
-    short = name[len("cfn_"):]
-    # Local labels are numbered per file; every function gets its own.
-    body = [re.sub(r"\.L([\w$.]+)", rf".Lcfn_{short}_\1", line)
-            for line in body]
     out.append(f".set CFN_TMP_{short}, {tmp}")
     for macro, lines in (("SAVE", save), ("RESTORE", restore),
                          ("BODY", [f".Lcfn_{short}:"] + body)):
