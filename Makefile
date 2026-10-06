@@ -19,6 +19,8 @@ SRC_bpf-persistent := $(filter-out $(SRC_core),$(wildcard src/*.S))
 ABI_HDR		:= include/uapi/linux/knod_blob.h
 UAPI_HDRS	:= $(wildcard include/uapi/linux/*.h)
 HOSTCC		?= cc
+CLANG		?= clang
+CSRC		:= csrc/map_hash.c
 BUILD		:= build
 # The offsets the assembly reaches the uapi structures through, worked out
 # from the structures themselves so their layout is written down once.
@@ -36,7 +38,8 @@ EXTRA_CPPFLAGS	?= $(shell cat $(FLAGS_STAMP) 2>/dev/null)
 # .inc files that the .S files include, and leaving them out meant editing a
 # prologue or an epilogue built nothing.
 DEPS		:= $(wildcard src/*.S) $(wildcard src/*.inc) \
-		   $(ABI_HDR) $(FLAGS_STAMP) $(UAPI_HDRS) $(OFFSETS_HDR)
+		   $(ABI_HDR) $(FLAGS_STAMP) $(UAPI_HDRS) $(OFFSETS_HDR) \
+		   $(foreach i,$(ISAS),$(BUILD)/cfn.$(i).inc)
 FIRMWARE_DIR	?= /lib/firmware/knod
 
 # Persistent-shader KNOD supports RDNA generations in Wave64 mode.
@@ -91,6 +94,20 @@ endef
 $(foreach f,$(FEATURES),\
   $(foreach i,$(ISAS),$(eval $(call isa_rules,$(f),$(i)))))
 $(foreach i,$(ISAS),$(eval $(call isa_rules,bpf-persistent,$(i))))
+
+# Routines written in C: compiled to assembly, then turned by cfn.py into
+# macros a routine in src/ calls through.
+define cfn_rules
+$(BUILD)/cfn.$(1).s: $(CSRC) $(UAPI_HDRS) | $(BUILD)
+	$(CLANG) -target amdgcn-amd-amdhsa -mcpu=$(CPU_$(1)) -mwavefrontsize64 \
+		-O2 -nogpulib -ffreestanding -fno-builtin -Iinclude/uapi \
+		-S $(CSRC) -o $$@
+
+$(BUILD)/cfn.$(1).inc: $(BUILD)/cfn.$(1).s tools/cfn.py
+	python3 tools/cfn.py $$< $$@
+endef
+
+$(foreach i,$(ISAS),$(eval $(call cfn_rules,$(i))))
 
 $(OFFSETS_HDR): tools/offsets.c $(UAPI_HDRS) | $(BUILD)
 	$(HOSTCC) -Wall -Werror -Iinclude/uapi $< -o $(BUILD)/offsets

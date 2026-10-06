@@ -10,6 +10,42 @@
 #include "common.inc"
 #include "jhash.inc"
 
+// KNOD_C_LOOKUP calls lookups compiled from csrc/map_hash.c instead, for
+// keys up to eight dwords; longer ones stay here.
+#ifdef KNOD_C_LOOKUP
+# define C_LOOKUP_MAX	8
+# if KNOD_ISA == 10
+#  include "cfn.10.inc"
+# else
+#  include "cfn.11.inc"
+# endif
+#else
+# define C_LOOKUP_MAX	0
+#endif
+
+// Call a compiled function placed right after the call, and step over it on
+// the way back.  The key goes from the window to the arguments after the
+// save, which may have moved what the arguments' registers held into it.
+.macro	CFN_CALL fn, n
+	CFN_SAVE_\fn
+	v_mov_b32 v0, s[DESC]
+	v_mov_b32 v1, s[DESC+1]
+	.set _i, 0
+	.rept \n
+	v_mov_b32 v[2 + _i], v[KEY + _i]
+	.set _i, _i + 1
+	.endr
+	s_getpc_b64 s[CFN_TMP_\fn:CFN_TMP_\fn+1]
+.Lcfn_pc_\fn:
+	s_add_u32 s[CFN_TMP_\fn], s[CFN_TMP_\fn], .Lcfn_\fn - .Lcfn_pc_\fn
+	s_addc_u32 s[CFN_TMP_\fn+1], s[CFN_TMP_\fn+1], 0
+	s_swappc_b64 s[30:31], s[CFN_TMP_\fn:CFN_TMP_\fn+1]
+	CFN_RESTORE_\fn
+	s_branch .Lcfn_end_\fn
+	CFN_BODY_\fn
+.Lcfn_end_\fn:
+.endm
+
 // A lookup is given no value, so it spends the value registers on holding the
 // stored key whole and comparing it a word at a time against the search key.
 // That is what sets the 56-byte key limit, not any property of hashing.
@@ -58,6 +94,15 @@ knod_lookup_percpu_hash_k\n:
 	.p2align 2
 knod_lookup_hash_k\n:
 .endif
+.if \n <= C_LOOKUP_MAX
+	.set _xs, KNOD_BLOB_EXEC_SAVE_PAIRS_MAX
+.if \pc
+	CFN_CALL lookup_percpu_hash_k\n, \n
+.else
+	CFN_CALL lookup_hash_k\n, \n
+.endif
+.else
+	.set _xs, 3
 	s_load_dwordx2 s[S0:S0+1], s[DESC:DESC+1], DESC_BUCKET
 	s_load_dwordx2 s[S2:S2+1], s[DESC:DESC+1], DESC_ELEMS
 
@@ -163,15 +208,16 @@ knod_lookup_hash_k\n:
 
 .Lout_\n\()_\pc:
 	s_mov_b64 exec, s[XSAVE0:XSAVE0+1]
+.endif
 	KNOD_BLOB_RET
 .if \pc
 	.size knod_lookup_percpu_hash_k\n, . - knod_lookup_percpu_hash_k\n
 	.globl knod_lookup_percpu_hash_k\n\()_xsave
-	.set knod_lookup_percpu_hash_k\n\()_xsave, 3
+	.set knod_lookup_percpu_hash_k\n\()_xsave, _xs
 .else
 	.size knod_lookup_hash_k\n, . - knod_lookup_hash_k\n
 	.globl knod_lookup_hash_k\n\()_xsave
-	.set knod_lookup_hash_k\n\()_xsave, 3
+	.set knod_lookup_hash_k\n\()_xsave, _xs
 .endif
 .endm
 
