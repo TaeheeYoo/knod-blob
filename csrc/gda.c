@@ -844,8 +844,12 @@ v4u cfn_gda_round_end(ctl_t ctl, uint32_t queue, uint32_t wave, uint32_t s,
 		if (ptotal) {
 			ppc += ptotal;
 			SET(&g, PASS_PC, ppc);
-			if (!lane_id())
+			if (!lane_id()) {
 				put32(&g.entry->pass_pc, ppc);
+				put32((GLOBAL uint32_t *)
+				      ((GLOBAL uint64_t *)GL64(&g, PASS_RING) +
+				       GL(&g, PASS_MASK) + 1), ppc);
+			}
 			/* The host sleeps until PASS entries come: take the
 			 * request, so the other rounds leave it be, and
 			 * interrupt once they are in memory.
