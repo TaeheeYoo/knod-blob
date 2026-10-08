@@ -27,7 +27,7 @@ def contract(path):
 
     Copying them here instead would leave four numbers to keep in step by hand,
     and getting one wrong is not a build error on either side: the kernel takes
-    a blob whose magic and version still match and splices whatever the entry
+    a blob whose magic and version still match and uses whatever the entry
     says, so a kind that has shifted by one names a different routine.
     """
     text = open(path).read()

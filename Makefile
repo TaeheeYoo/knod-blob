@@ -13,7 +13,7 @@ ASM_CPP		?= clang -x assembler-with-cpp -E
 FEATURES	:= core
 # The core's: what a queue comes up with, and the GDA engine's receive kernel,
 # which runs the NIC's rings with no feature's code in them.
-SRC_core	:= src/default.S src/gda_rx.S src/gda_engine.S
+SRC_core	:= src/gda_rx.S src/gda_engine.S
 SRC_bpf-persistent := $(filter-out $(SRC_core),$(wildcard src/*.S))
 
 ABI_HDR		:= include/uapi/linux/knod_blob.h
@@ -30,9 +30,8 @@ FLAGS_STAMP	:= $(BUILD)/.cppflags
 # then survives the `make install` that follows, which would otherwise build
 # with no flags and install the opposite of what was asked for.  Give EXTRA_CPPFLAGS on the command line to change it, empty to clear.
 EXTRA_CPPFLAGS	?= $(shell cat $(FLAGS_STAMP) 2>/dev/null)
-# Every source, not just the ones that name themselves .S: the bodies live in
-# .inc files that the .S files include, and leaving them out meant editing a
-# prologue or an epilogue built nothing.
+# Every source, not just the ones that name themselves .S: the .inc files the
+# .S files include are sources too.
 DEPS		:= $(wildcard src/*.S) $(wildcard src/*.inc) \
 		   $(ABI_HDR) $(FLAGS_STAMP) $(UAPI_HDRS)
 FIRMWARE_DIR	?= /lib/firmware/knod
@@ -46,8 +45,8 @@ ATTR_10		:= --mattr=+wavefrontsize64
 ATTR_11		:= --mattr=+wavefrontsize64
 # CU mode, as the kernel launches every GDA shader: a workgroup's waves share
 # one CU's L0, so what one writes another reads without invalidating it.
-# A call's stack is reached through FLAT_SCRATCH, which the GDA prologue sets
-# on gfx10 and the hardware on gfx11, rather than a buffer descriptor.
+# A call's stack is reached through FLAT_SCRATCH, which the engine sets on
+# gfx10 and the hardware on gfx11, rather than a buffer descriptor.
 CFN_ATTR_10	:= -Xclang -target-feature -Xclang +enable-flat-scratch
 
 BLOBS		:= $(foreach f,$(FEATURES),\
