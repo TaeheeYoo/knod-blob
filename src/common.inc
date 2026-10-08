@@ -12,19 +12,8 @@
 
 #include <linux/knod_blob.h>
 
-// What a map routine is handed.
-#define DESC		KNOD_BLOB_SPLICE_DESC_SREG
-#define KEY		KNOD_BLOB_SPLICE_KEY_VREG
-#define VAL		KNOD_BLOB_SPLICE_VAL_VREG
-
-#if (KEY + KNOD_BLOB_KEY_CHUNKS_MAX) > VAL
-# error "the key runs into the value"
-#endif
-
 // What the engine leaves a program.
-#define WG_Y		KNOD_BLOB_PRO_WG_Y_SREG
 #define PARAM		KNOD_BLOB_PRO_PARAM_SREG
-#define FRAME		KNOD_BLOB_PRO_FRAME_SREG
 #define PKT_OFF		KNOD_BLOB_PRO_OFF_VREG
 #define CTX		KNOD_BLOB_PRO_CTX_VREG
 #define IDX		KNOD_BLOB_PRO_IDX_VREG

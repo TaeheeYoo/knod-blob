@@ -5,10 +5,9 @@
 // gda_round_end().  The program goes right after it, and the call's offset to
 // it is knod_gda_engine_call's to patch.
 //
-// Between calls this keeps the control block in s[8:9], the queue in s0 and
-// the wave in s2, which a program leaves alone, and the engine's state in
-// v[GS:GS+2], which no program reaches.  The functions keep s34 and up, so
-// the scalars are carried across them there.
+// Between calls this keeps the control block, the queue and the wave in
+// KNOD_BLOB_ENGINE_SREG, which a program leaves alone and the functions keep,
+// and the engine's state in v[GS:GS+2], which neither reaches.
 
 #include "common.inc"
 #include "gda_program.inc"
@@ -16,16 +15,18 @@
 
 #define GS		KNOD_BLOB_PRO_GDA_VREG
 #define GT		24		// s[24:25], which nothing holds here
-#define E_CTL		8
-#define E_QUEUE		0
-#define E_WAVE		2
+#define E_CTL		(KNOD_BLOB_ENGINE_SREG + 0)	// s[100:101]
+#define E_QUEUE		KNOD_BLOB_PRO_QUEUE_SREG	// s102
+#define E_WAVE		(KNOD_BLOB_ENGINE_SREG + 3)	// s103
+#define RET		KNOD_BLOB_PRO_RET_SREG
+
+#if E_QUEUE != KNOD_BLOB_ENGINE_SREG + 2
+# error "the queue is the engine's third scalar"
+#endif
 
 // Call cfn_\fn with the control block, queue and wave as its first three
 // arguments; the rest are the caller's to put in v4 up.
 .macro	ENGINE_CALL fn
-	s_mov_b64 s[34:35], s[E_CTL:E_CTL+1]
-	s_mov_b32 s36, s[E_QUEUE]
-	s_mov_b32 s37, s[E_WAVE]
 	s_mov_b64 exec, -1
 	v_mov_b32 v0, s[E_CTL]
 	v_mov_b32 v1, s[E_CTL+1]
@@ -37,9 +38,6 @@
 	s_add_u32 s[GT], s[GT], .Lcfn_\fn - .Lpc_\fn
 	s_addc_u32 s[GT+1], s[GT+1], 0
 	s_swappc_b64 s[30:31], s[GT:GT+1]
-	s_mov_b64 s[E_CTL:E_CTL+1], s[34:35]
-	s_mov_b32 s[E_QUEUE], s36
-	s_mov_b32 s[E_WAVE], s37
 .endm
 
 	.text
@@ -67,7 +65,8 @@ knod_gda_engine:
 	v_readfirstlane_b32 s[E_WAVE], v0
 	s_and_b32 s[E_WAVE], s[E_WAVE], 1023
 	s_lshr_b32 s[E_WAVE], s[E_WAVE], 6
-	s_mov_b32 s[E_QUEUE], s[WG_Y]
+	s_mov_b32 s[E_QUEUE], s13
+	s_mov_b64 s[E_CTL:E_CTL+1], s[8:9]
 
 	ENGINE_CALL gda_init
 	v_mov_b32 v[GS], v0
@@ -92,7 +91,7 @@ knod_gda_engine:
 	v_readfirstlane_b32 s[INITIAL_EXEC+1], v10
 	v_readfirstlane_b32 s[PARAM], v11
 	v_readfirstlane_b32 s[PARAM+1], v12
-	s_mov_b32 s[WG_Y], s[E_QUEUE]
+	s_mov_b32 s13, s[E_QUEUE]
 	v_mov_b32 v[PAGE_IDX], v0
 	v_mov_b32 v[PKT_OFF], v1
 	v_mov_b32 v[IDX], v4
@@ -116,7 +115,8 @@ knod_gda_engine:
 .Lgda_pc:
 	s_add_u32 s[GT], s[GT], .Lgda_program - .Lgda_pc
 	s_addc_u32 s[GT+1], s[GT+1], 0
-	s_swappc_b64 s[6:7], s[GT:GT+1]
+	// s32 is still the stack every call gets: the functions keep it.
+	s_swappc_b64 s[RET:RET+1], s[GT:GT+1]
 
 	// Its verdicts, and where the packets are now: a program may have
 	// moved their start or end.

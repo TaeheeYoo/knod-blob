@@ -8,9 +8,9 @@
 
 	.text
 
-	ROUTINE lookup_array, 1
-	ROUTINE update_array, 1, 1
-	ROUTINE delete_array, 1
-	ROUTINE lookup_percpu_array, 1
-	ROUTINE update_percpu_array, 1, 1
-	ROUTINE delete_percpu_array, 1
+	ROUTINE lookup_array
+	ROUTINE update_array
+	ROUTINE delete_array
+	ROUTINE lookup_percpu_array
+	ROUTINE update_percpu_array
+	ROUTINE delete_percpu_array
