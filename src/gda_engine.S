@@ -10,7 +10,6 @@
 // and the engine's state in v[GS:GS+2], which neither reaches.
 
 #include "common.inc"
-#include "gda_program.inc"
 #include "cfn.inc"
 
 #define GS		KNOD_BLOB_PRO_GDA_VREG
