@@ -187,7 +187,7 @@ ENGINE:
 	// Every lane with a packet, for gda_round_end().
 	s_mov_b64 exec, -1
 	v_and_b32 v0, KNOD_BLOB_RANK_MASK, v[RANK]
-	s_movk_i32 s[GT], KNOD_BLOB_RANK_NONE
+	s_mov_b32 s[GT], KNOD_BLOB_RANK_NONE
 	v_cmp_ne_u32 vcc, s[GT], v0
 	s_mov_b64 s[INITIAL_EXEC:INITIAL_EXEC+1], vcc
 #endif
