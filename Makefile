@@ -13,10 +13,13 @@ ASM_CPP		?= clang -x assembler-with-cpp -E
 FEATURES	:= core
 # The core's: what a queue comes up with, and the GDA engine's receive kernel,
 # which runs the NIC's rings with no feature's code in them.
-SRC_core	:= src/default.S src/gda_rx.S
+SRC_core	:= src/default.S src/gda_rx.S src/gda_engine.S
 SRC_bpf-persistent := $(filter-out $(SRC_core),$(wildcard src/*.S))
 
 ABI_HDR		:= include/uapi/linux/knod_blob.h
+UAPI_HDRS	:= $(wildcard include/uapi/linux/*.h)
+CLANG		?= clang
+CSRC		:= $(wildcard csrc/*.c)
 BUILD		:= build
 # The preprocessor flags decide what goes in - a probe, or no probe - and they
 # are in no file, so nothing about the sources says a build made with one is
@@ -31,15 +34,21 @@ EXTRA_CPPFLAGS	?= $(shell cat $(FLAGS_STAMP) 2>/dev/null)
 # .inc files that the .S files include, and leaving them out meant editing a
 # prologue or an epilogue built nothing.
 DEPS		:= $(wildcard src/*.S) $(wildcard src/*.inc) \
-		   $(ABI_HDR) $(FLAGS_STAMP) include/uapi/linux/knod_persistent.h
+		   $(ABI_HDR) $(FLAGS_STAMP) $(UAPI_HDRS)
 FIRMWARE_DIR	?= /lib/firmware/knod
 
 # Persistent-shader KNOD supports RDNA generations in Wave64 mode.
 ISAS		:= 10 11
+DEPS		+= $(foreach i,$(ISAS),$(BUILD)/cfn.$(i).inc)
 CPU_10		:= gfx1030
 CPU_11		:= gfx1100
 ATTR_10		:= --mattr=+wavefrontsize64
 ATTR_11		:= --mattr=+wavefrontsize64
+# CU mode, as the kernel launches every GDA shader: a workgroup's waves share
+# one CU's L0, so what one writes another reads without invalidating it.
+# A call's stack is reached through FLAT_SCRATCH, which the GDA prologue sets
+# on gfx10 and the hardware on gfx11, rather than a buffer descriptor.
+CFN_ATTR_10	:= -Xclang -target-feature -Xclang +enable-flat-scratch
 
 BLOBS		:= $(foreach f,$(FEATURES),\
 		     $(foreach i,$(ISAS),$(BUILD)/knod-$(f)-gfx$(i).bin)) \
@@ -60,9 +69,10 @@ $(FLAGS_STAMP): FORCE | $(BUILD)
 define isa_rules
 $(BUILD)/$(1).$(2).s: $(DEPS) | $(BUILD)
 	cat $(SRC_$(1)) > $(BUILD)/$(1).$(2).cat.S
-	$(ASM_CPP) -Isrc -Iinclude/uapi -Werror=undef -Werror=macro-redefined \
+	$(ASM_CPP) -Isrc -I$(BUILD) -Iinclude/uapi -Werror=undef \
+		-Werror=macro-redefined \
 		$(EXTRA_CPPFLAGS) \
-		-DKNOD_BLOB_LINK=KNOD_BLOB_LINK_SPLICE -D__ASSEMBLY__ \
+		-D__ASSEMBLY__ \
 		-DKNOD_ISA=$(2) $(BUILD)/$(1).$(2).cat.S -o $$@
 
 $(BUILD)/$(1).$(2).o: $(BUILD)/$(1).$(2).s
@@ -85,6 +95,21 @@ endef
 $(foreach f,$(FEATURES),\
   $(foreach i,$(ISAS),$(eval $(call isa_rules,$(f),$(i)))))
 $(foreach i,$(ISAS),$(eval $(call isa_rules,bpf-persistent,$(i))))
+
+# Routines written in C: compiled to assembly, then turned by cfn.py into
+# macros a routine in src/ calls through.
+define cfn_rules
+$(BUILD)/%.$(1).s: csrc/%.c $(wildcard csrc/*.h) $(UAPI_HDRS) | $(BUILD)
+	$(CLANG) -target amdgcn-amd-amdhsa -mcpu=$(CPU_$(1)) -mwavefrontsize64 \
+		-mcumode $(CFN_ATTR_$(1)) -O2 -nogpulib -ffreestanding -fno-builtin \
+		-Wall -Werror -Iinclude/uapi -S $$< -o $$@
+
+$(BUILD)/cfn.$(1).inc: $(patsubst csrc/%.c,$(BUILD)/%.$(1).s,$(CSRC)) \
+		       tools/cfn.py $(ABI_HDR)
+	python3 tools/cfn.py $$@ $$(filter %.s,$$^)
+endef
+
+$(foreach i,$(ISAS),$(eval $(call cfn_rules,$(i))))
 
 $(BUILD):
 	mkdir -p $@

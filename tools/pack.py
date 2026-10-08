@@ -18,7 +18,7 @@ HEADER = "include/uapi/linux/knod_blob.h"
 LINK_SPLICE = 0
 
 HDR = "<8I"          # magic .. reserved
-ENTRY = "<6I"        # kind .. reserved
+ENTRY = "<8I"        # kind .. callee_size
 HDR_SIZE = struct.calcsize(HDR)
 ENTRY_SIZE = struct.calcsize(ENTRY)
 
@@ -107,8 +107,8 @@ def main():
 
     entries = []
     for name, (off, size) in sorted(syms.items()):
-        # knod_<routine>_xsave carries the EXEC-save count, not code.
-        if name.endswith("_xsave"):
+        # What a routine declares about itself, and what it calls.
+        if name.endswith(("_xsave", "_call", "_body")):
             continue
         if size == 0:
             raise SystemExit(f"{name}: zero size, is .size missing?")
@@ -118,23 +118,34 @@ def main():
         # exec_save_pairs is not derivable from the object; the routines
         # declare it through a knod_<name>_xsave absolute symbol.
         pairs = syms.get(name + "_xsave", (0, 0))[0]
-        entries.append((kind, chunks, off, size, pairs))
+        # A routine calling compiled code names where the call's offset
+        # goes, and the code it calls.
+        patch = syms.get(name + "_call", (0, 0))[0]
+        body_off, body_size = syms.get(name + "_body", (0, 0))
+        if body_size and not patch:
+            raise SystemExit(f"{name}: a _body nothing calls")
+        entries.append((kind, chunks, off, size, pairs, patch, body_off,
+                        body_size))
 
     code_off = HDR_SIZE + ENTRY_SIZE * len(entries)
     blob = struct.pack(HDR, magic, abi, args.isa, LINK_SPLICE,
                        args.wave, len(entries), HDR_SIZE, protocol)
-    for kind, chunks, off, size, pairs in entries:
-        blob += struct.pack(ENTRY, kind, chunks, code_off + off, size, pairs, 0)
+    for kind, chunks, off, size, pairs, patch, body_off, body_size in entries:
+        blob += struct.pack(ENTRY, kind, chunks, code_off + off, size, pairs,
+                            patch, code_off + body_off if body_size else 0,
+                            body_size)
     blob += code
 
     open(args.output, "wb").write(blob)
     print(f"{args.output}: isa gfx{args.isa}, {len(entries)} entries, "
           f"{len(blob)} bytes")
-    for kind, chunks, off, size, pairs in entries:
+    for kind, chunks, off, size, pairs, patch, body_off, body_size in entries:
         name = next(k for k, v in kinds.items() if v == kind)
         suffix = f" k{chunks}" if chunks else ""
+        call = f" calls {body_size}" if body_size else \
+            f" calls out at {patch}" if patch else ""
         print(f"  {name}{suffix:<4} off={code_off + off:<6} size={size:<5} "
-              f"xsave={pairs}")
+              f"xsave={pairs}{call}")
     return 0
 
 

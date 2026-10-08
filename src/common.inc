@@ -12,60 +12,8 @@
 
 #include <linux/knod_blob.h>
 
-#define DESC		KNOD_BLOB_SPLICE_DESC_SREG
-#define KEY		KNOD_BLOB_SPLICE_KEY_VREG
-#define VAL		KNOD_BLOB_SPLICE_VAL_VREG
-// Everything here stands in for a BPF helper, so all of it returns in r0.
-#define RET		KNOD_BLOB_SPLICE_R0_VREG
-
-// The window runs v22-v57 with the key at v28 and the value at v42, which
-// leaves these six below the key and two above the value.
-#define T0		(KNOD_BLOB_SPLICE_TMP_VREG + 0)
-#define T1		(KNOD_BLOB_SPLICE_TMP_VREG + 1)
-#define T2		(KNOD_BLOB_SPLICE_TMP_VREG + 2)
-#define T3		(KNOD_BLOB_SPLICE_TMP_VREG + 3)
-#define T4		(KNOD_BLOB_SPLICE_TMP_VREG + 4)
-#define T5		(KNOD_BLOB_SPLICE_TMP_VREG + 5)
-#define THI0		(KNOD_BLOB_SPLICE_VAL_VREG + KNOD_BLOB_VALUE_CHUNKS_MAX)
-#define THI1		(THI0 + 1)
-
-#if THI1 != KNOD_BLOB_SPLICE_TMP_VREG_END
-# error "the value no longer ends two below the top of the window"
-#endif
-#if (KEY + KNOD_BLOB_KEY_CHUNKS_MAX) > VAL
-# error "the key runs into the value"
-#endif
-
-// KNOD_BLOB_SPLICE_TMP_SREG (s46) upwards is ours to clobber.  Nothing below:
-// s[32:33] is the done mask and is live across a splice.
-#define S0		(KNOD_BLOB_SPLICE_TMP_SREG + 0)
-#define S1		(KNOD_BLOB_SPLICE_TMP_SREG + 1)
-#define S2		(KNOD_BLOB_SPLICE_TMP_SREG + 2)
-#define S3		(KNOD_BLOB_SPLICE_TMP_SREG + 3)
-
-// KNOD_BLOB_EXEC_SAVE_SREG (s34) upwards is ours to save EXEC in.
-#define XSAVE0		(KNOD_BLOB_EXEC_SAVE_SREG + 0)
-#define XSAVE1		(KNOD_BLOB_EXEC_SAVE_SREG + 2)
-#define XSAVE2		(KNOD_BLOB_EXEC_SAVE_SREG + 4)
-#define XSAVE3		(KNOD_BLOB_EXEC_SAVE_SREG + 6)
-#define XSAVE4		(KNOD_BLOB_EXEC_SAVE_SREG + 8)
-
-#if (XSAVE4 + 2) > (KNOD_BLOB_EXEC_SAVE_SREG + KNOD_BLOB_EXEC_SAVE_PAIRS_MAX * 2)
-# error "more EXEC saves than the JIT keeps free"
-#endif
-
-//
-// Prologue and epilogue.  These are the ends of a program rather than
-// something spliced into it, so they take no arguments; the names below are
-// what the hardware hands them and what they hand the program.
-//
-#define DISPATCH	KNOD_BLOB_PRO_DISPATCH_SREG
-#define WG_X		KNOD_BLOB_PRO_WG_X_SREG
-#define WG_Y		KNOD_BLOB_PRO_WG_Y_SREG
+// What the engine leaves a program.
 #define PARAM		KNOD_BLOB_PRO_PARAM_SREG
-#define FRAME		KNOD_BLOB_PRO_FRAME_SREG
-#define TID		KNOD_BLOB_PRO_TID_VREG
-
 #define PKT_OFF		KNOD_BLOB_PRO_OFF_VREG
 #define CTX		KNOD_BLOB_PRO_CTX_VREG
 #define IDX		KNOD_BLOB_PRO_IDX_VREG
@@ -74,95 +22,26 @@
 #define PAGE_BASE	KNOD_BLOB_PRO_PAGE_BASE_VREG
 #define PAGE_IDX	KNOD_BLOB_PRO_PAGE_IDX_VREG
 
+// BPF registers: r0 carries the verdict, r1 the context, r10 the frame
+// pointer.
+#define BPF_R0		KNOD_BLOB_BPF_VREG(0)
+#define BPF_R1		KNOD_BLOB_BPF_VREG(1)
+#define BPF_R10		KNOD_BLOB_BPF_VREG(10)
 
-#define P0		(KNOD_BLOB_PRO_TMP_VREG + 0)
-#define P1		(KNOD_BLOB_PRO_TMP_VREG + 1)
-#define P2		(KNOD_BLOB_PRO_TMP_VREG + 2)
-#define P3		(KNOD_BLOB_PRO_TMP_VREG + 3)
-#define P4		(KNOD_BLOB_PRO_TMP_VREG + 4)
-#define P5		(KNOD_BLOB_PRO_TMP_VREG + 5)
-#define P6		(KNOD_BLOB_PRO_TMP_VREG + 6)
-#define P7		(KNOD_BLOB_PRO_TMP_VREG + 7)
-#define P8		(KNOD_BLOB_PRO_TMP_VREG + 8)
-#define P9		(KNOD_BLOB_PRO_TMP_VREG + 9)
-#define P10		(KNOD_BLOB_PRO_TMP_VREG + 10)
-#define P12		(KNOD_BLOB_PRO_TMP_VREG + 12)
-#define P14		(KNOD_BLOB_PRO_TMP_VREG + 14)
-#define P16		(KNOD_BLOB_PRO_TMP_VREG + 16)
-#define P18		KNOD_BLOB_PRO_LOCAL_IDX_VREG
-#define P20		(KNOD_BLOB_PRO_TMP_VREG + 20)
-#define P22		(KNOD_BLOB_PRO_TMP_VREG + 22)
-#define P24		(KNOD_BLOB_PRO_TMP_VREG + 24)
-#define P28		(KNOD_BLOB_PRO_TMP_VREG + 28)
-#define P32		(KNOD_BLOB_PRO_TMP_VREG + 32)
-
-#define PS0		(KNOD_BLOB_PRO_TMP_SREG + 0)
-#define PS1		(KNOD_BLOB_PRO_TMP_SREG + 1)
-#define PS2		(KNOD_BLOB_PRO_TMP_SREG + 2)
-#define PS4		(KNOD_BLOB_PRO_TMP_SREG + 4)
-#define PS6		(KNOD_BLOB_PRO_TMP_SREG + 6)
-
-// BPF registers the prologue seeds and the epilogue reads back: r0 carries the
-// verdict, r1 the context, r10 the frame pointer.
-#define BPF_R0		0
-#define BPF_R1		2
-#define BPF_R10		20
-
-// What the epilogue writes into the buffer descriptor, and what it tells the
-// host by writing it.
-#define XDP_ABORTED	0
 #define XDP_DROP	1
 #define XDP_PASS	2
-#define XDP_TX		3
 
 // The JIT's own scalars.
 #define DONE_MASK	KNOD_BLOB_DONE_MASK_SREG
 #define INITIAL_EXEC	KNOD_BLOB_INITIAL_EXEC_SREG
 
-// struct knod_blob_map_desc
-#define DESC_KEY_SIZE		KNOD_BLOB_DESC_KEY_SIZE
-#define DESC_VALUE_SIZE		KNOD_BLOB_DESC_VALUE_SIZE
-#define DESC_MAX_ENTRIES	KNOD_BLOB_DESC_MAX_ENTRIES
-#define DESC_ELEM_SIZE		KNOD_BLOB_DESC_ELEM_SIZE
-#define DESC_BUCKET		KNOD_BLOB_DESC_BUCKET
-#define DESC_ELEMS		KNOD_BLOB_DESC_ELEMS
-#define DESC_QUEUE		KNOD_BLOB_DESC_QUEUE
-#define DESC_GC_LIST		KNOD_BLOB_DESC_GC_LIST
-#define DESC_GC_COUNT		KNOD_BLOB_DESC_GC_COUNT
-#define DESC_PER_INSTANCE	KNOD_BLOB_DESC_PER_INSTANCE
-#define DESC_N_BUCKETS		KNOD_BLOB_DESC_N_BUCKETS
-#define DESC_LOCK_OFFSET	KNOD_BLOB_DESC_LOCK_OFFSET
-#define DESC_HASHRND		KNOD_BLOB_DESC_HASHRND
-#define DESC_FREE_CUR		KNOD_BLOB_DESC_FREE_CUR
-
 #define V_ADD_CI_U32	v_add_co_ci_u32
-
-// A map is written by other CUs, so a load of one has to miss the caches that
-// are not shared with them.  Goes last on the instruction, after any offset.
-#define MAP_COHERENT	glc dlc
 
 // GFX10 requires the _nc spelling; GFX11 uses the plain spelling.
 #if KNOD_ISA == 10
-# define V_ADD_U32	v_add_nc_u32
 # define V_SUB_U32	v_sub_nc_u32
 #else
-# define V_ADD_U32	v_add_u32
 # define V_SUB_U32	v_sub_u32
 #endif
-
-// Splice linkage ends by falling through into whatever the JIT emits next, so
-// there is nothing to do.  Call linkage would return through s[30:31] - and
-// would have to be handed the descriptor somewhere else, since that is where
-// it lives here.
-#if KNOD_BLOB_LINK == KNOD_BLOB_LINK_CALL
-# define KNOD_BLOB_RET	s_setpc_b64 s[KNOD_BLOB_CALL_RET_ADDR_SREG:KNOD_BLOB_CALL_RET_ADDR_SREG+1]
-#else
-# define KNOD_BLOB_RET
-#endif
-
-// RDNA tracks non-returning vector stores separately from loads.
-.macro KNOD_WAIT_STORES
-	s_waitcnt_vscnt null, 0
-.endm
 
 #endif /* COMMON_INC */

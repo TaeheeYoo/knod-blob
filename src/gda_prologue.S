@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// What runs before the translated BPF program when the shader runs the NIC's
-// receive rings: the program's packets come from the CQ, not a host batch.
+// A program's way in: its frame.  The engine has its packets in place.
 
 #include "common.inc"
-#include "gda.inc"
+#include "gda_program.inc"
 
 	.text
 
 	.globl knod_gda_prologue
 	.p2align 2
 knod_gda_prologue:
-	KNOD_GDA_PROLOGUE_BODY
+	KNOD_GDA_PROGRAM_ENTRY
 	.size knod_gda_prologue, . - knod_gda_prologue
