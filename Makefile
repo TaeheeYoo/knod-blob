@@ -13,7 +13,7 @@ ASM_CPP		?= clang -x assembler-with-cpp -E
 FEATURES	:= core
 # The core's: what a queue comes up with, and the GDA engine's receive kernel,
 # which runs the NIC's rings with no feature's code in them.
-SRC_core	:= src/default.S src/gda_rx.S src/gda_engine.S
+SRC_core	:= src/gda_rx.S src/gda_engine.S
 SRC_bpf-persistent := $(filter-out $(SRC_core),$(wildcard src/*.S))
 
 ABI_HDR		:= include/uapi/linux/knod_blob.h

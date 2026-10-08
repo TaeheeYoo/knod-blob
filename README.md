@@ -28,7 +28,6 @@ What is left in assembly is what C cannot be:
 - `src/gda_program.inc`, `src/gda_prologue.S`, `src/gda_epilogue.S` — a
   program's two ends, which the kernel's JIT splices around it.
 - `src/gda_rx.S` — the program that runs when none is attached: pass all.
-- `src/default.S` — what a queue runs before anything is installed.
 - `src/map_hash.S`, `src/map_array.S`, `src/xdp.S`, `src/alu.S`,
   `src/cfn.inc` — a symbol for each routine on its compiled body.
 
