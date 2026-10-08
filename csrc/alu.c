@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * BPF_DIV and BPF_MOD the JIT does not do itself: a divisor that is not a
- * constant, a dividend that may not fit 32 bits, a signed division.  The GPU
- * has no divide, so clang writes the long way for each.
+ * BPF_DIV and BPF_MOD, every one of them: the GPU has no divide, so clang
+ * writes the long way for each, and the JIT calls it.
  *
  * As the BPF instruction set has them: a division by zero is zero and a
  * remainder by zero is the dividend; a signed division by -1 is the

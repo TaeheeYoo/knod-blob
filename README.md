@@ -16,7 +16,7 @@ Most of it is C, compiled by clang for the GPU:
 - `csrc/map_hash.c`, `csrc/map_array.c` — the map lookups, updates and
   deletes a program calls in place of the BPF helpers.
 - `csrc/xdp.c` — `bpf_xdp_adjust_head()` and `bpf_xdp_adjust_tail()`.
-- `csrc/alu.c` — the divisions the JIT does not do by a constant itself.
+- `csrc/alu.c` — division and remainder, which the GPU has no instruction for.
 
 The JIT calls those directly, by the calling convention `knod_blob.h` sets
 out: arguments from v0, nothing it keeps below v64 or s34.
