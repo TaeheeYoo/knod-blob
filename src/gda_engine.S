@@ -180,7 +180,9 @@ ENGINE:
 	v_mov_b32 v4, v[GS]
 	v_mov_b32 v5, v[RANK]
 	ENGINE_CALL gda_parked
-	v_readfirstlane_b32 s[PASSES], v0
+	// The parked lanes' ranks, now worked out, and the passes they want.
+	v_mov_b32 v[RANK], v0
+	v_readfirstlane_b32 s[PASSES], v1
 .Lgda_counted:
 	s_cmp_ge_u32 s[PASS], s[PASSES]
 	s_cbranch_scc1 .Lgda_passed

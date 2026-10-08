@@ -560,22 +560,20 @@ static inline uint32_t wave_max8(uint32_t v, uint64_t lanes)
 }
 
 /*
- * For the ordered engine: a packet's rank is how many of the round's packets
- * before it, in ring order across every wave, are of its flow - the NIC's RSS
- * hash, folded to 16 bits.  The program runs every lane once and parks the
- * ones that have to wait for their flow (gda_gate()); the engine runs those
- * again a rank at a time.  Two flows on one key only wait for each other; a
- * packet without a hash shares key 0 with the rest of those.
+ * For the ordered engine: each packet's flow - the NIC's RSS hash, folded to
+ * 16 bits - where gda_gate() and gda_parked() find it.  Two flows on one key
+ * only wait for each other; a packet without a hash shares key 0 with the
+ * rest of those.  Its rank waits until a lane is parked: most rounds park
+ * none.
  */
 static INLINE void gda_rank(struct gda *g, uint32_t rss, uint32_t mine,
 			    uint32_t n, uint32_t *rank)
 {
-	uint32_t me = 64 * g->wave + lane_id(), k = 0, j;
-	uint16_t key = rss ^ rss >> 16;
+	uint32_t me = 64 * g->wave + lane_id();
 	uint64_t have = lanes_below(mine);
 
 	if ((have >> lane_id()) & 1)
-		g->meet->key[me] = key;
+		g->meet->key[me] = rss ^ rss >> 16;
 	/* What gda_gate() will set, clear before any wave can. */
 	if (!g->wave && lane_id() < KNOD_PERSIST_GDA_WAVES_MAX * 2) {
 		g->meet->part[lane_id()] = 0;
@@ -585,17 +583,9 @@ static INLINE void gda_rank(struct gda *g, uint32_t rss, uint32_t mine,
 		g->meet->count = n;
 	barrier();
 
-	/* Every packet before this wave's last lane, so the bound is the
-	 * wave's and the loop the whole wave's; the ones a lane is not after
-	 * do not count.
-	 */
-#pragma clang loop unroll_count(4)
-	for (j = 0; j < 64 * g->wave + 64; j++)
-		k += j < me && g->meet->key[j] == key;
-
-	/* A lane with no packet takes no rank. */
-	*rank = (have >> lane_id()) & 1 ? k : KNOD_BLOB_RANK_NONE;
+	*rank = (have >> lane_id()) & 1 ? 0 : KNOD_BLOB_RANK_NONE;
 }
+
 
 
 static INLINE void gda_sync_dbg(struct gda *g, uint64_t off, uint32_t pos,
@@ -769,20 +759,56 @@ static INLINE LDS struct gda_meet *meet_at(uint32_t off)
 	return (LDS struct gda_meet *)(uintptr_t)uniform32(off);
 }
 
-/*
- * The ordered engine's, after the first pass: the highest rank among the
- * lanes the program parked, in every wave - the passes the round still wants.
+/* Whether any lane of the round was about to write: the same in every wave
+ * once gda_gate()'s barrier is behind them all.
  */
-uint32_t cfn_gda_parked(ctl_t ctl, uint32_t queue, uint32_t wave, uint32_t s,
-			uint32_t flags)
+static INLINE int any_active(LDS struct gda_meet *meet)
+{
+	uint32_t any = 0, i;
+
+	for (i = 0; i < KNOD_PERSIST_GDA_WAVES_MAX * 2; i++)
+		any |= meet->act[i];
+	return uniform32(any) != 0;
+}
+
+typedef uint32_t v2u __attribute__((ext_vector_type(2)));
+
+/*
+ * The ordered engine's, after the first pass: each parked lane's rank among
+ * its flow's packets, into its flags, and the highest of them in every wave -
+ * the passes the round still wants.  Only gda_gate() parks, and only where a
+ * lane was about to write: in a round with none there is nothing to count,
+ * and every wave knows it.
+ */
+v2u cfn_gda_parked(ctl_t ctl, uint32_t queue, uint32_t wave, uint32_t s,
+		   uint32_t flags)
 {
 	LDS struct gda_meet *meet = meet_at(__builtin_amdgcn_readlane(s, GL_LDS));
-	uint32_t waves = __builtin_amdgcn_readlane(s, GL_WAVES), top = 0, i;
-	uint32_t rank = flags & KNOD_BLOB_RANK_MASK;
-	int parked = rank != KNOD_BLOB_RANK_NONE &&
+	uint32_t waves = __builtin_amdgcn_readlane(s, GL_WAVES), top = 0, i, j;
+	uint32_t me = 64 * uniform32(wave) + lane_id(), k = 0;
+	int parked = (flags & KNOD_BLOB_RANK_MASK) != KNOD_BLOB_RANK_NONE &&
 		     (flags & KNOD_BLOB_RANK_PARKED);
+	uint16_t key;
+	v2u r;
 
-	top = wave_max8(parked ? rank : 0, ~0ull);
+	r.x = flags;
+	r.y = 0;
+	if (!any_active(meet))
+		return r;
+
+	if (ballot(parked)) {
+		key = meet->key[me];
+		/* Every packet before this wave's last lane, so the bound is
+		 * the wave's and the loop the whole wave's.
+		 */
+#pragma clang loop unroll_count(4)
+		for (j = 0; j < me - lane_id() + 64; j++)
+			k += j < me && meet->key[j] == key;
+		if (parked)
+			r.x = (flags & ~KNOD_BLOB_RANK_MASK) | k;
+	}
+
+	top = wave_max8(parked ? k : 0, ~0ull);
 	if (!lane_id())
 		meet->top[uniform32(wave)] = top;
 	barrier();
@@ -790,7 +816,8 @@ uint32_t cfn_gda_parked(ctl_t ctl, uint32_t queue, uint32_t wave, uint32_t s,
 	for (i = 0; i < KNOD_PERSIST_GDA_WAVES_MAX; i++)
 		if (i < waves && meet->top[i] > top)
 			top = meet->top[i];
-	return top;
+	r.y = top;
+	return r;
 }
 
 static INLINE int bit(LDS const uint32_t *m, uint32_t j)
@@ -826,6 +853,9 @@ uint32_t cfn_gda_gate(uint32_t lds, uint32_t wave, uint32_t flags)
 					 __ATOMIC_RELAXED,
 					 __MEMORY_SCOPE_WRKGRP);
 	barrier();
+	/* Nobody about to write: nobody waits, and no need to look. */
+	if (!any_active(meet))
+		return 0;
 
 	n = uniform32(meet->count);
 	key = meet->key[me];
