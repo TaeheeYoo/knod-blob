@@ -6,7 +6,8 @@
 //
 // Defines the routine knod_<fn>, which moves the map descriptor, the \nkey
 // dwords of the key and, with \val, the value from where the splice linkage
-// puts them to where the calling convention wants them and calls cfn_<fn>.
+// puts them to where the calling convention wants them, calls cfn_<fn>, and
+// moves its result to r0.
 // That is knod_<fn>_body, which the JIT places once after the program, and
 // knod_<fn>_call says where the call's offset to it goes.
 
@@ -47,6 +48,8 @@ knod_\fn:
 		  .Lcfn_\fn - .Lpc_\fn
 	s_addc_u32 s[CFN_TMP_\fn+1], s[CFN_TMP_\fn+1], 0
 	s_swappc_b64 s[30:31], s[CFN_TMP_\fn:CFN_TMP_\fn+1]
+	v_mov_b32 v[KNOD_BLOB_SPLICE_R0_VREG], v0
+	v_mov_b32 v[KNOD_BLOB_SPLICE_R0_VREG + 1], v1
 	CFN_RESTORE_\fn
 	.size knod_\fn, . - knod_\fn
 	.globl knod_\fn\()_xsave

@@ -64,7 +64,7 @@ knod_gda_engine:
 	s_setreg_b32 hwreg(HW_REG_FLAT_SCR_HI), \
 		     s[KNOD_BLOB_PRO_SCRATCH_DESC_SREG + 1]
 #endif
-	v_readfirstlane_b32 s[E_WAVE], v[TID]
+	v_readfirstlane_b32 s[E_WAVE], v0
 	s_and_b32 s[E_WAVE], s[E_WAVE], 1023
 	s_lshr_b32 s[E_WAVE], s[E_WAVE], 6
 	s_mov_b32 s[E_QUEUE], s[WG_Y]
@@ -104,7 +104,6 @@ knod_gda_engine:
 	V_ADD_CI_U32 v[DATA_END+1], vcc, 0, v[DATA+1], vcc
 	v_mov_b32 v[CTX], v7
 	v_mov_b32 v[CTX+1], v8
-	v_mov_b32 v[TID], v3
 	v_mov_b32 v[KNOD_BLOB_PRO_LOCAL_IDX_VREG], v3
 	v_mov_b32 v[BPF_R1], v7
 	v_mov_b32 v[BPF_R1+1], v8

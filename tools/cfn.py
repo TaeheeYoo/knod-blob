@@ -15,16 +15,14 @@ For each function cfn_<name>:
 The callee keeps s34 and up itself, as the calling convention has it.  Below
 that the save keeps every scalar the callee touches, and s32, which the routine
 points at the call's stack: in s34-s49, which a routine may destroy, then in
-lanes of the first call-save register.  Of the vectors it keeps the BPF
-registers the callee touches, other than r0, in the call-save registers after
-it; the window is the routine's to lose.
+lanes of the call-save register.  No vector needs keeping: what the JIT holds
+is all from KNOD_BLOB_JIT_VREG up, which no function may touch.
 
 Refuses a function that needs more stack than the routine gives it, or that
-touches a vector register past the window.
+touches a vector register the JIT holds.
 
 The engine's functions, cfn_gda_*, run between programs with nothing live
-but their arguments, so they get only the body, and may use any register the
-wave has.
+but their arguments, so they get only the body.
 """
 import re
 import sys
@@ -39,9 +37,8 @@ def contract():
         return int(re.search(rf"^#define {name}\s+(\S+)", text, re.M)[1], 0)
 
     return {n: val("KNOD_BLOB_" + n) for n in
-            ("CALL_STACK_BYTES", "CALL_SAVE_VREG", "CALL_SAVE_VREGS",
-             "SPLICE_TMP_VREG", "SPLICE_TMP_VREG_END", "EXEC_SAVE_SREG",
-             "SPLICE_TMP_SREG_END")}
+            ("CALL_STACK_BYTES", "CALL_SAVE_VREG", "JIT_VREG",
+             "EXEC_SAVE_SREG", "SPLICE_TMP_SREG_END")}
 
 
 REG = re.compile(r"\b([sv])(?:\[(\d+):(\d+)\]|(\d+)\b)")
@@ -61,22 +58,19 @@ def emit(c, name, body, stack, out):
         sys.exit(f"{name}: needs {stack} bytes of stack, the routine gives "
                  f"{c['CALL_STACK_BYTES']}")
     sgprs, vgprs = regs(body)
+    if max(vgprs, default=0) >= c["JIT_VREG"]:
+        sys.exit(f"{name}: touches v{max(vgprs)}, which the JIT holds")
     short = name[len("cfn_"):]
     body = [re.sub(r"\.L([\w$.]+)", rf".Lcfn_{short}_\1", line)
             for line in body]
     if short.startswith("gda_"):
         # The engine's: called between programs, when nothing but what it
-        # is handed is live, so it keeps nothing.  It has the wave's VGPRs.
-        if max(vgprs, default=0) >= c["CALL_SAVE_VREG"] + c["CALL_SAVE_VREGS"]:
-            sys.exit(f"{name}: touches v{max(vgprs)}, past the wave's")
+        # is handed is live, so it keeps nothing.
         out.append(f".macro CFN_BODY_{short}")
         out.append(f".Lcfn_{short}:")
         out += body
         out.append(".endm")
         return
-    if max(vgprs, default=0) > c["SPLICE_TMP_VREG_END"]:
-        sys.exit(f"{name}: touches v{max(vgprs)}, past the window")
-
     keep = (sgprs & set(range(c["EXEC_SAVE_SREG"]))) | {30, 31, 32}
     tmp = next((r for r in sorted(keep) if r % 2 == 0 and r + 1 in keep and
                 r not in (30, 32)), 4)
@@ -99,12 +93,6 @@ def emit(c, name, body, stack, out):
         # A scalar a VALU wrote is not safe to address memory with for
         # five more instructions.
         restore.append("\ts_nop 4")
-
-    vkeep = sorted(vgprs & set(range(2, c["SPLICE_TMP_VREG"])))
-    dest = range(lanes + 1, lanes + c["CALL_SAVE_VREGS"])
-    for r, d in zip(vkeep, dest):
-        save.append(f"\tv_mov_b32 v{d}, v{r}")
-        restore.append(f"\tv_mov_b32 v{r}, v{d}")
 
     out.append(f".set CFN_TMP_{short}, {tmp}")
     for macro, lines in (("SAVE", save), ("RESTORE", restore),

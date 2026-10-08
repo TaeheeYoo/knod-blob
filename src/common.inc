@@ -25,7 +25,6 @@
 #define WG_Y		KNOD_BLOB_PRO_WG_Y_SREG
 #define PARAM		KNOD_BLOB_PRO_PARAM_SREG
 #define FRAME		KNOD_BLOB_PRO_FRAME_SREG
-#define TID		KNOD_BLOB_PRO_TID_VREG
 #define PKT_OFF		KNOD_BLOB_PRO_OFF_VREG
 #define CTX		KNOD_BLOB_PRO_CTX_VREG
 #define IDX		KNOD_BLOB_PRO_IDX_VREG
@@ -36,9 +35,9 @@
 
 // BPF registers: r0 carries the verdict, r1 the context, r10 the frame
 // pointer.
-#define BPF_R0		0
-#define BPF_R1		2
-#define BPF_R10		20
+#define BPF_R0		KNOD_BLOB_BPF_VREG(0)
+#define BPF_R1		KNOD_BLOB_BPF_VREG(1)
+#define BPF_R10		KNOD_BLOB_BPF_VREG(10)
 
 #define XDP_DROP	1
 #define XDP_PASS	2
