@@ -12,7 +12,22 @@
 #include "common.inc"
 #include "cfn.inc"
 
+// Built twice: as is, and with KNOD_GDA_ORDERED from gda_engine_ordered.S,
+// which runs the program once per rank of a flow's packets (gda_rank()).
+#ifdef KNOD_GDA_ORDERED
+# define ENGINE		knod_gda_engine_ordered
+# define ENGINE_PATCH	knod_gda_engine_ordered_call
+# define ROUND_BEGIN	gda_round_begin_ordered
+#else
+# define ENGINE		knod_gda_engine
+# define ENGINE_PATCH	knod_gda_engine_call
+# define ROUND_BEGIN	gda_round_begin
+#endif
+
 #define GS		KNOD_BLOB_PRO_GDA_VREG
+#define RANK		(KNOD_BLOB_PRO_GDA_VREG + 3)	// each packet's
+#define PASS		104		// the rank being run
+#define PASSES		105		// the round's highest
 #define GT		24		// s[24:25], which nothing holds here
 #define E_CTL		(KNOD_BLOB_ENGINE_SREG + 0)	// s[100:101]
 #define E_QUEUE		KNOD_BLOB_PRO_QUEUE_SREG	// s102
@@ -40,9 +55,9 @@
 .endm
 
 	.text
-	.globl knod_gda_engine
+	.globl ENGINE
 	.p2align 2
-knod_gda_engine:
+ENGINE:
 #if !defined(KNOD_NO_ICACHE_INV)
 	s_icache_inv
 	s_waitcnt vmcnt(0) lgkmcnt(0)
@@ -76,10 +91,19 @@ knod_gda_engine:
 	v_mov_b32 v4, v[GS]
 	v_mov_b32 v5, v[GS+1]
 	v_mov_b32 v6, v[GS+2]
-	ENGINE_CALL gda_round_begin
+	ENGINE_CALL ROUND_BEGIN
 	v_mov_b32 v[GS], v13
 	v_mov_b32 v[GS+1], v14
 	v_mov_b32 v[GS+2], v15
+#ifdef KNOD_GDA_ORDERED
+	// The ranks out of the page's top half, the passes out of the
+	// length's.
+	v_lshrrev_b32 v[RANK], 16, v0
+	v_and_b32 v0, 0xffff, v0
+	v_readfirstlane_b32 s[PASSES], v2
+	s_lshr_b32 s[PASSES], s[PASSES], 16
+	v_and_b32 v2, 0xffff, v2
+#endif
 
 	// What the program reads its packets from.  v0 is the page, v1 the
 	// packet's offset in it, v2 its length, v3 the lane in the queue -
@@ -105,6 +129,23 @@ knod_gda_engine:
 	v_mov_b32 v[KNOD_BLOB_PRO_LOCAL_IDX_VREG], v3
 	v_mov_b32 v[BPF_R1], v7
 	v_mov_b32 v[BPF_R1+1], v8
+#ifdef KNOD_GDA_ORDERED
+	s_mov_b32 s[PASS], 0
+.Lgda_pass:
+	// This rank's lanes are the program's; the others keep what an
+	// earlier pass left in their registers, or wait for a later one.
+	// The lane's index goes back in: the last pass's calls may have
+	// used the register.
+	s_mov_b64 exec, -1
+	v_cmp_eq_u32 vcc, s[PASS], v[RANK]
+	s_mov_b64 s[INITIAL_EXEC:INITIAL_EXEC+1], vcc
+	v_mbcnt_lo_u32_b32 v[KNOD_BLOB_PRO_LOCAL_IDX_VREG], -1, 0
+	v_mbcnt_hi_u32_b32 v[KNOD_BLOB_PRO_LOCAL_IDX_VREG], -1, \
+			   v[KNOD_BLOB_PRO_LOCAL_IDX_VREG]
+	s_lshl_b32 s[GT], s[E_WAVE], 6
+	v_add_nc_u32 v[KNOD_BLOB_PRO_LOCAL_IDX_VREG], s[GT], \
+		  v[KNOD_BLOB_PRO_LOCAL_IDX_VREG]
+#endif
 	s_mov_b64 s[DONE_MASK:DONE_MASK+1], 0
 	// A wave with none still runs it, with no lanes, to meet the others
 	// at gda_round_end()'s barriers.
@@ -116,6 +157,25 @@ knod_gda_engine:
 	s_addc_u32 s[GT+1], s[GT+1], 0
 	// s32 is still the stack every call gets: the functions keep it.
 	s_swappc_b64 s[RET:RET+1], s[GT:GT+1]
+
+#ifdef KNOD_GDA_ORDERED
+	// The program waited for its stores before returning; once every
+	// wave is here, all of this rank's are in L2, and the next rank reads
+	// past the caches in front of it.
+	s_cmp_ge_u32 s[PASS], s[PASSES]
+	s_cbranch_scc1 .Lgda_passed
+	s_barrier
+	buffer_gl0_inv
+	buffer_gl1_inv
+	s_add_u32 s[PASS], s[PASS], 1
+	s_branch .Lgda_pass
+.Lgda_passed:
+	// Every lane with a packet, for gda_round_end().
+	s_mov_b64 exec, -1
+	s_movk_i32 s[GT], 0xffff
+	v_cmp_ne_u32 vcc, s[GT], v[RANK]
+	s_mov_b64 s[INITIAL_EXEC:INITIAL_EXEC+1], vcc
+#endif
 
 	// Its verdicts, and where the packets are now: a program may have
 	// moved their start or end.
@@ -136,9 +196,13 @@ knod_gda_engine:
 	s_branch .Lgda_round
 
 	CFN_BODY_gda_init
+#ifdef KNOD_GDA_ORDERED
+	CFN_BODY_gda_round_begin_ordered
+#else
 	CFN_BODY_gda_round_begin
+#endif
 	CFN_BODY_gda_round_end
 .Lgda_program:
-	.size knod_gda_engine, . - knod_gda_engine
-	.globl knod_gda_engine_call
-	.set knod_gda_engine_call, .Lgda_pc + 4 - knod_gda_engine
+	.size ENGINE, . - ENGINE
+	.globl ENGINE_PATCH
+	.set ENGINE_PATCH, .Lgda_pc + 4 - ENGINE

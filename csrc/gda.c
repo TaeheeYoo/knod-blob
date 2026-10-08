@@ -106,9 +106,14 @@ struct gda_meet {
 	uint32_t n[KNOD_PERSIST_GDA_WAVES_MAX];	/* each wave's run of CQEs */
 	uint32_t k[KNOD_PERSIST_GDA_WAVES_MAX];	/* ...its XDP_TX count */
 	uint32_t p[KNOD_PERSIST_GDA_WAVES_MAX];	/* ...its XDP_PASS count */
+	/* The ordered engine's alone, past what the other has. */
+	uint32_t top[KNOD_PERSIST_GDA_WAVES_MAX];	/* ...its highest rank */
+	uint16_t key[KNOD_PERSIST_GDA_WAVES_MAX * 64];	/* each packet's flow */
 };
-_Static_assert(sizeof(struct gda_meet) <= KNOD_PERSIST_GDA_LDS_BYTES,
+_Static_assert(offsetof(struct gda_meet, top) <= KNOD_PERSIST_GDA_LDS_BYTES,
 	       "the meeting place");
+_Static_assert(sizeof(struct gda_meet) <= KNOD_PERSIST_GDA_ORDER_LDS_BYTES,
+	       "the ordered engine's meeting place");
 
 struct gda {
 	uint32_t s;		/* the state lanes */
@@ -540,6 +545,60 @@ v4u cfn_gda_init(ctl_t ctl, uint32_t queue, uint32_t wave)
 /* The RQ entry a CQE says differs from the one its position is for: the NIC
  * and CI disagree about where the RQ is.
  */
+/* The highest @v among @lanes, all lanes together. */
+static inline uint32_t wave_max8(uint32_t v, uint64_t lanes)
+{
+	uint32_t m = 0;
+
+	for (int b = 7; b >= 0; b--)
+		if (ballot(v >= (m | 1u << b)) & lanes)
+			m |= 1u << b;
+	return m;
+}
+
+/*
+ * For the ordered engine: a packet's rank is how many of the round's packets
+ * before it, in ring order across every wave, are of its flow - the NIC's RSS
+ * hash, folded to 16 bits.  The engine runs the program once per rank, so a
+ * flow's packets go one at a time, each after the one before it has done
+ * what it does to the maps, and the flows among themselves together.  Two
+ * flows on one key only wait for each other; a packet without a hash shares
+ * key 0 with the rest of those.  @passes is the round's highest rank.
+ */
+static INLINE void gda_rank(struct gda *g, uint32_t rss, uint32_t mine,
+			    uint32_t waves, uint32_t *rank, uint32_t *passes)
+{
+	uint32_t me = 64 * g->wave + lane_id(), k = 0, top = 0, i, j;
+	uint16_t key = rss ^ rss >> 16;
+	uint64_t have = lanes_below(mine);
+
+	if ((have >> lane_id()) & 1)
+		g->meet->key[me] = key;
+	barrier();
+
+	/* Every packet before this wave's last lane, so the bound is the
+	 * wave's and the loop the whole wave's; the ones a lane is not after
+	 * do not count.
+	 */
+#pragma clang loop unroll_count(4)
+	for (j = 0; j < 64 * g->wave + 64; j++)
+		k += j < me && g->meet->key[j] == key;
+
+	/* Every lane in the ballots, then one to say it. */
+	top = wave_max8(k, have);
+	if (!lane_id())
+		g->meet->top[g->wave] = top;
+	barrier();
+	top = 0;
+	for (i = 0; i < KNOD_PERSIST_GDA_WAVES_MAX; i++)
+		if (i < waves && g->meet->top[i] > top)
+			top = g->meet->top[i];
+
+	/* A lane with no packet takes no rank. */
+	*rank = (have >> lane_id()) & 1 ? k : 0xffff;
+	*passes = top;
+}
+
 static INLINE void gda_sync_dbg(struct gda *g, uint64_t off, uint32_t pos,
 			 uint32_t entry)
 {
@@ -566,11 +625,13 @@ static INLINE void gda_sync_dbg(struct gda *g, uint64_t off, uint32_t pos,
  * queues, the page's address, the lane's xdp_md, then which lanes have one,
  * the parameter block, and the state back.
  */
-v16u cfn_gda_round_begin(ctl_t ctl, uint32_t queue, uint32_t wave,
-			 uint32_t s, uint32_t pk_lo, uint32_t pk_hi)
+static INLINE v16u gda_round_begin(ctl_t ctl, uint32_t queue, uint32_t wave,
+				   uint32_t s, uint32_t pk_lo, uint32_t pk_hi,
+				   int ordered)
 {
 	struct gda g = { .s = s, .packets = (uint64_t)pk_hi << 32 | pk_lo };
 	uint32_t pos, tail, run, n, full, i, waves, idle, len, page, off, idx;
+	uint32_t rank = 0, passes = 0;
 	GLOBAL struct knod_mlx5_cqe64 *c;
 	uint64_t mine, page_base, param, ctx, bad;
 	v16u r;
@@ -649,6 +710,9 @@ v16u cfn_gda_round_begin(ctl_t ctl, uint32_t queue, uint32_t wave,
 	 */
 	ORDER();
 	len = bswap32(get32(&c->byte_cnt));
+	if (ordered)
+		gda_rank(&g, get32(&c->rss_hash_result), mine, waves, &rank,
+			 &passes);
 
 	/* The RQ entry this CQE completes, and so the page: entry i is page
 	 * i.
@@ -668,9 +732,13 @@ v16u cfn_gda_round_begin(ctl_t ctl, uint32_t queue, uint32_t wave,
 	param = GL64(&g, PARAM);
 	ctx = param + KNOD_BLOB_PARAM_SUB + (uint64_t)idx * KNOD_BLOB_SUB_SIZE;
 
-	r.s0 = page;
+	/* The ordered engine's: the packet's rank among its flow's in the
+	 * page's top half, and how many ranks there are past the first in the
+	 * length's.
+	 */
+	r.s0 = page | rank << 16;
 	r.s1 = off;
-	r.s2 = len;
+	r.s2 = len | passes << 16;
 	r.s3 = 64 * g.wave + lane_id();
 	r.s4 = idx;
 	r.s5 = page_base;
@@ -685,6 +753,18 @@ v16u cfn_gda_round_begin(ctl_t ctl, uint32_t queue, uint32_t wave,
 	r.se = g.packets;
 	r.sf = g.packets >> 32;
 	return r;
+}
+
+v16u cfn_gda_round_begin(ctl_t ctl, uint32_t queue, uint32_t wave,
+			 uint32_t s, uint32_t pk_lo, uint32_t pk_hi)
+{
+	return gda_round_begin(ctl, queue, wave, s, pk_lo, pk_hi, 0);
+}
+
+v16u cfn_gda_round_begin_ordered(ctl_t ctl, uint32_t queue, uint32_t wave,
+				 uint32_t s, uint32_t pk_lo, uint32_t pk_hi)
+{
+	return gda_round_begin(ctl, queue, wave, s, pk_lo, pk_hi, 1);
 }
 
 /* Fold each wave's XDP_TX into the SQ's room, in wave order, so the WQEs
