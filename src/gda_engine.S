@@ -174,6 +174,9 @@ ENGINE:
 	// next reads past the caches in front of it.
 	s_cmp_lg_u32 s[PASS], 0
 	s_cbranch_scc1 .Lgda_counted
+	// Every lane's: the state is a field a lane, and the program left
+	// EXEC at its own.
+	s_mov_b64 exec, -1
 	v_mov_b32 v4, v[GS]
 	v_mov_b32 v5, v[RANK]
 	ENGINE_CALL gda_parked
