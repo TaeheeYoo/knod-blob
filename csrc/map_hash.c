@@ -13,13 +13,19 @@
  */
 #include "map.h"
 
-#define NEXT_END	0x7fffffffu
-#define NEXT_MASK	0x7fffffffu
-#define NEXT_DELETED	0x80000000u
+#define NEXT_MASK	KNOD_BLOB_HASH_LINK_MASK
+#define NEXT_DELETED	KNOD_BLOB_HASH_DELETED
+#define NULLS		KNOD_BLOB_HASH_NULLS
+#define NO_ELEM		0xffffffffu
 
-#define E2BIG		7
 #define ENOENT		2
+#define E2BIG		7
 #define ENOMEM		12
+#define EEXIST		17
+#define EINVAL		22
+
+#define BPF_NOEXIST	1
+#define BPF_EXIST	2
 
 static inline uint32_t rol32(uint32_t x, int n)
 {
@@ -84,6 +90,11 @@ static inline gptr bucket_of(desc_t d, const uint32_t *key, int n)
 	return &bucket[jhash(d, key, n) & (d->n_buckets - 1)];
 }
 
+static inline uint32_t bucket_index(desc_t d, gptr cell)
+{
+	return cell - (gptr)d->bucket_gaddr;
+}
+
 static inline GLOBAL uint8_t *elem_at(desc_t d, uint32_t id)
 {
 	return (GLOBAL uint8_t *)d->elems_gaddr + (uint64_t)id * d->elem_size;
@@ -136,14 +147,22 @@ static inline gptr value_of(desc_t d, GLOBAL uint8_t *e, int n, int percpu)
  * A lane whose chain ends drops out of the walk, so lanes at different depths
  * share it and it runs as long as any lane is still looking.  A deleted
  * element can still be on a chain a walk reached it through: walk past it.
+ * One reused for another key meanwhile takes the walk onto that key's chain,
+ * whose end says so: start again.
  */
 static inline uint64_t lookup(desc_t dv, const uint32_t *key, int n,
 			      int percpu)
 {
 	desc_t d = uniform_desc(dv);
-	uint32_t next = load(bucket_of(d, key, n)) & NEXT_MASK;
+	gptr cell = bucket_of(d, key, n);
+	uint32_t end = NULLS | bucket_index(d, cell);
+	uint32_t next = load(cell) & NEXT_MASK;
 
-	while (next != NEXT_END) {
+	while (next != end) {
+		if (next & NULLS) {
+			next = load(cell) & NEXT_MASK;
+			continue;
+		}
 		GLOBAL uint8_t *e = elem_at(d, next);
 		/* The link and the LRU word together, one request. */
 		uint64_t w = __scoped_atomic_load_n((GLOBAL uint64_t *)e,
@@ -181,7 +200,7 @@ static inline int unlink(gptr cell, desc_t d, uint32_t id)
 	uint32_t next = load(cell) & NEXT_MASK;
 	gptr prev = cell;
 
-	while (next != NEXT_END) {
+	while (!(next & NULLS)) {
 		GLOBAL uint8_t *e = elem_at(d, next);
 		uint32_t link = load((gptr)e);
 
@@ -202,7 +221,7 @@ static inline int unlink(gptr cell, desc_t d, uint32_t id)
  * one used since the hand last passed is passed over once more, and the
  * first that was not is taken off its chain.  Its bucket's lock is taken
  * only if it is free: the caller holds @cell's already, and waiting on
- * another while holding one could wait forever.  NEXT_END if a whole turn
+ * another while holding one could wait forever.  NO_ELEM if a whole turn
  * found nothing it could take.
  */
 static inline uint32_t evict(desc_t d, gptr cell)
@@ -240,7 +259,7 @@ static inline uint32_t evict(desc_t d, gptr cell)
 		if (got)
 			return id;
 	}
-	return NEXT_END;
+	return NO_ELEM;
 }
 
 /* Every instance's copy of a reused element's value, which an insert into a
@@ -261,10 +280,11 @@ static inline void zero_values(desc_t d, GLOBAL uint8_t *e, int n)
  * in at the head.  The element is filled before the head points at it, so a
  * walker never reaches one whose contents are not there yet.  A full map
  * inserts nothing and says so, as the kernel's does - unless it is an LRU
- * one, which evicts an element to reuse.
+ * one, which evicts an element to reuse.  @flags as the kernel's: BPF_NOEXIST
+ * refuses a key that is there, BPF_EXIST one that is not.
  */
 static inline int update_one(desc_t d, gptr cell, const uint32_t *key, int n,
-			     const uint32_t *val, int percpu)
+			     const uint32_t *val, int percpu, uint32_t flags)
 {
 	uint32_t next = load(cell) & NEXT_MASK;
 	GLOBAL uint8_t *e;
@@ -272,9 +292,11 @@ static inline int update_one(desc_t d, gptr cell, const uint32_t *key, int n,
 	int32_t slot;
 	uint32_t id;
 
-	while (next != NEXT_END) {
+	while (!(next & NULLS)) {
 		e = elem_at(d, next);
 		if (same_key(e, key, n)) {
+			if (flags == BPF_NOEXIST)
+				return -EEXIST;
 			store_value(d, value_of(d, e, n, percpu), val);
 			if (is_lru(d))
 				mark_used(e, 0);
@@ -282,6 +304,8 @@ static inline int update_one(desc_t d, gptr cell, const uint32_t *key, int n,
 		}
 		next = load((gptr)e) & NEXT_MASK;
 	}
+	if (flags == BPF_EXIST)
+		return -ENOENT;
 
 	cur = (gptr)d->free_cur_gaddr;
 	slot = (int32_t)add(cur, -1) - 1;
@@ -294,7 +318,7 @@ static inline int update_one(desc_t d, gptr cell, const uint32_t *key, int n,
 		if (!is_lru(d))
 			return -E2BIG;
 		id = evict(d, cell);
-		if (id == NEXT_END)
+		if (id == NO_ELEM)
 			return -ENOMEM;
 		e = elem_at(d, id);
 		if (percpu)
@@ -307,8 +331,7 @@ static inline int update_one(desc_t d, gptr cell, const uint32_t *key, int n,
 	/* A free element's other instances were zeroed when the host freed it. */
 	store_value(d, value_of(d, e, n, percpu), val);
 	store(lru_of(e), KNOD_BLOB_ELEM_LIVE |
-			 (uint32_t)(cell - (gptr)d->bucket_gaddr) <<
-			 KNOD_BLOB_ELEM_BUCKET_SHIFT);
+			 bucket_index(d, cell) << KNOD_BLOB_ELEM_BUCKET_SHIFT);
 	release();
 	store(cell, id);
 	return 0;
@@ -323,7 +346,7 @@ static inline int delete_one(desc_t d, gptr cell, const uint32_t *key, int n)
 	uint32_t next = load(cell) & NEXT_MASK;
 	gptr list;
 
-	while (next != NEXT_END) {
+	while (!(next & NULLS)) {
 		GLOBAL uint8_t *e = elem_at(d, next);
 
 		if (same_key(e, key, n)) {
@@ -350,12 +373,15 @@ static inline int delete_one(desc_t d, gptr cell, const uint32_t *key, int n)
  * compiler may run what follows such a loop for all the lanes at once.
  */
 static inline int64_t write(desc_t dv, const uint32_t *key, int n,
-			    const uint32_t *val, int percpu)
+			    const uint32_t *val, int percpu, uint32_t flags)
 {
 	desc_t d = uniform_desc(dv);
 	gptr cell = bucket_of(d, key, n);
 	uint64_t todo = __builtin_amdgcn_ballot_w64(1);
 	int ret = 0;
+
+	if (val && flags > BPF_EXIST)
+		return -EINVAL;
 
 	while (todo) {
 		uint32_t first = __builtin_ctzll(todo);
@@ -372,7 +398,8 @@ static inline int64_t write(desc_t dv, const uint32_t *key, int n,
 			if (lane_id() != __builtin_ctzll(g))
 				continue;
 			if (val)
-				ret = update_one(d, cell, key, n, val, percpu);
+				ret = update_one(d, cell, key, n, val, percpu,
+						 flags);
 			else
 				ret = delete_one(d, cell, key, n);
 			/* The next lane, or holder, may read what it wrote. */
@@ -386,7 +413,7 @@ static inline int64_t write(desc_t dv, const uint32_t *key, int n,
 }
 
 #define KEY(n)	A##n(uint32_t k)
-#define VAL	A14(uint32_t v)
+#define VAL	A14(uint32_t v), uint32_t flags
 
 #define DEFINE_HASH(n)							\
 uint64_t cfn_lookup_hash_k##n(desc_t d, KEY(n))				\
@@ -405,19 +432,19 @@ uint64_t cfn_update_hash_k##n(desc_t d, KEY(n), VAL)			\
 {									\
 	uint32_t k[n] = { A##n(k) }, v[] = { A14(v) };			\
 									\
-	return write(d, k, n, v, 0);					\
+	return write(d, k, n, v, 0, flags);				\
 }									\
 uint64_t cfn_update_percpu_hash_k##n(desc_t d, KEY(n), VAL)		\
 {									\
 	uint32_t k[n] = { A##n(k) }, v[] = { A14(v) };			\
 									\
-	return write(d, k, n, v, 1);					\
+	return write(d, k, n, v, 1, flags);				\
 }									\
 uint64_t cfn_delete_hash_k##n(desc_t d, KEY(n))				\
 {									\
 	uint32_t k[n] = { A##n(k) };					\
 									\
-	return write(d, k, n, 0, 0);					\
+	return write(d, k, n, 0, 0, 0);					\
 }
 
 DEFINE_HASH(1)
