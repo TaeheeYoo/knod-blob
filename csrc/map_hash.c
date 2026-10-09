@@ -17,6 +17,10 @@
 #define NEXT_MASK	0x7fffffffu
 #define NEXT_DELETED	0x80000000u
 
+#define E2BIG		7
+#define ENOENT		2
+#define ENOMEM		12
+
 static inline uint32_t rol32(uint32_t x, int n)
 {
 	return (x << n) | (x >> (32 - n));
@@ -90,6 +94,25 @@ static inline gptr kv_of(GLOBAL uint8_t *e)
 	return (gptr)(e + KNOD_BLOB_ELEM_KV_OFF);
 }
 
+static inline gptr lru_of(GLOBAL uint8_t *e)
+{
+	return (gptr)(e + KNOD_BLOB_ELEM_LRU_OFF);
+}
+
+static inline int is_lru(desc_t d)
+{
+	return d->flags & KNOD_BLOB_MAP_LRU;
+}
+
+/* As the kernel's LRU hash: used, so eviction passes it over once more. */
+static inline void mark_used(GLOBAL uint8_t *e, uint32_t lru)
+{
+	if (!(lru & KNOD_BLOB_ELEM_REF))
+		__scoped_atomic_fetch_or(lru_of(e), KNOD_BLOB_ELEM_REF,
+					 __ATOMIC_RELAXED,
+					 __MEMORY_SCOPE_DEVICE);
+}
+
 static inline int same_key(GLOBAL uint8_t *e, const uint32_t *key, int n)
 {
 	int same = 1;
@@ -122,10 +145,17 @@ static inline uint64_t lookup(desc_t dv, const uint32_t *key, int n,
 
 	while (next != NEXT_END) {
 		GLOBAL uint8_t *e = elem_at(d, next);
-		uint32_t link = load((gptr)e);
+		/* The link and the LRU word together, one request. */
+		uint64_t w = __scoped_atomic_load_n((GLOBAL uint64_t *)e,
+						    __ATOMIC_RELAXED,
+						    __MEMORY_SCOPE_DEVICE);
+		uint32_t link = w;
 
-		if (same_key(e, key, n) && !(link & NEXT_DELETED))
+		if (same_key(e, key, n) && !(link & NEXT_DELETED)) {
+			if (is_lru(d))
+				mark_used(e, w >> 32);
 			return (uint64_t)value_of(d, e, n, percpu);
+		}
 		next = link & NEXT_MASK;
 	}
 	return 0;
@@ -143,13 +173,98 @@ static inline void store_value(desc_t d, gptr v, const uint32_t *val)
 }
 
 /*
+ * Take element @id off the chain at @cell, whose lock the caller holds, and
+ * mark it deleted for a walker already on it.  False if it is not there.
+ */
+static inline int unlink(gptr cell, desc_t d, uint32_t id)
+{
+	uint32_t next = load(cell) & NEXT_MASK;
+	gptr prev = cell;
+
+	while (next != NEXT_END) {
+		GLOBAL uint8_t *e = elem_at(d, next);
+		uint32_t link = load((gptr)e);
+
+		if (next == id) {
+			store(prev, link);
+			store((gptr)e, link | NEXT_DELETED);
+			store(lru_of(e), 0);
+			return 1;
+		}
+		prev = (gptr)e;
+		next = link & NEXT_MASK;
+	}
+	return 0;
+}
+
+/*
+ * For an LRU hash with no free element: an element to reuse, by the clock -
+ * one used since the hand last passed is passed over once more, and the
+ * first that was not is taken off its chain.  Its bucket's lock is taken
+ * only if it is free: the caller holds @cell's already, and waiting on
+ * another while holding one could wait forever.  NEXT_END if a whole turn
+ * found nothing it could take.
+ */
+static inline uint32_t evict(desc_t d, gptr cell)
+{
+	gptr hand = (gptr)d->clock_gaddr, vcell, lock;
+	GLOBAL uint8_t *e;
+	uint32_t id, lru;
+	int got;
+
+	for (uint32_t i = 0; i < 2 * d->max_entries; i++) {
+		id = add(hand, 1) & (d->max_entries - 1);
+		e = elem_at(d, id);
+		lru = load(lru_of(e));
+		if (!(lru & KNOD_BLOB_ELEM_LIVE))
+			continue;
+		if (lru & KNOD_BLOB_ELEM_REF) {
+			__scoped_atomic_fetch_and(lru_of(e),
+						  ~KNOD_BLOB_ELEM_REF,
+						  __ATOMIC_RELAXED,
+						  __MEMORY_SCOPE_DEVICE);
+			continue;
+		}
+		vcell = &((gptr)d->bucket_gaddr)[lru >>
+						   KNOD_BLOB_ELEM_BUCKET_SHIFT];
+		lock = (gptr)((uint64_t)vcell + d->lock_offset);
+		if (vcell != cell &&
+		    __scoped_atomic_exchange_n(lock, 1, __ATOMIC_RELAXED,
+					       __MEMORY_SCOPE_DEVICE))
+			continue;
+		got = unlink(vcell, d, id);
+		if (vcell != cell) {
+			release();
+			store(lock, 0);
+		}
+		if (got)
+			return id;
+	}
+	return NEXT_END;
+}
+
+/* Every instance's copy of a reused element's value, which an insert into a
+ * percpu map otherwise leaves to the host to have zeroed.
+ */
+static inline void zero_values(desc_t d, GLOBAL uint8_t *e, int n)
+{
+	uint32_t words = d->value_size >> 2;
+	gptr v = (gptr)(e + KNOD_BLOB_ELEM_VALUE_OFF(n));
+
+	for (uint32_t c = 0; c < d->n_instances; c++)
+		for (uint32_t i = 0; i < words; i++)
+			store(&v[c * (d->per_instance_size >> 2) + i], 0);
+}
+
+/*
  * Replace the key's value, or take an element off the free queue and link it
  * in at the head.  The element is filled before the head points at it, so a
  * walker never reaches one whose contents are not there yet.  A full map
- * inserts nothing.
+ * inserts nothing and says so, as the kernel's does - unless it is an LRU
+ * one, which evicts an element to reuse.
  */
-static inline void update_one(desc_t d, gptr cell, const uint32_t *key, int n,
-			      const uint32_t *val, int percpu)
+static inline int update_one(desc_t d, gptr cell, const uint32_t *key, int n,
+			     const uint32_t *val, int percpu)
 {
 	uint32_t next = load(cell) & NEXT_MASK;
 	GLOBAL uint8_t *e;
@@ -161,54 +276,66 @@ static inline void update_one(desc_t d, gptr cell, const uint32_t *key, int n,
 		e = elem_at(d, next);
 		if (same_key(e, key, n)) {
 			store_value(d, value_of(d, e, n, percpu), val);
-			return;
+			if (is_lru(d))
+				mark_used(e, 0);
+			return 0;
 		}
 		next = load((gptr)e) & NEXT_MASK;
 	}
 
 	cur = (gptr)d->free_cur_gaddr;
 	slot = (int32_t)add(cur, -1) - 1;
-	if (slot < 0) {
+	if (slot >= 0) {
+		queue = (gptr)d->queue_gaddr;
+		id = load(&queue[slot]);
+		e = elem_at(d, id);
+	} else {
 		add(cur, 1);
-		return;
+		if (!is_lru(d))
+			return -E2BIG;
+		id = evict(d, cell);
+		if (id == NEXT_END)
+			return -ENOMEM;
+		e = elem_at(d, id);
+		if (percpu)
+			zero_values(d, e, n);
 	}
-	queue = (gptr)d->queue_gaddr;
-	id = load(&queue[slot]);
-	e = elem_at(d, id);
 
 	store((gptr)e, load(cell));
 	for (int i = 0; i < n; i++)
 		store(&kv_of(e)[i], key[i]);
-	/* The other instances' copies were zeroed when the host freed it. */
+	/* A free element's other instances were zeroed when the host freed it. */
 	store_value(d, value_of(d, e, n, percpu), val);
+	store(lru_of(e), KNOD_BLOB_ELEM_LIVE |
+			 (uint32_t)(cell - (gptr)d->bucket_gaddr) <<
+			 KNOD_BLOB_ELEM_BUCKET_SHIFT);
 	release();
 	store(cell, id);
+	return 0;
 }
 
 /*
- * Unlink the key's element, mark it deleted for a walker already on it, and
- * hand its index to the GC list for the host to reclaim.
+ * Unlink the key's element and hand its index to the GC list for the host to
+ * reclaim.
  */
-static inline void delete_one(desc_t d, gptr cell, const uint32_t *key, int n)
+static inline int delete_one(desc_t d, gptr cell, const uint32_t *key, int n)
 {
 	uint32_t next = load(cell) & NEXT_MASK;
-	gptr prev = cell, list;
+	gptr list;
 
 	while (next != NEXT_END) {
 		GLOBAL uint8_t *e = elem_at(d, next);
-		uint32_t link = load((gptr)e);
 
 		if (same_key(e, key, n)) {
-			store(prev, link);
-			store((gptr)e, link | NEXT_DELETED);
+			unlink(cell, d, next);
 			release();
 			list = (gptr)d->gc_list_gaddr;
 			store(&list[add((gptr)d->gc_count_gaddr, 1)], next);
-			return;
+			return 0;
 		}
-		prev = (gptr)e;
-		next = link & NEXT_MASK;
+		next = load((gptr)e) & NEXT_MASK;
 	}
+	return -ENOENT;
 }
 
 /*
@@ -222,12 +349,13 @@ static inline void delete_one(desc_t d, gptr cell, const uint32_t *key, int n)
  * names it.  A loop a lane leaves on its own condition would not do: the
  * compiler may run what follows such a loop for all the lanes at once.
  */
-static inline void write(desc_t dv, const uint32_t *key, int n,
-			 const uint32_t *val, int percpu)
+static inline int64_t write(desc_t dv, const uint32_t *key, int n,
+			    const uint32_t *val, int percpu)
 {
 	desc_t d = uniform_desc(dv);
 	gptr cell = bucket_of(d, key, n);
 	uint64_t todo = __builtin_amdgcn_ballot_w64(1);
+	int ret = 0;
 
 	while (todo) {
 		uint32_t first = __builtin_ctzll(todo);
@@ -244,9 +372,9 @@ static inline void write(desc_t dv, const uint32_t *key, int n,
 			if (lane_id() != __builtin_ctzll(g))
 				continue;
 			if (val)
-				update_one(d, cell, key, n, val, percpu);
+				ret = update_one(d, cell, key, n, val, percpu);
 			else
-				delete_one(d, cell, key, n);
+				ret = delete_one(d, cell, key, n);
 			/* The next lane, or holder, may read what it wrote. */
 			release();
 		}
@@ -254,6 +382,7 @@ static inline void write(desc_t dv, const uint32_t *key, int n,
 			store(lock, 0);
 		todo &= ~group;
 	}
+	return ret;
 }
 
 #define KEY(n)	A##n(uint32_t k)
@@ -276,22 +405,19 @@ uint64_t cfn_update_hash_k##n(desc_t d, KEY(n), VAL)			\
 {									\
 	uint32_t k[n] = { A##n(k) }, v[] = { A14(v) };			\
 									\
-	write(d, k, n, v, 0);						\
-	return 0;							\
+	return write(d, k, n, v, 0);					\
 }									\
 uint64_t cfn_update_percpu_hash_k##n(desc_t d, KEY(n), VAL)		\
 {									\
 	uint32_t k[n] = { A##n(k) }, v[] = { A14(v) };			\
 									\
-	write(d, k, n, v, 1);						\
-	return 0;							\
+	return write(d, k, n, v, 1);					\
 }									\
 uint64_t cfn_delete_hash_k##n(desc_t d, KEY(n))				\
 {									\
 	uint32_t k[n] = { A##n(k) };					\
 									\
-	write(d, k, n, 0, 0);						\
-	return 0;							\
+	return write(d, k, n, 0, 0);					\
 }
 
 DEFINE_HASH(1)
