@@ -30,30 +30,42 @@ static inline void fill(desc_t dv, gptr v, const uint32_t *val)
 #pragma clang loop unroll(full)
 	for (int i = 0; i < KNOD_BLOB_VALUE_CHUNKS_MAX; i++)
 		if (i < words)
-			v[i] = val ? val[i] : 0;
+			v[i] = val[i];
 }
 
+#define E2BIG		7
+#define EEXIST		17
+#define EINVAL		22
+
+#define BPF_NOEXIST	1
+#define BPF_EXIST	2
+
+/* As the kernel's: every element is always there, so BPF_NOEXIST is refused,
+ * and none can be deleted.
+ */
 #define DEFINE_ARRAY(name, percpu)					\
 uint64_t cfn_lookup_##name(desc_t d, uint32_t key)			\
 {									\
 	return (uint64_t)slot(d, key, percpu);				\
 }									\
-uint64_t cfn_update_##name(desc_t d, uint32_t key, A14(uint32_t v))	\
+uint64_t cfn_update_##name(desc_t d, uint32_t key, A14(uint32_t v),	\
+			   uint32_t flags)				\
 {									\
 	uint32_t v[] = { A14(v) };					\
 	gptr s = slot(d, key, percpu);					\
 									\
-	if (s)								\
-		fill(d, s, v);						\
+	if (flags > BPF_EXIST)						\
+		return (uint64_t)-EINVAL;				\
+	if (!s)								\
+		return (uint64_t)-E2BIG;				\
+	if (flags == BPF_NOEXIST)					\
+		return (uint64_t)-EEXIST;				\
+	fill(d, s, v);							\
 	return 0;							\
 }									\
 uint64_t cfn_delete_##name(desc_t d, uint32_t key)			\
 {									\
-	gptr s = slot(d, key, percpu);					\
-									\
-	if (s)								\
-		fill(d, s, 0);						\
-	return 0;							\
+	return (uint64_t)-EINVAL;					\
 }
 
 DEFINE_ARRAY(array, 0)
