@@ -15,6 +15,10 @@ FEATURES	:= core
 # which runs the NIC's rings with no feature's code in them.
 SRC_core	:= src/gda_rx.S src/gda_engine.S
 SRC_bpf-persistent := $(filter-out $(SRC_core),$(wildcard src/*.S))
+# The routines a program calls are every C function but the engine's own,
+# which src/gda_engine.S puts inside itself.
+ENGINE_FNS	:= $(shell grep -oh 'CFN_BODY_[a-z_0-9]*' src/gda_engine.S | \
+		     sed 's/CFN_BODY_//' | sort -u | paste -sd, -)
 
 ABI_HDR		:= include/uapi/linux/knod_blob.h
 UAPI_HDRS	:= $(wildcard include/uapi/linux/*.h)
@@ -66,9 +70,11 @@ $(FLAGS_STAMP): FORCE | $(BUILD)
 # One set of rules per feature and ISA.  A pattern rule cannot express this
 # because the cpu and attributes are looked up by the ISA number, not the stem.
 define isa_rules
-$(BUILD)/$(1).$(2).s: $(DEPS) | $(BUILD)
-	cat $(SRC_$(1)) > $(BUILD)/$(1).$(2).cat.S
+$(BUILD)/$(1).$(2).s: $(DEPS) $(if $(filter bpf-persistent,$(1)),$(BUILD)/routines.$(2).S) | $(BUILD)
+	cat $(SRC_$(1)) $(if $(filter bpf-persistent,$(1)),$(BUILD)/routines.$(2).S) \
+		> $(BUILD)/$(1).$(2).cat.S
 	$(ASM_CPP) -Isrc -I$(BUILD) -Iinclude/uapi -Werror=undef \
+		-include $(BUILD)/cfn.$(2).inc \
 		-Werror=macro-redefined \
 		$(EXTRA_CPPFLAGS) \
 		-D__ASSEMBLY__ \
@@ -96,16 +102,19 @@ $(foreach f,$(FEATURES),\
 $(foreach i,$(ISAS),$(eval $(call isa_rules,bpf-persistent,$(i))))
 
 # Routines written in C: compiled to assembly, then turned by cfn.py into
-# macros a routine in src/ calls through.
+# macros the engine in src/ puts inside itself, and the routines a program
+# calls.
 define cfn_rules
 $(BUILD)/%.$(1).s: csrc/%.c $(wildcard csrc/*.h) $(UAPI_HDRS) | $(BUILD)
 	$(CLANG) -target amdgcn-amd-amdhsa -mcpu=$(CPU_$(1)) -mwavefrontsize64 \
 		-mcumode $(CFN_ATTR_$(1)) -O2 -nogpulib -ffreestanding -fno-builtin \
 		-Wall -Werror -Iinclude/uapi -S $$< -o $$@
 
-$(BUILD)/cfn.$(1).inc: $(patsubst csrc/%.c,$(BUILD)/%.$(1).s,$(CSRC)) \
-		       tools/cfn.py $(ABI_HDR)
-	python3 tools/cfn.py $$@ $$(filter %.s,$$^)
+$(BUILD)/cfn.$(1).inc $(BUILD)/routines.$(1).S &: \
+		$(patsubst csrc/%.c,$(BUILD)/%.$(1).s,$(CSRC)) \
+		tools/cfn.py $(ABI_HDR) src/gda_engine.S
+	python3 tools/cfn.py $(BUILD)/cfn.$(1).inc $$(filter %.s,$$^) \
+		--routines $(BUILD)/routines.$(1).S --engine "$(ENGINE_FNS)"
 endef
 
 $(foreach i,$(ISAS),$(eval $(call cfn_rules,$(i))))
