@@ -10,7 +10,6 @@
 // and the engine's state in v[GS:GS+2], which neither reaches.
 
 #include "common.inc"
-#include "cfn.inc"
 
 // Built twice: as is, and with KNOD_GDA_ORDERED from gda_engine_ordered.S,
 // which runs the program once per rank of a flow's packets (gda_rank()).

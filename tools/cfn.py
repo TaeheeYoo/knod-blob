@@ -6,11 +6,15 @@ For each function cfn_<name>, CFN_BODY_<name>: its instructions under the
 label .Lcfn_<name>, with its local labels its own and no symbol or metadata,
 for src/ to put where it wants it.
 
+With --routines, also a file of routines the JIT calls: knod_<name> on each
+body, every function but the engine's own, which the engine puts inside it.
+
 The functions are called by the AMDGPU calling convention, which keeps s34 and
 up for the caller, and knod_blob.h has a function keep off the VGPRs the JIT
 holds from KNOD_BLOB_JIT_VREG up.  Refuses one that touches those, or that
 needs more stack than a call gets.
 """
+import argparse
 import re
 import sys
 
@@ -55,8 +59,23 @@ def emit(c, name, body, stack, out):
     out.append(".endm")
 
 
+def routine(short):
+    return [f"\t.globl knod_{short}",
+            "\t.p2align 2",
+            f"knod_{short}:",
+            f"\tCFN_BODY_{short}",
+            f"\t.size knod_{short}, . - knod_{short}"]
+
+
 def main():
-    out_path, srcs = sys.argv[1], sys.argv[2:]
+    ap = argparse.ArgumentParser()
+    ap.add_argument("out")
+    ap.add_argument("srcs", nargs="+")
+    ap.add_argument("--routines", help="also write the routines here")
+    ap.add_argument("--engine", default="",
+                    help="comma-separated functions that are the engine's")
+    args = ap.parse_args()
+    out_path, srcs = args.out, args.srcs
     c = contract()
     text = "\n".join(open(src).read() for src in srcs)
     funcs, name, body, last = [], None, [], None
@@ -82,6 +101,15 @@ def main():
     for name, body, stack in funcs:
         emit(c, name, body, stack, out)
     open(out_path, "w").write("\n".join(out) + "\n")
+
+    if args.routines:
+        engine = set(filter(None, args.engine.split(",")))
+        lines = ["\t.text"]
+        for name, _, _ in funcs:
+            short = name[len("cfn_"):]
+            if short not in engine:
+                lines += routine(short)
+        open(args.routines, "w").write("\n".join(lines) + "\n")
 
 
 if __name__ == "__main__":

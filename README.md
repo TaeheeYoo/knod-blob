@@ -26,10 +26,9 @@ What is left in assembly is what C cannot be:
 - `src/gda_engine.S` — the kernel's entry: scratch set up, then the engine's
   functions and the program called in turn.
 - `src/gda_rx.S` — the program that runs when none is attached: pass all.
-- `src/map_hash.S`, `src/map_array.S`, `src/xdp.S`, `src/alu.S`,
-  `src/cfn.inc` — a symbol for each routine on its compiled body.
 
-`tools/cfn.py` turns clang's assembly into those bodies and refuses one that
+`tools/cfn.py` turns clang's assembly into bodies, and every C function but
+the engine's own into a routine `knod_<fn>` the JIT calls; it refuses one that
 would touch what the JIT holds or need more stack than a call gets;
 `tools/pack.py` packs the result into the container the kernel loads.
 
