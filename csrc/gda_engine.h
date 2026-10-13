@@ -56,6 +56,8 @@ static INLINE void gda_save(struct gda *g)
 				 GL(g, TX_GEN) });
 	put32(&e->rq_bound, GL(g, LAST_BOUND));
 	put32(&e->tx_dead, GL(g, TX_DEAD));
+	put32(&e->rq_told, GL(g, RQ_TOLD));
+	put32(&e->tx_rs_pc, GL(g, TXRS_PC));
 }
 
 /* Wave 0 leaving: the others are told at the barrier they wait at, then where
@@ -218,6 +220,7 @@ v4u GDA_FN(gda_init)(ctl_t ctl, uint32_t queue, uint32_t wave)
 		SET(&g, SQ_PC, get32(&e->sq_pc));
 		SET(&g, SQ_CC, get32(&e->sq_cc));
 		SET(&g, TX_CI, get32(&e->tx_ci));
+		SET(&g, TXRS_PC, get32(&e->tx_rs_pc));
 	}
 
 	SET64(&g, PASS_RING, get64(&e->pass_ring));
@@ -243,6 +246,7 @@ v4u GDA_FN(gda_init)(ctl_t ctl, uint32_t queue, uint32_t wave)
 	 * from there.
 	 */
 	SET(&g, LAST_BOUND, fresh ? 0 : get32(&e->rq_bound));
+	SET(&g, RQ_TOLD, fresh ? 0 : get32(&e->rq_told));
 	gda_load(&g, ctl, queue, wave);
 
 	/* LDS starts undefined: no stop until wave 0 says so.  Every wave has

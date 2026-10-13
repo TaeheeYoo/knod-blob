@@ -8,6 +8,7 @@
 #define MLX5_CX5	GDA_CAT(knod_gda_engine_ordered_f, KNOD_PERSIST_FMT_MLX5_CX5)
 #define BNXT_P5		GDA_CAT(knod_gda_engine_ordered_f, KNOD_PERSIST_FMT_BNXT_P5)
 #define BNXT_P7		GDA_CAT(knod_gda_engine_ordered_f, KNOD_PERSIST_FMT_BNXT_P7)
+#define ICE_E810	GDA_CAT(knod_gda_engine_ordered_f, KNOD_PERSIST_FMT_ICE_E810)
 
 	GDA_ENGINE MLX5_CX5, mlx5_cx5, 1
 	CFN_BODY_gda_init_mlx5_cx5
@@ -29,3 +30,10 @@
 	CFN_BODY_gda_parked_bnxt_p7
 	CFN_BODY_gda_round_end_bnxt_p7
 	GDA_ENGINE_END BNXT_P7
+
+	GDA_ENGINE ICE_E810, ice_e810, 1
+	CFN_BODY_gda_init_ice_e810
+	CFN_BODY_gda_round_begin_ordered_ice_e810
+	CFN_BODY_gda_parked_ice_e810
+	CFN_BODY_gda_round_end_ice_e810
+	GDA_ENGINE_END ICE_E810
