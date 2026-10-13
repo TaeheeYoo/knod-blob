@@ -15,9 +15,9 @@ FEATURES	:= core
 # which runs the NIC's rings with no feature's code in them.
 SRC_core	:= src/gda_rx.S src/gda_engine.S
 SRC_bpf-persistent := $(filter-out $(SRC_core),$(wildcard src/*.S))
-# The routines a program calls are every C function but the engine's own,
-# which src/gda_engine.S puts inside itself.
-ENGINE_FNS	:= $(shell grep -oh 'CFN_BODY_[a-z_0-9]*' src/gda_engine.S | \
+# The routines a program calls are every C function but the engines' own,
+# which src/gda_engine*.S put inside themselves.
+ENGINE_FNS	:= $(shell grep -oh 'CFN_BODY_[a-z_0-9]*' src/gda_engine*.S | \
 		     sed 's/CFN_BODY_//' | sort -u | paste -sd, -)
 
 ABI_HDR		:= include/uapi/linux/knod_blob.h
@@ -112,7 +112,7 @@ $(BUILD)/%.$(1).s: csrc/%.c $(wildcard csrc/*.h) $(UAPI_HDRS) | $(BUILD)
 
 $(BUILD)/cfn.$(1).inc $(BUILD)/routines.$(1).S &: \
 		$(patsubst csrc/%.c,$(BUILD)/%.$(1).s,$(CSRC)) \
-		tools/cfn.py $(ABI_HDR) src/gda_engine.S
+		tools/cfn.py $(ABI_HDR) $(wildcard src/gda_engine*.S)
 	python3 tools/cfn.py $(BUILD)/cfn.$(1).inc $$(filter %.s,$$^) \
 		--routines $(BUILD)/routines.$(1).S --engine "$(ENGINE_FNS)"
 endef

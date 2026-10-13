@@ -71,10 +71,11 @@ def symbols(obj):
 
 
 def parse_name(name, kinds):
-    """knod_lookup_hash_k3 -> (kind, key_chunks). k<N> is optional."""
+    """knod_lookup_hash_k3 -> (kind, key_chunks); k<N> is optional.  An
+    engine's f<N> is its NIC format, in the same field."""
     body = name[len("knod_"):]
     chunks = 0
-    m = re.search(r"_k(\d+)$", body)
+    m = re.search(r"_[kf](\d+)$", body)
     if m:
         body, chunks = body[:m.start()], int(m.group(1))
     if body not in kinds:
