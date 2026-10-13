@@ -99,8 +99,9 @@ static INLINE int nic_rx_poll(struct gda *g, uint32_t pos, struct nic_rx *rx)
  */
 static INLINE uint64_t nic_rx_read(struct gda *g, struct nic_rx *rx,
 				   uint32_t pos, int ordered, uint32_t *len,
-				   uint32_t *rss, uint32_t *page)
+				   uint32_t *rss, uint32_t *page, uint32_t *kind)
 {
+	*kind = rx->tail >> CQE_OP_OWN_SHIFT;
 	*len = bswap32(get32(&rx->c->byte_cnt));
 	if (ordered)
 		*rss = get32(&rx->c->rss_hash_result);

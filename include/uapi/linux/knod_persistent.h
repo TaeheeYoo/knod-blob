@@ -31,9 +31,12 @@
 #define KNOD_PERSIST_REGRESS_SQ_CC	5
 #define KNOD_PERSIST_REGRESS_PASS_CC	6
 #define KNOD_PERSIST_REGRESS_CAND	7	/* the PASS candidate */
-/* sync_dbg[]: an RX CQE for another RQ entry than s2 says. */
+/* sync_dbg[]: an RX completion for another RQ entry than s2 says, or - bnxt -
+ * not a plain RX one.
+ */
 #define KNOD_PERSIST_SYNC_HITS		0
 #define KNOD_PERSIST_SYNC_ENTRIES	1	/* s2's low, the CQE's high */
+#define KNOD_PERSIST_SYNC_KIND		2	/* mlx5 op_own, bnxt's type */
 #define KNOD_PERSIST_BYTES 16384
 /* The NIC formats a queue's rings can be in: a vendor's, of a generation of
  * its hardware, as each generation can change them.  An engine is built for
@@ -135,8 +138,14 @@ struct knod_persistent_gda {
 	__u32 pass_cc;
 	__u32 pass_floor;
 	__u32 regress_dbg[8];	/* KNOD_PERSIST_REGRESS_* */
-	__u32 sync_dbg[2];	/* KNOD_PERSIST_SYNC_* */
-	__u8 reserved[32];
+	__u32 sync_dbg[3];	/* KNOD_PERSIST_SYNC_* */
+	/* The shader's, for the host to read: the oldest RQ entry it holds -
+	 * the RQ producer is that plus the RQ's size - and whether the SQ went
+	 * to error.
+	 */
+	__u32 rq_bound;
+	__u32 tx_dead;
+	__u8 reserved[20];
 };
 
 struct knod_persistent_control {

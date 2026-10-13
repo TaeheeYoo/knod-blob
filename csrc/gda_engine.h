@@ -54,6 +54,8 @@ static INLINE void gda_save(struct gda *g)
 		      GL(g, TX_FULL), __builtin_amdgcn_readlane(g->s, GL_TX_FULL + 1) });
 	put128(&e->sq_pc, (v4u){ GL(g, SQ_PC), GL(g, SQ_CC), GL(g, TX_CI),
 				 GL(g, TX_GEN) });
+	put32(&e->rq_bound, GL(g, LAST_BOUND));
+	put32(&e->tx_dead, GL(g, TX_DEAD));
 }
 
 /* Wave 0 leaving: the others are told at the barrier they wait at, then where
@@ -168,6 +170,7 @@ static INLINE void gda_post_rq(struct gda *g)
 		return;
 	put64(&e->ci, (uint64_t)get32(&e->gen) << 32);
 	put32(&e->pass_floor, GL(g, PASS_FLOOR));
+	put32(&e->rq_bound, 0);
 	stores_out();
 }
 
@@ -237,6 +240,10 @@ v4u GDA_FN(gda_init)(ctl_t ctl, uint32_t queue, uint32_t wave)
 	SET(&g, CI, get32(&e->ci));
 	SET64(&g, RING, get64(&e->ring));
 	fresh = get32(&e->posted_gen) != get32(&e->gen);
+	/* Where the last shader left the RQ, so the bound is seen to move on
+	 * from there.
+	 */
+	SET(&g, LAST_BOUND, fresh ? 0 : get32(&e->rq_bound));
 	gda_load(&g, ctl, queue, wave);
 
 	/* LDS starts undefined: no stop until wave 0 says so.  Every wave has
@@ -293,7 +300,7 @@ static INLINE void gda_rank(struct gda *g, uint32_t rss, uint32_t mine,
 
 
 static INLINE void gda_sync_dbg(struct gda *g, uint64_t off, uint32_t pos,
-			 uint32_t entry)
+				uint32_t entry, uint32_t kind)
 {
 	uint32_t l = __builtin_ctzll(off);
 	GLOBAL uint32_t *d = g->entry->sync_dbg;
@@ -304,6 +311,7 @@ static INLINE void gda_sync_dbg(struct gda *g, uint64_t off, uint32_t pos,
 	put32(&d[KNOD_PERSIST_SYNC_ENTRIES],
 	      (__builtin_amdgcn_readlane(pos, l) & 0xffff) |
 	      __builtin_amdgcn_readlane(entry, l) << 16);
+	put32(&d[KNOD_PERSIST_SYNC_KIND], __builtin_amdgcn_readlane(kind, l));
 }
 
 /*
@@ -324,7 +332,7 @@ static INLINE v16u gda_round_begin(ctl_t ctl, uint32_t queue, uint32_t wave,
 {
 	struct gda g = { .s = s, .packets = (uint64_t)pk_hi << 32 | pk_lo };
 	uint32_t pos, run, n, full, i, waves, idle, len, page, off, idx;
-	uint32_t rank = 0, rss = 0;
+	uint32_t rank = 0, rss = 0, kind;
 	uint64_t mine, page_base, param, ctx, bad;
 	struct nic_rx rx;
 	v16u r;
@@ -397,12 +405,12 @@ static INLINE v16u gda_round_begin(ctl_t ctl, uint32_t queue, uint32_t wave,
 	 * both together can take a new owner with the previous byte count.
 	 */
 	ORDER();
-	bad = nic_rx_read(&g, &rx, pos, ordered, &len, &rss, &page) &
+	bad = nic_rx_read(&g, &rx, pos, ordered, &len, &rss, &page, &kind) &
 	      lanes_below(mine);
 	if (ordered)
 		gda_rank(&g, rss, mine, n, &rank);
 	if (bad)
-		gda_sync_dbg(&g, bad, pos, page);
+		gda_sync_dbg(&g, bad, pos, page, kind);
 	page &= GL(&g, RQ_SIZE) - 1;
 
 	/* page base = rx_base + (page << page_shift); data past the headroom

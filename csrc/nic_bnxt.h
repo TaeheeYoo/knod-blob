@@ -99,10 +99,11 @@ static INLINE int nic_rx_poll(struct gda *g, uint32_t pos, struct nic_rx *rx)
  */
 static INLINE uint64_t nic_rx_read(struct gda *g, struct nic_rx *rx,
 				   uint32_t pos, int ordered, uint32_t *len,
-				   uint32_t *rss, uint32_t *page)
+				   uint32_t *rss, uint32_t *page, uint32_t *kind)
 {
 	uint32_t w = get32(&rx->b->len_flags_type);
 
+	*kind = w & KNOD_BNXT_CMP_TYPE;
 	*len = w >> KNOD_BNXT_LEN_SHIFT;
 	if (ordered)
 		*rss = get32(&rx->b->rss_hash);
