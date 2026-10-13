@@ -74,6 +74,7 @@ enum {
 	GL_KEY,			/* bnxt's: each ring's doorbell key, high half */
 	GL_CQ_TOLD = GL_KEY + KNOD_PERSIST_DB_KEYS,	/* bnxt's: CI the NIC has */
 	GL_TX_CQ_TOLD,		/* bnxt's: TX_CI the NIC has */
+	GL_RQ_TOLD,		/* bnxt's: the RQ bound the NIC has */
 	GL_COUNT,
 };
 _Static_assert(GL_COUNT <= 64, "a lane each");

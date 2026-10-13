@@ -101,13 +101,18 @@ static INLINE uint64_t nic_rx_read(struct gda *g, struct nic_rx *rx,
 				   uint32_t pos, int ordered, uint32_t *len,
 				   uint32_t *rss, uint32_t *page, uint32_t *kind)
 {
-	uint32_t w = get32(&rx->b->len_flags_type);
+	/* The first half whole, in one request, past the caches. */
+	v4u c = *(volatile GLOBAL v4u *)rx->b;
+	uint32_t w = c.x;
 
+	_Static_assert(offsetof(struct knod_bnxt_rx_cmp, opaque) == 4 &&
+		       offsetof(struct knod_bnxt_rx_cmp, rss_hash) == 12,
+		       "the first half's dwords");
 	*kind = w & KNOD_BNXT_CMP_TYPE;
 	*len = w >> KNOD_BNXT_LEN_SHIFT;
 	if (ordered)
-		*rss = get32(&rx->b->rss_hash);
-	*page = get32(&rx->b->opaque);
+		*rss = c.w;
+	*page = c.y;
 	return ballot((pos & (GL(g, RQ_SIZE) - 1)) != *page ||
 		      (w & KNOD_BNXT_CMP_TYPE) != KNOD_BNXT_CMP_TYPE_RX_L2);
 }
@@ -125,25 +130,30 @@ static INLINE uint32_t bnxt_cq_slack(uint32_t entries, uint32_t held)
 }
 
 /*
- * Wave 0's: the RQ entries back up to @bound, and the CQ ones up to @ci - two
- * entries a completion - only once the NIC's idea of them is far enough
- * behind to matter.  Both go to the one register in the order written, so
- * nothing waits between them.
+ * Wave 0's: the CQ entries back up to @ci - two entries a completion - and the
+ * RQ ones up to @bound, each only once the NIC's idea of it is far enough
+ * behind to matter: for the RQ, a quarter of what is posted, which leaves the
+ * NIC three quarters of it ahead.  Both go to the one register in the order
+ * written, so nothing waits between them.
  */
 static INLINE void nic_rx_release(struct gda *g, uint32_t ci, uint32_t bound)
 {
-	uint32_t log = GL(g, CQ_LOG), tell;
+	uint32_t log = GL(g, CQ_LOG), size = GL(g, RQ_SIZE);
+	int cq, rq;
 
-	tell = ci - GL(g, CQ_TOLD) >=
-	       bnxt_cq_slack(1u << (log - 1), GL(g, RQ_SIZE));
-	if (tell)
+	cq = ci - GL(g, CQ_TOLD) >= bnxt_cq_slack(1u << (log - 1), size);
+	rq = bound - GL(g, RQ_TOLD) >= size / 4;
+	if (cq)
 		SET(g, CQ_TOLD, ci);
+	if (rq)
+		SET(g, RQ_TOLD, bound);
 	if (lane_id())
 		return;
-	if (tell)
+	if (cq)
 		bnxt_ring(g, KNOD_PERSIST_DB_RX_CQ, 2 * ci & ((1u << log) - 1));
-	bnxt_ring(g, KNOD_PERSIST_DB_RQ,
-		  (bound + GL(g, RQ_SIZE)) & GL(g, RQ_RING_MASK));
+	if (rq)
+		bnxt_ring(g, KNOD_PERSIST_DB_RQ,
+			  (bound + size) & GL(g, RQ_RING_MASK));
 }
 
 /* What the NIC has sent, off the TX CQ: SQ_CC and TX_CI move.  One completion
