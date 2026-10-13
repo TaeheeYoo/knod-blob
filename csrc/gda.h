@@ -72,7 +72,9 @@ enum {
 	GL_RING,		/* doorbell records, RQ, CQs: the ring buffer */
 	GL_RQ_RING_MASK = GL_RING + 2,	/* bnxt's: RQ entries - 1 */
 	GL_KEY,			/* bnxt's: each ring's doorbell key, high half */
-	GL_COUNT = GL_KEY + KNOD_PERSIST_DB_KEYS,
+	GL_CQ_TOLD = GL_KEY + KNOD_PERSIST_DB_KEYS,	/* bnxt's: CI the NIC has */
+	GL_TX_CQ_TOLD,		/* bnxt's: TX_CI the NIC has */
+	GL_COUNT,
 };
 _Static_assert(GL_COUNT <= 64, "a lane each");
 

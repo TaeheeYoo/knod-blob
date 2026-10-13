@@ -30,7 +30,7 @@
  *   nic_rx_post()	post every RQ entry, fresh rings
  *   nic_rx_poll()	whether the lane's completion is done
  *   nic_rx_read()	its length, flow and page, and lanes out of step
- *   nic_rx_release()	lane 0: CQ and RQ entries back to the NIC
+ *   nic_rx_release()	wave 0: CQ and RQ entries back to the NIC
  *   nic_tx_reap()	what the NIC sent, off the TX CQ
  *   nic_tx_post()	one packet's send descriptor
  *   nic_tx_ring()	wave 0: the SQ's doorbell
@@ -124,8 +124,7 @@ static INLINE void gda_rq_release(struct gda *g)
 	if ((int32_t)(bound - prev) < 0)
 		gda_regress_dbg(g, bound, prev, pcc, cand);
 
-	if (!lane_id())
-		nic_rx_release(g, ci, bound);
+	nic_rx_release(g, ci, bound);
 }
 
 /* Wave 0: park while the host changes maps, or leave if it wants the shader

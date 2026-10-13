@@ -109,9 +109,11 @@ static INLINE uint64_t nic_rx_read(struct gda *g, struct nic_rx *rx,
 	return ballot((pos & 0xffff) != *page);
 }
 
-/* Lane 0's: the CQ entries back up to @ci and the RQ ones up to @bound. */
+/* Wave 0's: the CQ entries back up to @ci and the RQ ones up to @bound. */
 static INLINE void nic_rx_release(struct gda *g, uint32_t ci, uint32_t bound)
 {
+	if (lane_id())
+		return;
 	put32(g->ring + KNOD_PERSIST_RING_CQ_DB, bswap32(ci & 0xffffff));
 	/* The CQ's room is out before the RQ entries that fill it, as
 	 * mlx5e_poll_rx_cq() orders them: a NIC that sees the entries first

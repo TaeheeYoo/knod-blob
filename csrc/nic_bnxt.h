@@ -112,13 +112,36 @@ static INLINE uint64_t nic_rx_read(struct gda *g, struct nic_rx *rx,
 		      (w & KNOD_BNXT_CMP_TYPE) != KNOD_BNXT_CMP_TYPE_RX_L2);
 }
 
-/* Lane 0's: the CQ entries back up to @ci, two a packet, then the RQ ones up
- * to @bound - the room first, as mlx5's.
+/*
+ * How far behind the CQ's consumer the NIC may be told it is.  The NIC drops
+ * nothing for a CQ it thinks full, it overruns it, so what it has completed
+ * past the consumer it was told must fit: at most @held more than the real
+ * one, the most it can complete before the shader takes them, and the told
+ * one up to this many behind that.  Half the room, for slack.
+ */
+static INLINE uint32_t bnxt_cq_slack(uint32_t entries, uint32_t held)
+{
+	return entries > held ? (entries - held) / 2 : 0;
+}
+
+/*
+ * Wave 0's: the RQ entries back up to @bound, and the CQ ones up to @ci - two
+ * entries a completion - only once the NIC's idea of them is far enough
+ * behind to matter.  Both go to the one register in the order written, so
+ * nothing waits between them.
  */
 static INLINE void nic_rx_release(struct gda *g, uint32_t ci, uint32_t bound)
 {
-	bnxt_ring(g, KNOD_PERSIST_DB_RX_CQ, 2 * ci & ((1u << GL(g, CQ_LOG)) - 1));
-	stores_out();
+	uint32_t log = GL(g, CQ_LOG), tell;
+
+	tell = ci - GL(g, CQ_TOLD) >=
+	       bnxt_cq_slack(1u << (log - 1), GL(g, RQ_SIZE));
+	if (tell)
+		SET(g, CQ_TOLD, ci);
+	if (lane_id())
+		return;
+	if (tell)
+		bnxt_ring(g, KNOD_PERSIST_DB_RX_CQ, 2 * ci & ((1u << log) - 1));
 	bnxt_ring(g, KNOD_PERSIST_DB_RQ,
 		  (bound + GL(g, RQ_SIZE)) & GL(g, RQ_RING_MASK));
 }
@@ -145,6 +168,11 @@ static INLINE void nic_tx_reap(struct gda *g, uint32_t pc)
 	ci += n;
 	SET(g, SQ_CC, done);
 	SET(g, TX_CI, ci);
+	/* As the RX CQ's: a completion a round, at most an SQ of them. */
+	if (ci - GL(g, TX_CQ_TOLD) <
+	    bnxt_cq_slack(1u << log, GL(g, SQ_MASK) + 1))
+		return;
+	SET(g, TX_CQ_TOLD, ci);
 	if (!lane_id())
 		bnxt_ring(g, KNOD_PERSIST_DB_TX_CQ, ci & ((1u << log) - 1));
 }
