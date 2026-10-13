@@ -1,8 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * The GDA engine's bnxt part (KNOD_PERSIST_FMT_BNXT_P5): an RX ring and its
- * CQ, a TX ring and its CQ, and no doorbell records - every ring rings at the
- * one doorbell register.  The hooks gda_engine.h calls.
+ * The GDA engine's bnxt part (KNOD_PERSIST_FMT_BNXT_P5, _P7): an RX ring and
+ * its CQ, a TX ring and its CQ, and no doorbell records - every ring rings at
+ * the one doorbell register.  The hooks gda_engine.h calls.  BNXT_GEN says
+ * which: P7 puts the ring's pass in a doorbell's index, completes RX in its
+ * V3 format and can complete TX coalesced.
  *
  * bnxt reads a full ring as an empty one, so the RQ has more entries than are
  * ever posted: every one is written once, entry i with page i modulo the
@@ -13,6 +15,10 @@
 
 #include "gda.h"
 #include "bnxt.h"
+
+#if BNXT_GEN != 5 && BNXT_GEN != 7
+# error "BNXT_GEN is 5 or 7"
+#endif
 
 /* A full SQ is one bnxt reads as empty. */
 #define NIC_SQ_SPARE	1
@@ -41,6 +47,15 @@ static inline GLOBAL uint8_t *bnxt_cmp_at(GLOBAL uint8_t *cq, uint32_t pos,
 static INLINE void bnxt_ring(struct gda *g, uint32_t key, uint32_t idx)
 {
 	put64((GLOBAL void *)GL64(g, DB), (uint64_t)KEY(g, key) << 32 | idx);
+}
+
+/* A free-running @at as a doorbell index, for a ring of @mask + 1 entries:
+ * where in the ring, and on P7 which pass of it, the epoch.
+ */
+static inline uint32_t bnxt_db_idx(uint32_t at, uint32_t mask)
+{
+	return (at & mask) |
+	       (BNXT_GEN == 7 && (at & (mask + 1)) ? KNOD_BNXT_DB_EPOCH : 0);
 }
 
 static INLINE void nic_load(struct gda *g, entry_t e)
@@ -73,7 +88,8 @@ static INLINE void nic_rx_post(struct gda *g)
 	}
 	stores_out();
 	if (!lane_id())
-		bnxt_ring(g, KNOD_PERSIST_DB_RQ, size);
+		bnxt_ring(g, KNOD_PERSIST_DB_RQ,
+			  bnxt_db_idx(size, GL(g, RQ_RING_MASK)));
 }
 
 struct nic_rx {
@@ -114,7 +130,9 @@ static INLINE uint64_t nic_rx_read(struct gda *g, struct nic_rx *rx,
 		*rss = c.w;
 	*page = c.y;
 	return ballot((pos & (GL(g, RQ_SIZE) - 1)) != *page ||
-		      (w & KNOD_BNXT_CMP_TYPE) != KNOD_BNXT_CMP_TYPE_RX_L2);
+		      (w & KNOD_BNXT_CMP_TYPE) !=
+		      (BNXT_GEN == 7 ? KNOD_BNXT_CMP_TYPE_RX_L2_V3 :
+				       KNOD_BNXT_CMP_TYPE_RX_L2));
 }
 
 /*
@@ -150,10 +168,11 @@ static INLINE void nic_rx_release(struct gda *g, uint32_t ci, uint32_t bound)
 	if (lane_id())
 		return;
 	if (cq)
-		bnxt_ring(g, KNOD_PERSIST_DB_RX_CQ, 2 * ci & ((1u << log) - 1));
+		bnxt_ring(g, KNOD_PERSIST_DB_RX_CQ,
+			  bnxt_db_idx(2 * ci, (1u << log) - 1));
 	if (rq)
 		bnxt_ring(g, KNOD_PERSIST_DB_RQ,
-			  (bound + size) & GL(g, RQ_RING_MASK));
+			  bnxt_db_idx(bound + size, GL(g, RQ_RING_MASK)));
 }
 
 /* What the NIC has sent, off the TX CQ: SQ_CC and TX_CI move.  One completion
@@ -171,10 +190,20 @@ static INLINE void nic_tx_reap(struct gda *g, uint32_t pc)
 	if (!n)
 		return;
 	/* Each one's descriptor carries its whole counter: everything up to
-	 * the last one's is sent.
+	 * the last one's is sent.  A coalesced one says where the NIC's
+	 * consumer is instead: widened to the producer, never an SQ ahead.
 	 */
 	ORDER();
 	done = __builtin_amdgcn_readlane(get32(&c->opaque), n - 1) + 1;
+	if (BNXT_GEN == 7) {
+		uint32_t last = __builtin_amdgcn_readlane(get32(&c->flags_type),
+							  n - 1);
+
+		if ((last & KNOD_BNXT_CMP_TYPE) == KNOD_BNXT_CMP_TYPE_TX_COAL)
+			done = pc - ((pc - __builtin_amdgcn_readlane(
+					get32(&c->sq_cons_idx), n - 1)) &
+				     GL(g, SQ_MASK));
+	}
 	ci += n;
 	SET(g, SQ_CC, done);
 	SET(g, TX_CI, ci);
@@ -184,7 +213,8 @@ static INLINE void nic_tx_reap(struct gda *g, uint32_t pc)
 		return;
 	SET(g, TX_CQ_TOLD, ci);
 	if (!lane_id())
-		bnxt_ring(g, KNOD_PERSIST_DB_TX_CQ, ci & ((1u << log) - 1));
+		bnxt_ring(g, KNOD_PERSIST_DB_TX_CQ,
+			  bnxt_db_idx(ci, (1u << log) - 1));
 }
 
 /* bnxt's: one descriptor a packet, its counter in the opaque that comes back
@@ -212,7 +242,8 @@ static INLINE void nic_tx_post(struct gda *g, uint32_t counter, uint32_t page,
 static INLINE void nic_tx_ring(struct gda *g, uint32_t pc)
 {
 	if (!lane_id())
-		bnxt_ring(g, KNOD_PERSIST_DB_SQ, pc & GL(g, SQ_MASK));
+		bnxt_ring(g, KNOD_PERSIST_DB_SQ,
+			  bnxt_db_idx(pc, GL(g, SQ_MASK)));
 }
 
 #endif /* KNOD_BLOB_NIC_BNXT_H */

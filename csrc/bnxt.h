@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * What of the bnxt (P5) hardware formats the GDA shader reads and writes: the
+ * What of the bnxt (P5, P7) hardware formats the GDA shader reads and writes: the
  * RX and TX completions it polls and the RX and TX descriptors it posts.
  * The parts of drivers/net/ethernet/broadcom/bnxt/bnxt.h the shader touches;
  * the hardware fixes them, not the kernel.
@@ -21,6 +21,9 @@
 #define KNOD_BNXT_CMP_V			0x1
 #define KNOD_BNXT_CMP_TYPE		0x3f
 #define KNOD_BNXT_CMP_TYPE_RX_L2	17
+#define KNOD_BNXT_CMP_TYPE_RX_L2_V3	23	/* P7's */
+#define KNOD_BNXT_CMP_TYPE_TX_COAL	2	/* P7's: up to sq_cons_idx */
+#define KNOD_BNXT_TX_CMP_SQ_CONS_MASK	0x00ffffff
 #define KNOD_BNXT_LEN_SHIFT		16
 
 #define KNOD_BNXT_RX_BD_PACKET		0x4
@@ -30,6 +33,9 @@
 #define KNOD_BNXT_TX_BD_NO_CMPL		0x80
 #define KNOD_BNXT_TX_BD_CNT_SHIFT	8
 #define KNOD_BNXT_TX_BD_LHINT_SHIFT	13
+
+/* P7: a doorbell's index carries the pass of the ring it is on here. */
+#define KNOD_BNXT_DB_EPOCH		(1u << 24)
 
 #ifndef __ASSEMBLY__
 #include <linux/types.h>
