@@ -8,10 +8,13 @@
  * the control block - and the waves meet in a few bytes of LDS past the
  * program's stack, four barriers a round.
  *
- * RQ entry i always holds RX page i.  The NIC consumes the RQ in order and
- * completes the SQ in order, so no page ever needs to move between entries:
- * an entry whose packet went out on the SQ is held until the NIC says it was
- * sent, and the RQ producer stops at the oldest such entry.
+ * RQ entry i always holds RX page i - on bnxt, whose RQ has more entries than
+ * are ever posted, page i modulo the posted count.  The NIC consumes the RQ in
+ * order and completes the SQ in order, so no page ever needs to move between
+ * entries: an entry whose packet went out on the SQ is held until the NIC
+ * says it was sent, and the RQ producer stops at the oldest such entry.
+ *
+ * The NIC's formats are mlx5's or bnxt's, by the queue's entry.
  *
  * src/gda_engine.S calls gda_init() once, then every round gda_round_begin(),
  * the program and gda_round_end().  What lasts from one call to the next is
@@ -23,6 +26,7 @@
  */
 #include <linux/knod_persistent.h>
 #include <linux/knod_mlx5.h>
+#include <linux/knod_bnxt.h>
 #include "map.h"
 
 #define LDS		__attribute__((address_space(3)))
@@ -93,7 +97,10 @@ enum {
 	GL_LAST_BOUND,		/* debug: the RQ bound last written */
 	GL_CI,			/* CQ consumer index, every wave in step */
 	GL_RING,		/* doorbell records, RQ, CQs: the ring buffer */
-	GL_COUNT = GL_RING + 2,
+	GL_FMT = GL_RING + 2,	/* KNOD_PERSIST_FMT_*: the NIC's formats */
+	GL_RQ_RING_MASK,	/* bnxt: RQ entries - 1, more than are posted */
+	GL_KEY,			/* bnxt: each ring's doorbell key, high half */
+	GL_COUNT = GL_KEY + KNOD_PERSIST_DB_KEYS,
 };
 _Static_assert(GL_COUNT <= 64, "a lane each");
 
@@ -132,6 +139,9 @@ struct gda {
 #define GL64(g, f)	((uint64_t)__builtin_amdgcn_readlane((g)->s,	\
 							 GL_##f + 1) << 32 |	\
 			 (uint32_t)__builtin_amdgcn_readlane((g)->s, GL_##f))
+#define KEY(g, k)	__builtin_amdgcn_readlane((g)->s, GL_KEY + (k))
+#define SET_KEY(g, e, k)						\
+	((g)->s = writelane((g)->s, get64(&(e)->db_key[k]) >> 32, GL_KEY + (k)))
 #define SET(g, f, v)	((g)->s = writelane((g)->s, (v), GL_##f))
 #define SET64(g, f, v)	do {						\
 	uint64_t __v = (v);						\
@@ -246,6 +256,33 @@ static inline uint32_t wqe_counter(uint32_t tail)
 	return __builtin_bswap16(tail & 0xffff);
 }
 
+static INLINE int bnxt(struct gda *g)
+{
+	return GL(g, FMT) == KNOD_PERSIST_FMT_BNXT;
+}
+
+/* bnxt: a completion entry is ours when its valid bit is set on the ring's
+ * even passes and clear on its odd ones; @pos counts entries.
+ */
+static inline int bnxt_ours(uint32_t v, uint32_t pos, uint32_t log)
+{
+	return (v & KNOD_BNXT_CMP_V) != ((pos >> log) & 1);
+}
+
+static inline GLOBAL uint8_t *bnxt_cmp_at(GLOBAL uint8_t *cq, uint32_t pos,
+					  uint32_t log)
+{
+	return cq + ((pos & ((1u << log) - 1)) << KNOD_BNXT_CMP_SHIFT);
+}
+
+/* bnxt: every ring of the function rings at the one doorbell, which ring in
+ * the key's high half and its index in the low.  Lane 0's.
+ */
+static INLINE void bnxt_ring(struct gda *g, uint32_t key, uint32_t idx)
+{
+	put64((GLOBAL void *)GL64(g, DB), (uint64_t)KEY(g, key) << 32 | idx);
+}
+
 /* What outlives the shader, and what the host reads, to the queue's entry. */
 static INLINE void gda_save(struct gda *g)
 {
@@ -276,6 +313,29 @@ static INLINE __attribute__((noreturn)) void gda_stop(struct gda *g)
 	__builtin_amdgcn_endpgm();
 }
 
+static INLINE void bnxt_tx_reap(struct gda *g)
+{
+	uint32_t ci = GL(g, TX_CI), log = GL(g, TX_CQ_LOG);
+	uint32_t pos = ci + lane_id(), n, done;
+	GLOBAL struct knod_bnxt_tx_cmp *c;
+
+	c = (GLOBAL struct knod_bnxt_tx_cmp *)
+		bnxt_cmp_at(g->ring + KNOD_PERSIST_RING_TX_CQ_OFF, pos, log);
+	n = run_of(ballot(bnxt_ours(get32(&c->errors_v), pos, log)));
+	if (!n)
+		return;
+	/* Each one's descriptor carries its whole counter: everything up to
+	 * the last one's is sent.
+	 */
+	ORDER();
+	done = __builtin_amdgcn_readlane(get32(&c->opaque), n - 1) + 1;
+	ci += n;
+	SET(g, SQ_CC, done);
+	SET(g, TX_CI, ci);
+	if (!lane_id())
+		bnxt_ring(g, KNOD_PERSIST_DB_TX_CQ, ci & ((1u << log) - 1));
+}
+
 /*
  * Take what the NIC has sent off the TX CQ: SQ_CC and TX_CI move.  One CQE
  * per round that sent, on its last WQE, so the run of new ones ends on a
@@ -288,6 +348,10 @@ static INLINE void gda_tx_reap(struct gda *g, uint32_t pc)
 	GLOBAL struct knod_mlx5_cqe64 *c;
 	uint64_t err;
 
+	if (bnxt(g)) {
+		bnxt_tx_reap(g);
+		return;
+	}
 	c = cqe_at(g->ring + KNOD_PERSIST_RING_TX_CQ_OFF, pos, log);
 	tail = cqe_tail(c);
 	n = run_of(ballot(cqe_ours(tail, pos, log)));
@@ -373,6 +437,15 @@ static INLINE void gda_rq_release(struct gda *g)
 
 	if (lane_id())
 		return;
+	if (bnxt(g)) {
+		/* Two entries a packet; then the room, as below. */
+		bnxt_ring(g, KNOD_PERSIST_DB_RX_CQ,
+			  2 * ci & ((1u << GL(g, CQ_LOG)) - 1));
+		stores_out();
+		bnxt_ring(g, KNOD_PERSIST_DB_RQ,
+			  (bound + GL(g, RQ_SIZE)) & GL(g, RQ_RING_MASK));
+		return;
+	}
 	put32(g->ring + KNOD_PERSIST_RING_CQ_DB, bswap32(ci & 0xffffff));
 	/* The CQ's room is out before the RQ entries that fill it, as
 	 * mlx5e_poll_rx_cq() orders them: a NIC that sees the entries first
@@ -424,18 +497,42 @@ static INLINE void gda_post_rq(struct gda *g)
 	uint32_t headroom = GL(g, HEADROOM), stagger = GL(g, STAGGER);
 	uint32_t smask = GL(g, STAGGER_MASK);
 	GLOBAL uint64_t *rx_dma = (GLOBAL uint64_t *)GL64(g, RX_DMA);
-	uint32_t i;
+	uint32_t i, p;
 
-	for (i = lane_id(); i < size; i += 64) {
-		uint64_t a = rx_dma[i] + headroom + stagger * (i & smask);
+	if (bnxt(g)) {
+		/* Every entry, each with the page it always holds; the first
+		 * size of them posted.
+		 */
+		for (i = lane_id(); i <= GL(g, RQ_RING_MASK); i += 64) {
+			uint64_t a;
 
-		put128(g->ring + KNOD_PERSIST_RING_RQ_OFF + (i << stride_log),
-		       (v4u){ frag, mkey, bswap32(a >> 32), bswap32(a) });
+			p = i & (size - 1);
+			a = rx_dma[p] + headroom + stagger * (p & smask);
+			put128(g->ring + KNOD_PERSIST_RING_RQ_OFF +
+			       (i << KNOD_BNXT_BD_SHIFT),
+			       (v4u){ get32(&e->frag) << KNOD_BNXT_LEN_SHIFT |
+				      KNOD_BNXT_RX_BD_PACKET |
+				      KNOD_BNXT_RX_BD_EOP, p, a, a >> 32 });
+		}
+		stores_out();
+		if (!lane_id())
+			bnxt_ring(g, KNOD_PERSIST_DB_RQ, size);
+	} else {
+		for (i = lane_id(); i < size; i += 64) {
+			uint64_t a = rx_dma[i] + headroom +
+				     stagger * (i & smask);
+
+			put128(g->ring + KNOD_PERSIST_RING_RQ_OFF +
+			       (i << stride_log),
+			       (v4u){ frag, mkey, bswap32(a >> 32),
+				      bswap32(a) });
+		}
+		stores_out();
+		if (!lane_id())
+			put32(g->ring + KNOD_PERSIST_RING_RQ_DB, bswap32(size));
 	}
-	stores_out();
 	if (lane_id())
 		return;
-	put32(g->ring + KNOD_PERSIST_RING_RQ_DB, bswap32(size));
 	put64(&e->ci, (uint64_t)get32(&e->gen) << 32);
 	put32(&e->pass_floor, GL(g, PASS_FLOOR));
 	stores_out();
@@ -473,8 +570,14 @@ v4u cfn_gda_init(ctl_t ctl, uint32_t queue, uint32_t wave)
 	if (!get32(&e->live) || wave >= waves)
 		__builtin_amdgcn_endpgm();
 
+	SET(&g, FMT, get32(&e->fmt));
 	SET(&g, RQ_LOG, get32(&e->rq_log));
 	SET(&g, RQ_SIZE, 1u << get32(&e->rq_log));
+	SET(&g, RQ_RING_MASK, (1u << get32(&e->rq_ring_log)) - 1);
+	SET_KEY(&g, e, KNOD_PERSIST_DB_RQ);
+	SET_KEY(&g, e, KNOD_PERSIST_DB_RX_CQ);
+	SET_KEY(&g, e, KNOD_PERSIST_DB_SQ);
+	SET_KEY(&g, e, KNOD_PERSIST_DB_TX_CQ);
 	SET(&g, CQ_LOG, get32(&e->cq_log));
 	SET(&g, HEADROOM, get32(&e->headroom));
 	SET64(&g, RX_DMA, get64(&e->rx_dma));
@@ -619,9 +722,10 @@ static INLINE v16u gda_round_begin(ctl_t ctl, uint32_t queue, uint32_t wave,
 				   int ordered)
 {
 	struct gda g = { .s = s, .packets = (uint64_t)pk_hi << 32 | pk_lo };
-	uint32_t pos, tail, run, n, full, i, waves, idle, len, page, off, idx;
-	uint32_t rank = 0;
-	GLOBAL struct knod_mlx5_cqe64 *c;
+	uint32_t pos, run, n, full, i, waves, idle, len, page, off, idx;
+	uint32_t rank = 0, rss = 0, tail = 0, w, log;
+	GLOBAL struct knod_mlx5_cqe64 *c = 0;
+	GLOBAL struct knod_bnxt_rx_cmp *b = 0;
 	uint64_t mine, page_base, param, ctx, bad;
 	v16u r;
 
@@ -642,10 +746,24 @@ static INLINE v16u gda_round_begin(ctl_t ctl, uint32_t queue, uint32_t wave,
 		 * completes, its opcode and its owner bit.
 		 */
 		pos = GL(&g, CI) + 64 * g.wave + lane_id();
-		c = cqe_at(g.ring + KNOD_PERSIST_RING_CQ_OFF, pos,
-			   GL(&g, CQ_LOG));
-		tail = cqe_tail(c);
-		run = run_of(ballot(cqe_ours(tail, pos, GL(&g, CQ_LOG))));
+		log = GL(&g, CQ_LOG);
+		if (bnxt(&g)) {
+			/* Both halves of completion ci + 64w + i, entries
+			 * 2(ci + 64w + i) and the next: each has a valid bit.
+			 */
+			b = (GLOBAL struct knod_bnxt_rx_cmp *)
+				bnxt_cmp_at(g.ring + KNOD_PERSIST_RING_CQ_OFF,
+					    2 * pos, log);
+			w = get32(&((GLOBAL struct knod_bnxt_rx_cmp_ext *)
+				    (b + 1))->errors_v2);
+			run = run_of(ballot(bnxt_ours(get32(&b->misc_v1),
+						      2 * pos, log) &&
+					    bnxt_ours(w, 2 * pos + 1, log)));
+		} else {
+			c = cqe_at(g.ring + KNOD_PERSIST_RING_CQ_OFF, pos, log);
+			tail = cqe_tail(c);
+			run = run_of(ballot(cqe_ours(tail, pos, log)));
+		}
 		if (!lane_id())
 			g.meet->n[g.wave] = run;
 		/* Maps the host changed while we were parked, and anything
@@ -698,15 +816,30 @@ static INLINE v16u gda_round_begin(ctl_t ctl, uint32_t queue, uint32_t wave,
 	 * both together can take a new owner with the previous byte count.
 	 */
 	ORDER();
-	len = bswap32(get32(&c->byte_cnt));
+	if (bnxt(&g)) {
+		/* The RX descriptor's opaque is its page.  Anything but a
+		 * plain RX completion would be the rings out of step.
+		 */
+		w = get32(&b->len_flags_type);
+		len = w >> KNOD_BNXT_LEN_SHIFT;
+		if (ordered)
+			rss = get32(&b->rss_hash);
+		page = get32(&b->opaque);
+		bad = ballot((pos & (GL(&g, RQ_SIZE) - 1)) != page ||
+			     (w & KNOD_BNXT_CMP_TYPE) !=
+			     KNOD_BNXT_CMP_TYPE_RX_L2) & lanes_below(mine);
+	} else {
+		len = bswap32(get32(&c->byte_cnt));
+		if (ordered)
+			rss = get32(&c->rss_hash_result);
+		/* The RQ entry this CQE completes, and so the page: entry i
+		 * is page i.
+		 */
+		page = wqe_counter(tail);
+		bad = ballot((pos & 0xffff) != page) & lanes_below(mine);
+	}
 	if (ordered)
-		gda_rank(&g, get32(&c->rss_hash_result), mine, n, &rank);
-
-	/* The RQ entry this CQE completes, and so the page: entry i is page
-	 * i.
-	 */
-	page = wqe_counter(tail);
-	bad = ballot((pos & 0xffff) != page) & lanes_below(mine);
+		gda_rank(&g, rss, mine, n, &rank);
 	if (bad)
 		gda_sync_dbg(&g, bad, pos, page);
 	page &= GL(&g, RQ_SIZE) - 1;
@@ -930,6 +1063,28 @@ static INLINE void gda_post_wqe(struct gda *g, uint32_t counter, uint32_t page,
 	put128(wqe + offsetof(struct knod_mlx5_send_wqe, data), u.v[2]);
 }
 
+/* bnxt's: one descriptor a packet, its counter in the opaque that comes back
+ * in the completion, and only the round's last asking for one.
+ */
+static INLINE void bnxt_post_bd(struct gda *g, uint32_t counter, uint32_t page,
+				uint32_t off, uint32_t len, int signal)
+{
+	GLOBAL uint64_t *rx_dma = (GLOBAL uint64_t *)GL64(g, RX_DMA);
+	GLOBAL uint8_t *bd = (GLOBAL uint8_t *)GL64(g, SQ) +
+		((counter & GL(g, SQ_MASK)) << KNOD_BNXT_BD_SHIFT);
+	uint64_t addr = rx_dma[page] + off;
+	uint32_t hint = len >> 9;
+
+	/* What bnxt_lhint_arr[] has: up to 512, 1023, 2047 and the rest. */
+	hint = hint >= 4 ? 3 : hint >= 2 ? 2 : hint;
+	put128(bd, (v4u){ len << KNOD_BNXT_LEN_SHIFT |
+			  1 << KNOD_BNXT_TX_BD_CNT_SHIFT |
+			  hint << KNOD_BNXT_TX_BD_LHINT_SHIFT |
+			  KNOD_BNXT_TX_BD_PACKET_END |
+			  (signal ? 0 : KNOD_BNXT_TX_BD_NO_CMPL),
+			  counter, addr, addr >> 32 });
+}
+
 /*
  * Carry out the program's verdicts: what it sent goes on the SQ, what it
  * passed to the host's PASS ring, and wave 0 tells the NIC and the host and
@@ -988,7 +1143,8 @@ v4u cfn_gda_round_end(ctl_t ctl, uint32_t queue, uint32_t wave, uint32_t s,
 		if (i < g.wave)
 			pbase += p;
 	}
-	left = GL(&g, SQ_MASK) - (pc - cc) + 1;
+	/* bnxt reads a full ring as an empty one: one entry short of it. */
+	left = GL(&g, SQ_MASK) - (pc - cc) + !bnxt(&g);
 	x = gda_share(&g, left);
 
 	/* Each WQE says which RQ position its packet came in on, so that
@@ -998,9 +1154,12 @@ v4u cfn_gda_round_end(ctl_t ctl, uint32_t queue, uint32_t wave, uint32_t s,
 	pos = GL(&g, CI) + 64 * g.wave + lane_id();
 	if (x.mine && ((tx >> lane_id()) & 1) && rank(tx) < x.mine) {
 		uint32_t counter = pc + x.base + rank(tx);
+		int last = g.wave == x.last && rank(tx) == x.mine - 1;
 
-		gda_post_wqe(&g, counter, page, off, len,
-			     g.wave == x.last && rank(tx) == x.mine - 1);
+		if (bnxt(&g))
+			bnxt_post_bd(&g, counter, page, off, len, last);
+		else
+			gda_post_wqe(&g, counter, page, off, len, last);
 		put32(g.ring + KNOD_PERSIST_RING_RQPOS_OFF +
 		      4 * (counter & GL(&g, SQ_MASK)), pos);
 	}
@@ -1049,19 +1208,26 @@ v4u cfn_gda_round_end(ctl_t ctl, uint32_t queue, uint32_t wave, uint32_t s,
 			SET64(&g, TX_PKTS, GL64(&g, TX_PKTS) + x.given);
 			pc += x.given;
 			SET(&g, SQ_PC, pc);
-			/* The record, then the doorbell: the last WQE's first
-			 * eight bytes, which are all a function of its counter.
-			 */
-			if (!lane_id())
-				put32(g.ring + KNOD_PERSIST_RING_SQ_DB,
-				      bswap32(pc & 0xffff));
-			stores_out();
-			if (!lane_id())
-				put64((GLOBAL void *)GL64(&g, DB),
-				      (uint64_t)bswap32(GL(&g, SQN) << 8 |
-							SEND_DS) << 32 |
-				      bswap32(((pc - 1) & 0xffff) << 8 |
-					      KNOD_MLX5_OPCODE_SEND));
+			if (bnxt(&g)) {
+				if (!lane_id())
+					bnxt_ring(&g, KNOD_PERSIST_DB_SQ,
+						  pc & GL(&g, SQ_MASK));
+			} else {
+				/* The record, then the doorbell: the last
+				 * WQE's first eight bytes, which are all a
+				 * function of its counter.
+				 */
+				if (!lane_id())
+					put32(g.ring + KNOD_PERSIST_RING_SQ_DB,
+					      bswap32(pc & 0xffff));
+				stores_out();
+				if (!lane_id())
+					put64((GLOBAL void *)GL64(&g, DB),
+					      (uint64_t)bswap32(GL(&g, SQN) << 8 |
+								SEND_DS) << 32 |
+					      bswap32(((pc - 1) & 0xffff) << 8 |
+						      KNOD_MLX5_OPCODE_SEND));
+			}
 		}
 	}
 

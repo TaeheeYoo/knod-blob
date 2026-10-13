@@ -6,7 +6,7 @@
  * The control block, and each queue's entry in it, which the host fills and
  * the engine in knod-blob's csrc/gda.c runs from.
  */
-#define KNOD_PERSIST_VERSION 0x4b50000e
+#define KNOD_PERSIST_VERSION 0x4b50000f
 #define KNOD_PERSIST_MAX_QUEUES 32
 /* What a shader that appends PASS entries the host waits on interrupts with;
  * the low 23 bits are all an interrupt carries on every generation.
@@ -35,6 +35,15 @@
 #define KNOD_PERSIST_SYNC_HITS		0
 #define KNOD_PERSIST_SYNC_ENTRIES	1	/* s2's low, the CQE's high */
 #define KNOD_PERSIST_BYTES 16384
+/* The NIC formats a queue's rings are in. */
+#define KNOD_PERSIST_FMT_MLX5 0		/* linux/knod_mlx5.h */
+#define KNOD_PERSIST_FMT_BNXT 1		/* linux/knod_bnxt.h */
+/* db_key[]: what bnxt rings each of a queue's rings with, its index ORed in. */
+#define KNOD_PERSIST_DB_RQ 0
+#define KNOD_PERSIST_DB_RX_CQ 1
+#define KNOD_PERSIST_DB_SQ 2
+#define KNOD_PERSIST_DB_TX_CQ 3
+#define KNOD_PERSIST_DB_KEYS 4
 /* The ring buffer's layout, as net/knod.h lays it out for the NIC (the kernel
  * checks the two agree): doorbell records, then the RQ, then its CQ, then the
  * XDP SQ's CQ.
@@ -75,6 +84,12 @@ struct knod_persistent_gda {
 	 * of the same generation can pick it up.
 	 */
 	__u32 gen;
+	__u32 fmt;		/* KNOD_PERSIST_FMT_* */
+	/* bnxt: the RQ has more entries than rq_log's, which are all that are
+	 * ever posted; entry i holds page i & ((1 << rq_log) - 1).
+	 */
+	__u32 rq_ring_log;
+	__u64 db_key[KNOD_PERSIST_DB_KEYS];
 	__u64 rx_base;		/* the RX buffer, page 0 */
 	__u32 ci;		/* CQ consumer index, carried over */
 	__u32 posted_gen;	/* the generation the RQ was posted for */
