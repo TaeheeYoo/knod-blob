@@ -16,8 +16,9 @@ Most of it is C, compiled by clang for the GPU:
   rings look like is its `csrc/nic_<vendor>.h`'s, and `csrc/gda_<format>.c`
   puts the two together into the engine for one NIC format
   (`KNOD_PERSIST_FMT_*`); every format's engine is in every build, and the
-  kernel runs the NIC's.  `csrc/gda.h` is what they share, `csrc/gda_order.c`
-  the ordered engine's gate.
+  kernel runs the NIC's: mlx5 (ConnectX-5 on), bnxt (P5, P7) and ice (E810).
+  `csrc/gda.h` is what they share, `csrc/gda_order.c` the ordered engine's
+  gate.
 - `csrc/map_hash.c`, `csrc/map_array.c` — the map lookups, updates and
   deletes a program calls in place of the BPF helpers.
 - `csrc/xdp.c` — `bpf_xdp_adjust_head()` and `bpf_xdp_adjust_tail()`.
