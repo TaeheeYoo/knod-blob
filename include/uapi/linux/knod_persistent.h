@@ -35,8 +35,9 @@
 #define KNOD_PERSIST_SYNC_HITS		0
 #define KNOD_PERSIST_SYNC_ENTRIES	1	/* s2's low, the CQE's high */
 #define KNOD_PERSIST_BYTES 16384
-/* The NIC formats a queue's rings are in: a vendor's, of a generation of its
- * hardware, as each generation can change them.  Zero is none.
+/* The NIC formats a queue's rings can be in: a vendor's, of a generation of
+ * its hardware, as each generation can change them.  An engine is built for
+ * each, and the kernel runs the one of the NIC's.  Zero is none.
  */
 #define KNOD_PERSIST_FMT_NONE 0
 #define KNOD_PERSIST_FMT_MLX5_CX5 1	/* ConnectX-5 on, cyclic RQ: csrc/mlx5.h */
@@ -87,11 +88,11 @@ struct knod_persistent_gda {
 	 * of the same generation can pick it up.
 	 */
 	__u32 gen;
-	__u32 fmt;		/* KNOD_PERSIST_FMT_* */
 	/* bnxt: the RQ has more entries than rq_log's, which are all that are
 	 * ever posted; entry i holds page i & ((1 << rq_log) - 1).
 	 */
 	__u32 rq_ring_log;
+	__u32 pad2;
 	__u64 db_key[KNOD_PERSIST_DB_KEYS];
 	__u64 rx_base;		/* the RX buffer, page 0 */
 	__u32 ci;		/* CQ consumer index, carried over */
