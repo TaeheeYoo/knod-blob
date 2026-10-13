@@ -35,9 +35,12 @@
 #define KNOD_PERSIST_SYNC_HITS		0
 #define KNOD_PERSIST_SYNC_ENTRIES	1	/* s2's low, the CQE's high */
 #define KNOD_PERSIST_BYTES 16384
-/* The NIC formats a queue's rings are in. */
-#define KNOD_PERSIST_FMT_MLX5 0		/* linux/knod_mlx5.h */
-#define KNOD_PERSIST_FMT_BNXT 1		/* linux/knod_bnxt.h */
+/* The NIC formats a queue's rings are in: a vendor's, of a generation of its
+ * hardware, as each generation can change them.  Zero is none.
+ */
+#define KNOD_PERSIST_FMT_NONE 0
+#define KNOD_PERSIST_FMT_MLX5_CX5 1	/* ConnectX-5 on, cyclic RQ: csrc/mlx5.h */
+#define KNOD_PERSIST_FMT_BNXT_P5 2	/* BCM5750x (Thor): csrc/bnxt.h */
 /* db_key[]: what bnxt rings each of a queue's rings with, its index ORed in. */
 #define KNOD_PERSIST_DB_RQ 0
 #define KNOD_PERSIST_DB_RX_CQ 1

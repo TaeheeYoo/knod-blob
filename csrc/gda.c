@@ -25,9 +25,9 @@
  * than a function gets without a stack.
  */
 #include <linux/knod_persistent.h>
-#include <linux/knod_mlx5.h>
-#include <linux/knod_bnxt.h>
 #include "map.h"
+#include "mlx5.h"
+#include "bnxt.h"
 
 #define LDS		__attribute__((address_space(3)))
 /* Into the three functions the engine calls: a call out of one would be to
@@ -258,7 +258,7 @@ static inline uint32_t wqe_counter(uint32_t tail)
 
 static INLINE int bnxt(struct gda *g)
 {
-	return GL(g, FMT) == KNOD_PERSIST_FMT_BNXT;
+	return GL(g, FMT) == KNOD_PERSIST_FMT_BNXT_P5;
 }
 
 /* bnxt: a completion entry is ours when its valid bit is set on the ring's
@@ -567,7 +567,9 @@ v4u cfn_gda_init(ctl_t ctl, uint32_t queue, uint32_t wave)
 	wave = uniform32(wave);
 	e = &ctl->gda[queue];
 	waves = get32(&ctl->gda_waves);
-	if (!get32(&e->live) || wave >= waves)
+	if (!get32(&e->live) || wave >= waves ||
+	    (get32(&e->fmt) != KNOD_PERSIST_FMT_MLX5_CX5 &&
+	     get32(&e->fmt) != KNOD_PERSIST_FMT_BNXT_P5))
 		__builtin_amdgcn_endpgm();
 
 	SET(&g, FMT, get32(&e->fmt));

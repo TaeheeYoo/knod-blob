@@ -1,15 +1,15 @@
-/* SPDX-License-Identifier: ((GPL-2.0 WITH Linux-syscall-note) OR BSD-3-Clause) */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * What of the bnxt (P5) hardware formats the GDA shader reads and writes: the
  * RX and TX completions it polls and the RX and TX descriptors it posts.
- * Copies of the parts of drivers/net/ethernet/broadcom/bnxt/bnxt.h the shader
- * touches, which the driver checks against its own.
+ * The parts of drivers/net/ethernet/broadcom/bnxt/bnxt.h the shader touches;
+ * the hardware fixes them, not the kernel.
  *
  * Every field is little endian, as the hardware has it.
  */
 
-#ifndef _UAPI_LINUX_KNOD_BNXT_H
-#define _UAPI_LINUX_KNOD_BNXT_H
+#ifndef KNOD_BLOB_BNXT_H
+#define KNOD_BLOB_BNXT_H
 
 /* A completion ring entry, and a descriptor, are 1 << 4 bytes.  An RX
  * completion takes two entries and a TX completion one.
@@ -66,4 +66,4 @@ struct knod_bnxt_bd {
 };
 #endif /* !__ASSEMBLY__ */
 
-#endif /* _UAPI_LINUX_KNOD_BNXT_H */
+#endif /* KNOD_BLOB_BNXT_H */

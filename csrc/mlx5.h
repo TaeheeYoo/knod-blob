@@ -1,15 +1,15 @@
-/* SPDX-License-Identifier: ((GPL-2.0 WITH Linux-syscall-note) OR BSD-3-Clause) */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * What of the mlx5 hardware formats the GDA shader reads and writes: the
- * completion it polls and the send WQE it posts.  Copies of the parts of
- * include/linux/mlx5/{device,qp}.h the shader touches, which the kernel
- * checks field by field against those.
+ * completion it polls and the send WQE it posts.  The parts of
+ * include/linux/mlx5/{device,qp}.h the shader touches; the hardware fixes
+ * them, not the kernel.
  *
  * Every multi-byte field is big endian, as the hardware has it.
  */
 
-#ifndef _UAPI_LINUX_KNOD_MLX5_H
-#define _UAPI_LINUX_KNOD_MLX5_H
+#ifndef KNOD_BLOB_MLX5_H
+#define KNOD_BLOB_MLX5_H
 
 /* op_own: the CQE's owner bit low, its opcode in the high nibble. */
 #define KNOD_MLX5_CQE_OWNER_MASK	0x01
@@ -69,4 +69,4 @@ struct knod_mlx5_send_wqe {
 };
 #endif /* !__ASSEMBLY__ */
 
-#endif /* _UAPI_LINUX_KNOD_MLX5_H */
+#endif /* KNOD_BLOB_MLX5_H */

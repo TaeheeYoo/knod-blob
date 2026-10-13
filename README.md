@@ -35,10 +35,12 @@ would touch what the JIT holds or need more stack than a call gets;
 ## Contract
 
 `include/uapi/linux/` holds the kernel's own headers: `knod_blob.h` (the
-container, the register binding, the map descriptor), `knod_persistent.h` (the
-engine's control block) and `knod_mlx5.h` (the parts of the NIC's formats the
-engine writes, which the mlx5 driver checks against its own).  The kernel
-refuses a blob of another `KNOD_BLOB_ABI_VERSION`.
+container, the register binding, the map descriptor) and `knod_persistent.h`
+(the engine's control block).  The kernel refuses a blob of another
+`KNOD_BLOB_ABI_VERSION`.
+
+The NICs' ring formats the engine reads and writes are the hardware's, not
+the kernel's, and live with the engine: `csrc/mlx5.h` and `csrc/bnxt.h`.
 
 ## Requires
 
