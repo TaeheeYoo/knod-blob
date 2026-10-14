@@ -70,12 +70,7 @@ enum {
 	GL_LAST_BOUND,		/* debug: the RQ bound last written */
 	GL_CI,			/* CQ consumer index, every wave in step */
 	GL_RING,		/* doorbell records, RQ, CQs: the ring buffer */
-	GL_RQ_RING_MASK = GL_RING + 2,	/* bnxt's: RQ entries - 1 */
-	GL_KEY,			/* bnxt's: each ring's doorbell key, high half */
-	GL_CQ_TOLD = GL_KEY + KNOD_PERSIST_DB_KEYS,	/* bnxt's: CI the NIC has */
-	GL_TX_CQ_TOLD,		/* bnxt's: TX_CI the NIC has */
-	GL_RQ_TOLD,		/* bnxt's: the RQ bound the NIC has */
-	GL_COUNT,
+	GL_COUNT = GL_RING + 2,
 };
 _Static_assert(GL_COUNT <= 64, "a lane each");
 
@@ -114,7 +109,6 @@ struct gda {
 #define GL64(g, f)	((uint64_t)__builtin_amdgcn_readlane((g)->s,	\
 							 GL_##f + 1) << 32 |	\
 			 (uint32_t)__builtin_amdgcn_readlane((g)->s, GL_##f))
-#define KEY(g, k)	__builtin_amdgcn_readlane((g)->s, GL_KEY + (k))
 #define SET(g, f, v)	((g)->s = writelane((g)->s, (v), GL_##f))
 #define SET64(g, f, v)	do {						\
 	uint64_t __v = (v);						\
