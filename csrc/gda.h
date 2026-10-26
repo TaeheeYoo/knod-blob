@@ -76,6 +76,8 @@ enum {
 	GL_CQ_TOLD = GL_KEY + KNOD_PERSIST_DB_KEYS,	/* bnxt's: CI the NIC has */
 	GL_TX_CQ_TOLD,		/* bnxt's: TX_CI the NIC has */
 	GL_RQ_TOLD,		/* bnxt's: the RQ bound the NIC has */
+	GL_IPSEC_SA,		/* the IPsec engine's: its SA table */
+	GL_IPSEC_SA_MASK = GL_IPSEC_SA + 2,
 	GL_COUNT,
 };
 _Static_assert(GL_COUNT <= 64, "a lane each");

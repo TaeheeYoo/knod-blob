@@ -158,6 +158,43 @@ static INLINE void gda_post_rq(struct gda *g)
 	stores_out();
 }
 
+#ifdef GDA_IPSEC
+/* The AES T-tables in LDS, past where the waves meet. */
+static INLINE LDS uint32_t *gda_ipsec_ttab(struct gda *g)
+{
+	return (LDS uint32_t *)(uintptr_t)
+		(uniform32(GL(g, LDS)) + KNOD_PERSIST_GDA_LDS_BYTES);
+}
+
+/* Every wave's share of the T-tables into LDS, once for the shader. */
+static INLINE void gda_ipsec_load(struct gda *g, ctl_t ctl)
+{
+	GLOBAL const uint32_t *src =
+		(GLOBAL const uint32_t *)get64(&ctl->ipsec_ttab);
+	LDS uint32_t *t = gda_ipsec_ttab(g);
+	uint32_t i;
+
+	SET64(g, IPSEC_SA, get64(&ctl->ipsec_sa));
+	SET(g, IPSEC_SA_MASK, get32(&ctl->ipsec_sa_mask));
+	for (i = 64 * g->wave + lane_id();
+	     i < KNOD_PERSIST_GDA_IPSEC_TTAB_BYTES / 4; i += 64 * GL(g, WAVES))
+		t[i] = src[i];
+}
+
+/*
+ * A passed packet the wave is on, from its RX page to its staging page: @src
+ * and @dst at the sixteen bytes it starts in, the packet @off past them and
+ * @len long.  An ESP packet of an SA in the table is decrypted on the way.  Returns its PASS entry's KNOD_PERSIST_PASS_IPSEC*
+ * bits, zero for one left for the plain copy.
+ */
+static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL const uint8_t *src,
+				    GLOBAL uint8_t *dst, uint32_t off,
+				    uint32_t len)
+{
+	return 0;
+}
+#endif
+
 /*
  * Pick up the rings where the last shader left them, or post them afresh for
  * a new build.  A wave the queue does not need, or a queue whose rings the NIC
@@ -228,6 +265,9 @@ v4u GDA_FN(gda_init)(ctl_t ctl, uint32_t queue, uint32_t wave)
 	 */
 	SET(&g, LAST_BOUND, fresh ? 0 : get32(&e->rq_bound));
 	gda_load(&g, ctl, queue, wave);
+#ifdef GDA_IPSEC
+	gda_ipsec_load(&g, ctl);
+#endif
 
 	/* LDS starts undefined: no stop until wave 0 says so.  Every wave has
 	 * read the entry before wave 0 writes it.
@@ -425,6 +465,7 @@ v16u GDA_FN(gda_round_begin)(ctl_t ctl, uint32_t queue, uint32_t wave,
 	return gda_round_begin(ctl, queue, wave, s, pk_lo, pk_hi, 0);
 }
 
+#ifndef GDA_IPSEC
 v16u GDA_FN(gda_round_begin_ordered)(ctl_t ctl, uint32_t queue,
 				      uint32_t wave, uint32_t s,
 				      uint32_t pk_lo, uint32_t pk_hi)
@@ -479,6 +520,8 @@ v2u GDA_FN(gda_parked)(ctl_t ctl, uint32_t queue, uint32_t wave, uint32_t s,
 	return r;
 }
 
+#endif
+
 /* Fold each wave's XDP_TX into the SQ's room, in wave order, so the WQEs
  * follow the packets' order on the RQ.
  */
@@ -526,7 +569,7 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 	struct gda g = { .s = s, .packets = (uint64_t)pk_hi << 32 | pk_lo };
 	uint64_t live = (uint64_t)uniform32(hi) << 32 | uniform32(lo);
 	uint32_t pc, cc, left, ppc, pbase = 0, ptotal = 0, i, p, n, pos;
-	uint32_t room, pcc, slot;
+	uint32_t room, pcc, slot, meta = 0;
 	int in = (live >> lane_id()) & 1;
 	uint64_t tx, pass, copy;
 	struct gda_share x;
@@ -624,12 +667,21 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 		dst = (GLOBAL uint8_t *)GL64(&g, PASS_STAGE) +
 		      ((uint64_t)__builtin_amdgcn_readlane(slot, l) <<
 		       GL(&g, PAGE_SHIFT)) + from;
+#ifdef GDA_IPSEC
+		b = gda_ipsec_rx(&g, src, dst, __builtin_amdgcn_readlane(off, l) -
+				 from, __builtin_amdgcn_readlane(len, l));
+		if (lane_id() == l)
+			meta = b;
+		if (b)
+			continue;
+#endif
 		for (b = 16 * lane_id(); b < to - from; b += 1024)
 			put128(dst + b, get128(src + b));
 	}
 	if (((pass >> lane_id()) & 1) && pbase + rank(pass) < room)
 		put64((GLOBAL uint64_t *)GL64(&g, PASS_RING) + slot,
-		      (uint64_t)(off | len << 16) << 32 | nic_rx_csum(&g, pos));
+		      (uint64_t)(off | len << 16) << 32 | nic_rx_csum(&g, pos) |
+		      meta);
 
 	/* Every wave's entries are in memory before wave 0 says they are. */
 	stores_out();
