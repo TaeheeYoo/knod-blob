@@ -428,6 +428,19 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 		fail |= (acc[i] ^ x[i]) !=
 			aes_bswap32(gda_ld32u(f + ESP_DATA + clen + 4 * i));
 
+	/* The last packet whose ICV failed: its sequence number, the GHASH
+	 * sum and E(J0) as the wave made them, for the host to check.
+	 */
+	if (uniform32(fail) && !lane) {
+		GLOBAL uint32_t *dbg = g->entry->regress_dbg;
+
+		put32(&dbg[0], aes_bswap32(seq));
+		for (i = 0; i < 4; i++)
+			put32(&dbg[1 + i], acc[i]);
+		for (i = 0; i < 3; i++)
+			put32(&dbg[5 + i], x[i]);
+	}
+
 	return KNOD_PERSIST_PASS_IPSEC | slot << KNOD_PERSIST_PASS_IPSEC_SA_SHIFT |
 	       (uniform32(fail) ? KNOD_PERSIST_PASS_IPSEC_FAIL : 0);
 }
