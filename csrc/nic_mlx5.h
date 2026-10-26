@@ -109,6 +109,20 @@ static INLINE uint64_t nic_rx_read(struct gda *g, struct nic_rx *rx,
 	return ballot((pos & 0xffff) != *page);
 }
 
+/* Completion @pos's checksums: KNOD_PERSIST_PASS_CSUM_OK if the NIC found
+ * the IP and L4 ones good.
+ */
+static INLINE uint32_t nic_rx_csum(struct gda *g, uint32_t pos)
+{
+	GLOBAL struct knod_mlx5_cqe64 *c =
+		cqe_at(g->ring + KNOD_PERSIST_RING_CQ_OFF, pos, GL(g, CQ_LOG));
+	uint32_t ok = KNOD_MLX5_CQE_L3_OK | KNOD_MLX5_CQE_L4_OK;
+
+	_Static_assert(offsetof(struct knod_mlx5_cqe64, hds_ip_ext) % 4 == 0,
+		       "the low byte of a dword");
+	return (get32(&c->hds_ip_ext) & ok) == ok ? KNOD_PERSIST_PASS_CSUM_OK : 0;
+}
+
 /* Wave 0's: the CQ entries back up to @ci and the RQ ones up to @bound. */
 static INLINE void nic_rx_release(struct gda *g, uint32_t ci, uint32_t bound)
 {

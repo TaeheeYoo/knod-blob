@@ -30,6 +30,7 @@
  *   nic_rx_post()	post every RQ entry, fresh rings
  *   nic_rx_poll()	whether the lane's completion is done
  *   nic_rx_read()	its length, flow and page, and lanes out of step
+ *   nic_rx_csum()	what the NIC found of a passed packet's checksums
  *   nic_rx_release()	wave 0: CQ and RQ entries back to the NIC
  *   nic_tx_reap()	what the NIC sent, off the TX CQ
  *   nic_tx_post()	one packet's send descriptor
@@ -56,6 +57,7 @@ static INLINE void gda_save(struct gda *g)
 				 GL(g, TX_GEN) });
 	put32(&e->rq_bound, GL(g, LAST_BOUND));
 	put32(&e->tx_dead, GL(g, TX_DEAD));
+	put64(&e->pass_full, GL64(g, PASS_FULL));
 }
 
 /* Wave 0 leaving: the others are told at the barrier they wait at, then where
@@ -90,39 +92,23 @@ static INLINE void gda_regress_dbg(struct gda *g, uint32_t bound, uint32_t prev,
 
 /*
  * Hand the CQ entries back up to CI, and the RQ entries up to the oldest one
- * whose packet is still waiting to be sent or copied out.
+ * whose packet is still waiting to be sent.  What passed to the host was
+ * copied out in its round.
  */
 static INLINE void gda_rq_release(struct gda *g)
 {
 	uint32_t ci = GL(g, CI), pc = GL(g, SQ_PC), cc = GL(g, SQ_CC);
-	uint32_t bound = ci, ppc, pcc, floor, cand = 0, prev;
+	uint32_t bound = ci, prev;
 
 	if (pc != cc)
 		bound = get32(g->ring + KNOD_PERSIST_RING_RQPOS_OFF +
 			      4 * (cc & GL(g, SQ_MASK)));
 
-	/* The oldest packet the host is still copying out, if that is older. */
-	ppc = GL(g, PASS_PC);
-	pcc = GL(g, PASS_CC);
-	if (ppc != pcc) {
-		pcc = get32(&g->entry->pass_cc);
-		floor = GL(g, PASS_FLOOR);
-		if ((int32_t)(pcc - floor) < 0)
-			pcc = floor;
-		SET(g, PASS_CC, pcc);
-		if (ppc != pcc) {
-			cand = get32(g->ring + KNOD_PERSIST_RING_PASS_RQPOS_OFF +
-				     4 * (pcc & GL(g, PASS_MASK)));
-			if (ci - cand > ci - bound)
-				bound = cand;
-		}
-	}
-
 	/* Debug: the bound only ever moves on; count one that goes back. */
 	prev = GL(g, LAST_BOUND);
 	SET(g, LAST_BOUND, bound);
 	if ((int32_t)(bound - prev) < 0)
-		gda_regress_dbg(g, bound, prev, pcc, cand);
+		gda_regress_dbg(g, bound, prev, 0, 0);
 
 	nic_rx_release(g, ci, bound);
 }
@@ -168,7 +154,6 @@ static INLINE void gda_post_rq(struct gda *g)
 	if (lane_id())
 		return;
 	put64(&e->ci, (uint64_t)get32(&e->gen) << 32);
-	put32(&e->pass_floor, GL(g, PASS_FLOOR));
 	put32(&e->rq_bound, 0);
 	stores_out();
 }
@@ -183,7 +168,7 @@ v4u GDA_FN(gda_init)(ctl_t ctl, uint32_t queue, uint32_t wave)
 	struct gda g = { .s = 0 };
 	entry_t e;
 	uint64_t sq, db;
-	uint32_t mask, pcc, floor, waves;
+	uint32_t mask, waves;
 	int fresh;
 
 	ctl = (ctl_t)uniform64((uint64_t)ctl);
@@ -221,12 +206,11 @@ v4u GDA_FN(gda_init)(ctl_t ctl, uint32_t queue, uint32_t wave)
 	}
 
 	SET64(&g, PASS_RING, get64(&e->pass_ring));
+	SET64(&g, PASS_STAGE, get64(&e->pass_stage));
+	SET64(&g, PASS_FULL, get64(&e->pass_full));
 	SET(&g, PASS_MASK, get32(&e->pass_mask));
 	SET(&g, PASS_PC, get32(&e->pass_pc));
-	pcc = get32(&e->pass_cc);
-	floor = get32(&e->pass_floor);
-	SET(&g, PASS_FLOOR, floor);
-	SET(&g, PASS_CC, (int32_t)(pcc - floor) < 0 ? floor : pcc);
+	SET(&g, PASS_CC, get32(&e->pass_pc) - get32(&e->pass_mask) - 1);
 	SET(&g, STAGGER, get32(&e->stagger));
 	SET(&g, STAGGER_MASK, get32(&e->stagger_mask));
 	SET64(&g, ROUNDS, get64(&e->rounds));
@@ -257,11 +241,6 @@ v4u GDA_FN(gda_init)(ctl_t ctl, uint32_t queue, uint32_t wave)
 	 */
 	if (fresh) {
 		SET(&g, CI, 0);
-		/* What the host still copies out came in on the last build's
-		 * RQ.
-		 */
-		SET(&g, PASS_FLOOR, GL(&g, PASS_PC));
-		SET(&g, PASS_CC, GL(&g, PASS_PC));
 		if (!wave)
 			gda_post_rq(&g);
 	}
@@ -381,11 +360,8 @@ static INLINE v16u gda_round_begin(ctl_t ctl, uint32_t queue, uint32_t wave,
 		if (n)
 			break;
 
-		if (!g.wave &&
-		    (GL(&g, PASS_PC) != GL(&g, PASS_CC) ||
-		     GL(&g, SQ_PC) != GL(&g, SQ_CC))) {
-			if (GL(&g, SQ_PC) != GL(&g, SQ_CC))
-				nic_tx_reap(&g, GL(&g, SQ_PC));
+		if (!g.wave && GL(&g, SQ_PC) != GL(&g, SQ_CC)) {
+			nic_tx_reap(&g, GL(&g, SQ_PC));
 			gda_rq_release(&g);
 		}
 		idle = GL(&g, IDLE_ROUNDS);
@@ -550,8 +526,9 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 	struct gda g = { .s = s, .packets = (uint64_t)pk_hi << 32 | pk_lo };
 	uint64_t live = (uint64_t)uniform32(hi) << 32 | uniform32(lo);
 	uint32_t pc, cc, left, ppc, pbase = 0, ptotal = 0, i, p, n, pos;
+	uint32_t room, pcc, slot;
 	int in = (live >> lane_id()) & 1;
-	uint64_t tx, pass;
+	uint64_t tx, pass, copy;
 	struct gda_share x;
 
 	ctl = (ctl_t)uniform64((uint64_t)ctl);
@@ -576,10 +553,23 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 		/* A dead SQ has room for none: the waves see it full. */
 		if (GL(&g, TX_DEAD))
 			cc = pc - GL(&g, SQ_MASK) - 1;
+		/* The PASS slots free: what the host had finished with when
+		 * last looked, and a look past the ring for more only when
+		 * that might not do for a whole round.
+		 */
+		ppc = GL(&g, PASS_PC);
+		pcc = GL(&g, PASS_CC);
+		if (GL(&g, PASS_MASK) + 1 - (ppc - pcc) < 64 * GL(&g, WAVES)) {
+			pcc = get32((GLOBAL uint8_t *)GL64(&g, PASS_RING) +
+				    8 * (GL(&g, PASS_MASK) + 1) +
+				    KNOD_PERSIST_PASS_CC);
+			SET(&g, PASS_CC, pcc);
+		}
 		if (!lane_id()) {
 			g.meet->sq_pc = pc;
 			g.meet->sq_cc = cc;
-			g.meet->pass_pc = GL(&g, PASS_PC);
+			g.meet->pass_pc = ppc;
+			g.meet->pass_room = GL(&g, PASS_MASK) + 1 - (ppc - pcc);
 		}
 	}
 	barrier();
@@ -587,6 +577,8 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 	pc = g.meet->sq_pc;
 	cc = g.meet->sq_cc;
 	ppc = g.meet->pass_pc;
+	room = g.meet->pass_room;
+	ptotal = 0;
 	for (i = 0; i < KNOD_PERSIST_GDA_WAVES_MAX; i++) {
 		p = i < GL(&g, WAVES) ? g.meet->p[i] : 0;
 		ptotal += p;
@@ -610,24 +602,44 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 		      4 * (counter & GL(&g, SQ_MASK)), pos);
 	}
 
-	/* One PASS entry per lane that passes: the page, where the packet is
-	 * in it and how long; and the RQ position it holds until the host is
-	 * done.
+	/* The packets that pass and find a slot go to it, at their offset in
+	 * the RX page, one at a time with the whole wave on each: a lane per
+	 * sixteen bytes, so each access is the packet's next kilobyte in one
+	 * piece rather than sixty-four pieces of sixty-four packets.  Then
+	 * each lane's entry.  The RX pages are free once this round ends.
 	 */
-	if ((pass >> lane_id()) & 1) {
-		uint32_t slot = (ppc + pbase + rank(pass)) & GL(&g, PASS_MASK);
+	slot = (ppc + pbase + rank(pass)) & GL(&g, PASS_MASK);
+	copy = ballot(((pass >> lane_id()) & 1) && pbase + rank(pass) < room);
+	while (copy) {
+		uint32_t l = __builtin_ctzll(copy), from, to, b;
+		GLOBAL uint8_t *src, *dst;
 
-		put64((GLOBAL uint64_t *)GL64(&g, PASS_RING) + slot,
-		      (uint64_t)(off | len << 16) << 32 | page);
-		put32(g.ring + KNOD_PERSIST_RING_PASS_RQPOS_OFF + 4 * slot,
-		      pos);
+		copy &= copy - 1;
+		from = __builtin_amdgcn_readlane(off, l) & ~15u;
+		to = (__builtin_amdgcn_readlane(off, l) +
+		      __builtin_amdgcn_readlane(len, l) + 15) & ~15u;
+		src = (GLOBAL uint8_t *)GL64(&g, RX_BASE) +
+		      ((uint64_t)__builtin_amdgcn_readlane(page, l) <<
+		       GL(&g, PAGE_SHIFT)) + from;
+		dst = (GLOBAL uint8_t *)GL64(&g, PASS_STAGE) +
+		      ((uint64_t)__builtin_amdgcn_readlane(slot, l) <<
+		       GL(&g, PAGE_SHIFT)) + from;
+		for (b = 16 * lane_id(); b < to - from; b += 1024)
+			put128(dst + b, get128(src + b));
 	}
+	if (((pass >> lane_id()) & 1) && pbase + rank(pass) < room)
+		put64((GLOBAL uint64_t *)GL64(&g, PASS_RING) + slot,
+		      (uint64_t)(off | len << 16) << 32 | nic_rx_csum(&g, pos));
 
 	/* Every wave's entries are in memory before wave 0 says they are. */
 	stores_out();
 	barrier();
 
 	if (!g.wave) {
+		if (ptotal > room) {
+			SET64(&g, PASS_FULL, GL64(&g, PASS_FULL) + ptotal - room);
+			ptotal = room;
+		}
 		if (ptotal) {
 			ppc += ptotal;
 			SET(&g, PASS_PC, ppc);

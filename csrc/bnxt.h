@@ -19,6 +19,11 @@
 
 /* Every completion entry's third dword: set on the ring's even passes. */
 #define KNOD_BNXT_CMP_V			0x1
+/* rx_cmp_ext's: checksums the NIC checked, and found wrong. */
+#define KNOD_BNXT_RX_L4_CS_CALC		(1 << 1)
+#define KNOD_BNXT_RX_T_L4_CS_CALC	(1 << 3)
+#define KNOD_BNXT_RX_L4_CS_ERROR	(1 << 5)
+#define KNOD_BNXT_RX_T_L4_CS_ERROR	(1 << 7)
 #define KNOD_BNXT_CMP_TYPE		0x3f
 #define KNOD_BNXT_CMP_TYPE_RX_L2	17
 #define KNOD_BNXT_CMP_TYPE_RX_L2_V3	23	/* P7's */

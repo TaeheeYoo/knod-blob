@@ -60,10 +60,11 @@ enum {
 	GL_STAGGER = GL_ROUNDS + 2,
 	GL_STAGGER_MASK,
 	GL_PASS_PC,		/* PASS entries appended, free-running */
-	GL_PASS_CC,		/* ...the host has finished with, or the floor */
-	GL_PASS_FLOOR,		/* entries before it are an earlier build's */
+	GL_PASS_CC,		/* ...the host had finished with, last looked */
 	GL_PASS_RING,
-	GL_PASS_MASK = GL_PASS_RING + 2,
+	GL_PASS_STAGE = GL_PASS_RING + 2,	/* where PASS packets go */
+	GL_PASS_FULL = GL_PASS_STAGE + 2,	/* PASS dropped for want of a slot */
+	GL_PASS_MASK = GL_PASS_FULL + 2,
 	GL_WAKE,		/* the host waits for PASS entries */
 	GL_IDLE_ROUNDS,		/* consecutive empty rounds */
 	GL_TX_DEAD,		/* the SQ went to error: nothing more on it */
@@ -83,6 +84,7 @@ _Static_assert(GL_COUNT <= 64, "a lane each");
 struct gda_meet {
 	uint32_t cmd;		/* nonzero: stop */
 	uint32_t pass_pc;	/* PASS entries appended before this round */
+	uint32_t pass_room;	/* ...and the slots free for this one */
 	uint32_t sq_pc;
 	uint32_t sq_cc;
 	uint32_t n[KNOD_PERSIST_GDA_WAVES_MAX];	/* each wave's run of CQEs */
@@ -149,6 +151,12 @@ static inline void put64(GLOBAL void *p, uint64_t v)
 static inline void put128(GLOBAL void *p, v4u v)
 {
 	__builtin_nontemporal_store(v, (GLOBAL v4u *)p);
+}
+
+/* A packet's bytes: whatever the NIC last wrote there. */
+static inline v4u get128(GLOBAL const void *p)
+{
+	return __builtin_nontemporal_load((GLOBAL const v4u *)p);
 }
 
 static inline uint32_t get32(GLOBAL const void *p)
