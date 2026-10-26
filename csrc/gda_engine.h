@@ -189,6 +189,51 @@ static INLINE LDS uint8_t *gda_ipsec_buf(struct gda *g)
 }
 
 /* Every wave's share of the T-tables into LDS, once for the shader. */
+/*
+ * One GHASH multiply of a block and a power of H whose product is known,
+ * 7fa7556c 9f9d5948 7e9647a8 8d07009e: lane 2's with every lane on, then
+ * with lanes 2 to 5 only, for the host to compare.
+ */
+static INLINE void gda_ipsec_selftest(struct gda *g)
+{
+	GLOBAL uint32_t *dbg = g->entry->regress_dbg;
+	uint32_t x[4] = { 0x9efb6e92, 0xf2a5c819, 0xa261843f, 0x23242599 };
+	uint32_t h[4] = { 0x8d5cfb91, 0x4a74e95b, 0xd37d2cc1, 0x222e97ab };
+	uint32_t z[8] = { 0 }, o[4], r[4], lane = lane_id(), i;
+
+	for (i = 0; i < 4; i++) {
+		GCM_HERE(x[i]);
+		GCM_HERE(h[i]);
+	}
+	gcm_mul_add(z, x, h);
+	gcm_reduce(o, z);
+	for (i = 0; i < 4; i++)
+		r[i] = __builtin_amdgcn_readlane(o[i], 2);
+
+	for (i = 0; i < 8; i++)
+		z[i] = 0;
+	for (i = 0; i < 4; i++) {
+		GCM_HERE(x[i]);
+		GCM_HERE(h[i]);
+	}
+	if (lane >= 2 && lane < 6) {
+		gcm_mul_add(z, x, h);
+		gcm_reduce(o, z);
+	}
+	if (g->wave || g->queue)
+		return;
+	if (!lane) {
+		put32(&dbg[0], 0x5e1f7e57);
+		for (i = 0; i < 4; i++)
+			put32(&dbg[1 + i], r[i]);
+	}
+	for (i = 0; i < 3; i++)
+		o[i] = __builtin_amdgcn_readlane(o[i], 2);
+	if (!lane)
+		for (i = 0; i < 3; i++)
+			put32(&dbg[5 + i], o[i]);
+}
+
 static INLINE void gda_ipsec_load(struct gda *g, ctl_t ctl)
 {
 	GLOBAL const uint32_t *src =
@@ -300,7 +345,6 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 	GLOBAL const uint8_t *hpow;
 	uint32_t tot, clen, n, m, rounds, salt, iv_lo, iv_hi, spi, seq;
 	uint32_t z[8] = { 0 }, acc[4], x[4], c[4], k[4], j, b, i, w, fail;
-	uint32_t dl2[4];
 	uint32_t base, from, to, nb, lane = lane_id();
 	int slot, d, lim;
 
@@ -408,8 +452,6 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 
 	/* Every lane's sum: each half's in each of its lanes, then the two. */
 	gcm_reduce(acc, z);
-	for (w = 0; w < 4; w++)
-		dl2[w] = __builtin_amdgcn_readlane(acc[w], 2);
 #pragma unroll
 	for (w = 0; w < 4; w++) {
 		acc[w] ^= __builtin_amdgcn_ds_swizzle(acc[w], GDA_SWIZZLE_XOR(16));
@@ -430,19 +472,6 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 	for (i = 0; i < 4; i++)
 		fail |= (acc[i] ^ x[i]) !=
 			aes_bswap32(gda_ld32u(f + ESP_DATA + clen + 4 * i));
-
-	/* The last packet whose ICV failed: its sequence number, lane 2's
-	 * GHASH term and the wave's sum, for the host to check.
-	 */
-	if (uniform32(fail) && !lane) {
-		GLOBAL uint32_t *dbg = g->entry->regress_dbg;
-
-		put32(&dbg[0], aes_bswap32(seq));
-		for (i = 0; i < 4; i++)
-			put32(&dbg[1 + i], dl2[i]);
-		for (i = 0; i < 3; i++)
-			put32(&dbg[5 + i], acc[i]);
-	}
 
 	return KNOD_PERSIST_PASS_IPSEC | slot << KNOD_PERSIST_PASS_IPSEC_SA_SHIFT |
 	       (uniform32(fail) ? KNOD_PERSIST_PASS_IPSEC_FAIL : 0);
@@ -521,6 +550,7 @@ v4u GDA_FN(gda_init)(ctl_t ctl, uint32_t queue, uint32_t wave)
 	gda_load(&g, ctl, queue, wave);
 #ifdef GDA_IPSEC
 	gda_ipsec_load(&g, ctl);
+	gda_ipsec_selftest(&g);
 #endif
 
 	/* LDS starts undefined: no stop until wave 0 says so.  Every wave has
