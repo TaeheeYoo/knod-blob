@@ -300,6 +300,7 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 	GLOBAL const uint8_t *hpow;
 	uint32_t tot, clen, n, m, rounds, salt, iv_lo, iv_hi, spi, seq;
 	uint32_t z[8] = { 0 }, acc[4], x[4], c[4], k[4], j, b, i, w, fail;
+	uint32_t dl0[4], dl2[4];
 	uint32_t base, from, to, nb, lane = lane_id();
 	int slot, d, lim;
 
@@ -407,6 +408,10 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 
 	/* Every lane's sum: each half's in each of its lanes, then the two. */
 	gcm_reduce(acc, z);
+	for (w = 0; w < 4; w++) {
+		dl0[w] = __builtin_amdgcn_readlane(acc[w], 0);
+		dl2[w] = __builtin_amdgcn_readlane(acc[w], 2);
+	}
 #pragma unroll
 	for (w = 0; w < 4; w++) {
 		acc[w] ^= __builtin_amdgcn_ds_swizzle(acc[w], GDA_SWIZZLE_XOR(16));
@@ -428,17 +433,18 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 		fail |= (acc[i] ^ x[i]) !=
 			aes_bswap32(gda_ld32u(f + ESP_DATA + clen + 4 * i));
 
-	/* The last packet whose ICV failed: its sequence number, the GHASH
-	 * sum and E(J0) as the wave made them, for the host to check.
+	/* The last packet whose ICV failed: its sequence number, and lane 0's
+	 * and lane 2's GHASH terms before the wave adds them up, for the host
+	 * to check.
 	 */
 	if (uniform32(fail) && !lane) {
 		GLOBAL uint32_t *dbg = g->entry->regress_dbg;
 
 		put32(&dbg[0], aes_bswap32(seq));
 		for (i = 0; i < 4; i++)
-			put32(&dbg[1 + i], acc[i]);
+			put32(&dbg[1 + i], dl0[i]);
 		for (i = 0; i < 3; i++)
-			put32(&dbg[5 + i], x[i]);
+			put32(&dbg[5 + i], dl2[i]);
 	}
 
 	return KNOD_PERSIST_PASS_IPSEC | slot << KNOD_PERSIST_PASS_IPSEC_SA_SHIFT |
