@@ -212,7 +212,7 @@ static INLINE uint32_t gda_ld32u(GLOBAL const uint8_t *p)
 	GLOBAL const uint32_t *w = (GLOBAL const uint32_t *)(a & ~(uintptr_t)3);
 	uint32_t lo = get32(w), hi = get32(w + 1);
 
-	return a & 3 ? __builtin_amdgcn_alignbyte(hi, lo, (a & 3) * 8) : lo;
+	return a & 3 ? __builtin_amdgcn_alignbyte(hi, lo, a & 3) : lo;
 }
 
 static INLINE uint32_t gda_be16(GLOBAL const uint8_t *p)
@@ -244,7 +244,7 @@ static INLINE uint32_t gda_ipsec_take(LDS const uint8_t *buf, uint32_t raw,
 	LDS const uint32_t *w = (LDS const uint32_t *)buf;
 	int a = q >> 2;
 	uint32_t lo = w[a < 0 ? 0 : a], hi = w[a + 1 < 0 ? 0 : a + 1];
-	uint32_t v = __builtin_amdgcn_alignbyte(hi, lo, 8 * (q & 3));
+	uint32_t v = __builtin_amdgcn_alignbyte(hi, lo, q & 3);
 	uint32_t m = ~0u;
 
 	if (q < 0)
