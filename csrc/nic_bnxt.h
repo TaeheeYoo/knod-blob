@@ -135,6 +135,23 @@ static INLINE uint64_t nic_rx_read(struct gda *g, struct nic_rx *rx,
 				       KNOD_BNXT_CMP_TYPE_RX_L2));
 }
 
+/* Completion @pos's checksums, out of its second half: whether the NIC
+ * checked the L4 one, the inner one under a tunnel too, and found it good.
+ */
+static INLINE uint32_t nic_rx_csum(struct gda *g, uint32_t pos)
+{
+	GLOBAL struct knod_bnxt_rx_cmp_ext *x = (GLOBAL struct knod_bnxt_rx_cmp_ext *)
+		bnxt_cmp_at(g->ring + KNOD_PERSIST_RING_CQ_OFF, 2 * pos + 1,
+			    GL(g, CQ_LOG));
+	uint32_t flags = get32(&x->flags2), errors = get32(&x->errors_v2);
+
+	if (!(flags & (KNOD_BNXT_RX_L4_CS_CALC | KNOD_BNXT_RX_T_L4_CS_CALC)) ||
+	    (errors & (KNOD_BNXT_RX_L4_CS_ERROR | KNOD_BNXT_RX_T_L4_CS_ERROR)))
+		return 0;
+	return KNOD_PERSIST_PASS_CSUM_OK |
+	       (flags & KNOD_BNXT_RX_T_L4_CS_CALC ? KNOD_PERSIST_PASS_CSUM_INNER : 0);
+}
+
 /*
  * How far behind the CQ's consumer the NIC may be told it is.  The NIC drops
  * nothing for a CQ it thinks full, it overruns it, so what it has completed

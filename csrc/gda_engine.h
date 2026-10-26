@@ -30,6 +30,7 @@
  *   nic_rx_post()	post every RQ entry, fresh rings
  *   nic_rx_poll()	whether the lane's completion is done
  *   nic_rx_read()	its length, flow and page, and lanes out of step
+ *   nic_rx_csum()	what the NIC found of a passed packet's checksums
  *   nic_rx_release()	wave 0: CQ and RQ entries back to the NIC
  *   nic_tx_reap()	what the NIC sent, off the TX CQ
  *   nic_tx_post()	one packet's send descriptor
@@ -628,7 +629,7 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 	}
 	if (((pass >> lane_id()) & 1) && pbase + rank(pass) < room)
 		put64((GLOBAL uint64_t *)GL64(&g, PASS_RING) + slot,
-		      (uint64_t)(off | len << 16) << 32);
+		      (uint64_t)(off | len << 16) << 32 | nic_rx_csum(&g, pos));
 
 	/* Every wave's entries are in memory before wave 0 says they are. */
 	stores_out();

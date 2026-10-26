@@ -28,10 +28,15 @@
 #include <linux/types.h>
 
 /* struct mlx5_cqe64, down to what a completion is read for. */
+#define KNOD_MLX5_CQE_L3_OK	(1 << 1)
+#define KNOD_MLX5_CQE_L4_OK	(1 << 2)
+
 struct knod_mlx5_cqe64 {
 	__u8	rsvd0[12];
 	__be32	rss_hash_result;
-	__u8	rsvd16[28];
+	__u8	rsvd16[12];
+	__u8	hds_ip_ext;		/* KNOD_MLX5_CQE_L3_OK, _L4_OK */
+	__u8	rsvd29[15];
 	__be32	byte_cnt;
 	__u8	rsvd48[12];
 	__be16	wqe_counter;
