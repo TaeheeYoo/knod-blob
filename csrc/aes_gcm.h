@@ -15,7 +15,7 @@
  * multiply has no carry-less instruction to use: as in BearSSL's
  * ghash_ctmul32, carry-less 32x32 products come out of integer multiplies of
  * operands with holes in them, Karatsuba takes them to 128x128, and the
- * product is reduced.
+ * product, or a sum of them, is reduced.
  *
  * AES_TAB and AES_RK say where the tables and the round keys are; the GPU puts
  * the tables in LDS and reads the round keys from constant memory.
@@ -120,91 +120,132 @@ AES_INLINE void gcm_to_ghash(uint32_t out[4], const uint32_t in[4])
 	out[3] = aes_bswap32(in[3]);
 }
 
-/* Carry-less 32x32 -> 64 multiply, from integer multiplies of operands with
- * every fourth bit kept: no carry crosses into a kept bit.
+/* A value the compiler must take as made here, in order with the others: it
+ * would run every product at once, for the latency, and want more registers
+ * than a wave with the round in its others has.
  */
-AES_INLINE uint64_t gcm_bmul32(uint32_t x, uint32_t y)
+#ifdef __AMDGPU__
+#define GCM_HERE(v)	__asm__ volatile("" : "+v"(v))
+#else
+#define GCM_HERE(v)	do { } while (0)
+#endif
+
+/* The low half of a carry-less 32x32 multiply, from integer multiplies of
+ * operands with every fourth bit kept: no carry crosses into a kept bit.
+ */
+AES_INLINE uint32_t gcm_bmul32(uint32_t x, uint32_t y)
 {
 	uint32_t x0 = x & 0x11111111, x1 = x & 0x22222222;
 	uint32_t x2 = x & 0x44444444, x3 = x & 0x88888888;
 	uint32_t y0 = y & 0x11111111, y1 = y & 0x22222222;
 	uint32_t y2 = y & 0x44444444, y3 = y & 0x88888888;
-	uint64_t z0, z1, z2, z3;
+	uint32_t z0, z1, z2, z3;
 
-#define M(a, b)	((uint64_t)(a) * (b))
-	z0 = M(x0, y0) ^ M(x1, y3) ^ M(x2, y2) ^ M(x3, y1);
-	z1 = M(x0, y1) ^ M(x1, y0) ^ M(x2, y3) ^ M(x3, y2);
-	z2 = M(x0, y2) ^ M(x1, y1) ^ M(x2, y0) ^ M(x3, y3);
-	z3 = M(x0, y3) ^ M(x1, y2) ^ M(x2, y1) ^ M(x3, y0);
-#undef M
-	z0 &= 0x1111111111111111ull;
-	z1 &= 0x2222222222222222ull;
-	z2 &= 0x4444444444444444ull;
-	z3 &= 0x8888888888888888ull;
-	return z0 | z1 | z2 | z3;
+	z0 = x0 * y0 ^ x1 * y3 ^ x2 * y2 ^ x3 * y1;
+	GCM_HERE(z0);
+	GCM_HERE(y0);
+	z1 = x0 * y1 ^ x1 * y0 ^ x2 * y3 ^ x3 * y2;
+	GCM_HERE(z1);
+	GCM_HERE(y1);
+	z2 = x0 * y2 ^ x1 * y1 ^ x2 * y0 ^ x3 * y3;
+	GCM_HERE(z2);
+	GCM_HERE(y2);
+	z3 = x0 * y3 ^ x1 * y2 ^ x2 * y1 ^ x3 * y0;
+	return (z0 & 0x11111111) | (z1 & 0x22222222) |
+	       (z2 & 0x44444444) | (z3 & 0x88888888);
 }
 
 /* The 32-bit word with its bits in reverse order. */
 AES_INLINE uint32_t gcm_rev32(uint32_t x)
 {
+#if __has_builtin(__builtin_bitreverse32)
+	return __builtin_bitreverse32(x);
+#else
 	x = (x & 0x55555555) << 1 | (x >> 1 & 0x55555555);
 	x = (x & 0x33333333) << 2 | (x >> 2 & 0x33333333);
 	x = (x & 0x0f0f0f0f) << 4 | (x >> 4 & 0x0f0f0f0f);
 	x = (x & 0x00ff00ff) << 8 | (x >> 8 & 0x00ff00ff);
 	return x << 16 | x >> 16;
+#endif
 }
 
-/* Carry-less 64x64 -> 128, Karatsuba over gcm_bmul32(): @a and @b low word
- * first, @z four words low first.
- */
-AES_INLINE void gcm_clmul64(uint32_t z[4], uint32_t a0, uint32_t a1,
-			    uint32_t b0, uint32_t b1)
-{
-	uint64_t lo = gcm_bmul32(a0, b0), hi = gcm_bmul32(a1, b1);
-	uint64_t mid = gcm_bmul32(a0 ^ a1, b0 ^ b1) ^ lo ^ hi;
-
-	z[0] = (uint32_t)lo;
-	z[1] = (uint32_t)(lo >> 32) ^ (uint32_t)mid;
-	z[2] = (uint32_t)hi ^ (uint32_t)(mid >> 32);
-	z[3] = (uint32_t)(hi >> 32);
-}
 
 /*
- * @x * @h in GF(2^128) with GCM's bit order, to @out.  GCM puts x^0 in the
+ * GHASH's multiply, in GF(2^128) with GCM's bit order.  GCM puts x^0 in the
  * top bit of a block's first byte, so a big-endian word bit-reversed holds
  * x^(32i)..x^(32i+31) from its bit 0: in that order it is a plain carry-less
  * product - Karatsuba twice, nine 32x32 multiplies - reduced by
- * x^128 + x^7 + x^2 + x + 1, and reversed back.
+ * x^128 + x^7 + x^2 + x + 1, and reversed back.  Reducing is linear, so a sum
+ * of products is reduced once: gcm_mul_add() adds @x * @h unreduced to @z,
+ * eight words low first, and gcm_reduce() takes the sum to a block.
+ *
+ * As in BearSSL's ghash_ctmul32, each 32x32 product is two halves of 32 bits:
+ * the low one of the reversed operands, the high one the low one of the
+ * operands as they are, reversed and shifted down one.  Karatsuba's sums are
+ * linear too, so each product goes straight into the words it ends up in:
+ * product 3g + r of the 64x64 multiply g at the words r's and g's offsets add
+ * to, r = 0, 1, 2 at {0, 1}, {1, 2}, {1} and g at {0, 2}, {2, 4}, {2}.
  */
-AES_INLINE void gcm_mul(uint32_t out[4], const uint32_t x[4],
-			const uint32_t h[4])
+AES_INLINE void gcm_mul_add(uint32_t z[8], const uint32_t x[4],
+			    const uint32_t h[4])
 {
-	uint32_t a[4], b[4], l[4], m[4], u[4], z[8], t;
-	int i;
+	static const unsigned char rpos[3] = { 0x3, 0x6, 0x2 };
+	static const unsigned char gpos[3] = { 0x05, 0x14, 0x04 };
+	uint32_t xx[4], hh[4], xa[2], xb[2], ya, yb, lo, hi;
+	int g, r, i, j;
 
 	for (i = 0; i < 4; i++) {
-		a[i] = gcm_rev32(x[i]);
-		b[i] = gcm_rev32(h[i]);
+		xx[i] = x[i];
+		hh[i] = h[i];
 	}
+	for (g = 0; g < 3; g++) {
+		for (i = 0; i < 2; i++) {
+			if (g == 2) {
+				GCM_HERE(xx[i]);
+				GCM_HERE(xx[i + 2]);
+				GCM_HERE(hh[i]);
+				GCM_HERE(hh[i + 2]);
+			}
+			xa[i] = g == 2 ? xx[i] ^ xx[i + 2] : xx[2 * g + i];
+			xb[i] = g == 2 ? hh[i] ^ hh[i + 2] : hh[2 * g + i];
+		}
+		for (r = 0; r < 3; r++) {
+			if (r == 2) {
+				GCM_HERE(xa[0]);
+				GCM_HERE(xa[1]);
+				GCM_HERE(xb[0]);
+				GCM_HERE(xb[1]);
+			}
+			ya = r == 2 ? xa[0] ^ xa[1] : xa[r];
+			yb = r == 2 ? xb[0] ^ xb[1] : xb[r];
+			GCM_HERE(ya);
+			GCM_HERE(yb);
+			lo = gcm_bmul32(gcm_rev32(ya), gcm_rev32(yb));
+			hi = gcm_rev32(gcm_bmul32(ya, yb)) >> 1;
+			for (j = 0; j < 7; j++) {
+				if (!(rpos[r] & (1 << j)))
+					continue;
+				for (i = 0; i + j < 7; i++) {
+					if (!(gpos[g] & (1 << i)))
+						continue;
+					z[i + j] ^= lo;
+					z[i + j + 1] ^= hi;
+				}
+			}
+			GCM_HERE(lo);
+			GCM_HERE(hi);
+		}
+	}
+}
 
-	gcm_clmul64(l, a[0], a[1], b[0], b[1]);
-	gcm_clmul64(u, a[2], a[3], b[2], b[3]);
-	gcm_clmul64(m, a[0] ^ a[2], a[1] ^ a[3], b[0] ^ b[2], b[1] ^ b[3]);
-	for (i = 0; i < 4; i++)
-		m[i] ^= l[i] ^ u[i];
+/* x^128 = x^7 + x^2 + x + 1: fold the top words down, from the top, so what
+ * one fold carries into a top word is folded in turn.
+ */
+AES_INLINE void gcm_reduce(uint32_t out[4], uint32_t z[8])
+{
+	uint32_t t;
+	int i;
 
-	z[0] = l[0];
-	z[1] = l[1];
-	z[2] = l[2] ^ m[0];
-	z[3] = l[3] ^ m[1];
-	z[4] = u[0] ^ m[2];
-	z[5] = u[1] ^ m[3];
-	z[6] = u[2];
-	z[7] = u[3];
-
-	/* x^128 = x^7 + x^2 + x + 1: fold the top words down, from the top,
-	 * so what one fold carries into a top word is folded in turn.
-	 */
 	for (i = 7; i >= 4; i--) {
 		t = z[i];
 		z[i - 4] ^= t ^ t << 1 ^ t << 2 ^ t << 7;
@@ -213,6 +254,16 @@ AES_INLINE void gcm_mul(uint32_t out[4], const uint32_t x[4],
 
 	for (i = 0; i < 4; i++)
 		out[i] = gcm_rev32(z[i]);
+}
+
+/* @x * @h to @out. */
+AES_INLINE void gcm_mul(uint32_t out[4], const uint32_t x[4],
+			const uint32_t h[4])
+{
+	uint32_t z[8] = { 0 };
+
+	gcm_mul_add(z, x, h);
+	gcm_reduce(out, z);
 }
 
 #endif /* KNOD_BLOB_AES_GCM_H */

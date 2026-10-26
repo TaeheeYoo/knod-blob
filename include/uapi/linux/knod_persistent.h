@@ -21,11 +21,14 @@
  */
 #define KNOD_PERSIST_GDA_ORDER_LDS_BYTES 704
 /* ...and what KNOD_BLOB_GDA_ENGINE_IPSEC's need: the AES T-tables, four of
- * 256 words, past the waves' meeting place.
+ * 256 words, past the waves' meeting place; then for each of up to four waves
+ * the aligned window over a kilobyte of payload it decrypts at a time.
  */
 #define KNOD_PERSIST_GDA_IPSEC_TTAB_BYTES 4096
+#define KNOD_PERSIST_GDA_IPSEC_BUF_BYTES 1056
 #define KNOD_PERSIST_GDA_IPSEC_LDS_BYTES \
-	(KNOD_PERSIST_GDA_LDS_BYTES + KNOD_PERSIST_GDA_IPSEC_TTAB_BYTES)
+	(KNOD_PERSIST_GDA_LDS_BYTES + KNOD_PERSIST_GDA_IPSEC_TTAB_BYTES + \
+	 4 * KNOD_PERSIST_GDA_IPSEC_BUF_BYTES)
 #define KNOD_PERSIST_GDA_WAVES_MAX 4
 #define KNOD_PERSIST_GDA_PASS_ENTRIES 16384
 /* regress_dbg[]: an RQ bound older than the one before it. */
@@ -90,6 +93,12 @@
 #define KNOD_PERSIST_PASS_IPSEC_SA(e)	(((e) >> 8) & 0xff)
 /* The IPsec table's entries, a power of two of them, the most a slot holds. */
 #define KNOD_PERSIST_IPSEC_SA_MAX	256
+/* Where an SA is in the table: the SPI's four bytes read as a little-endian
+ * word, hashed to a first slot, and the next ones after it up to the probe
+ * count, wrapping at the table's mask.
+ */
+#define KNOD_PERSIST_IPSEC_SA_HASH(spi)	((__u32)((spi) * 0x9e3779b1u) >> 24)
+#define KNOD_PERSIST_IPSEC_SA_PROBE	8
 #ifndef __ASSEMBLY__
 #include <linux/types.h>
 /* What the shader needs to run a queue's rings, one entry per queue, and what
@@ -174,7 +183,7 @@ struct knod_persistent_gda {
  * last; the engine skips an inactive one.
  */
 struct knod_persistent_ipsec_sa {
-	__u32 spi;		/* as the packet has it, big endian */
+	__u32 spi;		/* the packet's four bytes, read little-endian */
 	__u32 active;
 	__u32 salt;		/* the key's last four bytes, as they come */
 	__u32 rounds;		/* 10, 12 or 14 */

@@ -28,8 +28,9 @@
 	CFN_BODY_gda_round_end_bnxt_p7
 	GDA_ENGINE_END BNXT_P7
 
-	GDA_ENGINE IPSEC_MLX5_CX5, mlx5_cx5_ipsec, 0
+	GDA_ENGINE IPSEC_MLX5_CX5, mlx5_cx5_ipsec, 0, 1
 	CFN_BODY_gda_init_mlx5_cx5_ipsec
 	CFN_BODY_gda_round_begin_mlx5_cx5_ipsec
+	CFN_BODY_gda_ipsec_mlx5_cx5_ipsec
 	CFN_BODY_gda_round_end_mlx5_cx5_ipsec
 	GDA_ENGINE_END IPSEC_MLX5_CX5

@@ -50,9 +50,27 @@
 	s_swappc_b64 s[30:31], s[GT:GT+1]
 .endm
 
+// gda_round_end()'s arguments past the first three: the state, the verdicts
+// and where the packets are now, for a program may have moved their start or
+// end.
+.macro	ROUND_END_ARGS
+	s_mov_b64 exec, -1
+	v_mov_b32 v7, v[BPF_R0]
+	v_mov_b32 v8, v[PAGE_IDX]
+	V_SUB_U32 v9, v[DATA], v[PAGE_BASE]
+	V_SUB_U32 v10, v[DATA_END], v[DATA]
+	v_mov_b32 v11, s[INITIAL_EXEC]
+	v_mov_b32 v12, s[INITIAL_EXEC+1]
+	v_mov_b32 v4, v[GS]
+	v_mov_b32 v5, v[GS+1]
+	v_mov_b32 v6, v[GS+2]
+.endm
+
 // @engine is the symbol, @nic the functions' suffix, @ordered 1 for an
-// ordered engine.
-.macro GDA_ENGINE engine, nic, ordered
+// ordered engine, @ipsec 1 for one that decrypts what passes: gda_ipsec()
+// between the program and gda_round_end(), on the same arguments, and what
+// it returns gda_round_end()'s next.
+.macro GDA_ENGINE engine, nic, ordered, ipsec=0
 	.text
 	.globl \engine
 	.p2align 2
@@ -200,18 +218,12 @@
 	s_mov_b64 s[INITIAL_EXEC:INITIAL_EXEC+1], vcc
 .endif
 
-	// Its verdicts, and where the packets are now: a program may have
-	// moved their start or end.
-	s_mov_b64 exec, -1
-	v_mov_b32 v7, v[BPF_R0]
-	v_mov_b32 v8, v[PAGE_IDX]
-	V_SUB_U32 v9, v[DATA], v[PAGE_BASE]
-	V_SUB_U32 v10, v[DATA_END], v[DATA]
-	v_mov_b32 v11, s[INITIAL_EXEC]
-	v_mov_b32 v12, s[INITIAL_EXEC+1]
-	v_mov_b32 v4, v[GS]
-	v_mov_b32 v5, v[GS+1]
-	v_mov_b32 v6, v[GS+2]
+.if \ipsec
+	ROUND_END_ARGS
+	ENGINE_CALL gda_ipsec_\nic
+	v_mov_b32 v13, v0
+.endif
+	ROUND_END_ARGS
 	ENGINE_CALL gda_round_end_\nic
 	v_mov_b32 v[GS], v0
 	v_mov_b32 v[GS+1], v1
