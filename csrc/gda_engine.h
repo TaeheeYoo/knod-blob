@@ -525,9 +525,9 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 	struct gda g = { .s = s, .packets = (uint64_t)pk_hi << 32 | pk_lo };
 	uint64_t live = (uint64_t)uniform32(hi) << 32 | uniform32(lo);
 	uint32_t pc, cc, left, ppc, pbase = 0, ptotal = 0, i, p, n, pos;
-	uint32_t room, pcc;
+	uint32_t room, pcc, slot;
 	int in = (live >> lane_id()) & 1;
-	uint64_t tx, pass;
+	uint64_t tx, pass, copy;
 	struct gda_share x;
 
 	ctl = (ctl_t)uniform64((uint64_t)ctl);
@@ -601,24 +601,34 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 		      4 * (counter & GL(&g, SQ_MASK)), pos);
 	}
 
-	/* Each lane that passes and finds a slot copies its packet there, at
-	 * its offset in the RX page, sixteen bytes at a time from the sixteen
-	 * before it; then its entry.  The RX page is free once this round
-	 * ends.
+	/* The packets that pass and find a slot go to it, at their offset in
+	 * the RX page, one at a time with the whole wave on each: a lane per
+	 * sixteen bytes, so each access is the packet's next kilobyte in one
+	 * piece rather than sixty-four pieces of sixty-four packets.  Then
+	 * each lane's entry.  The RX pages are free once this round ends.
 	 */
-	if (((pass >> lane_id()) & 1) && pbase + rank(pass) < room) {
-		uint32_t slot = (ppc + pbase + rank(pass)) & GL(&g, PASS_MASK);
-		uint32_t from = off & ~15u, to = (off + len + 15) & ~15u, b;
-		GLOBAL uint8_t *src = (GLOBAL uint8_t *)GL64(&g, RX_BASE) +
-			((uint64_t)page << GL(&g, PAGE_SHIFT)) + from;
-		GLOBAL uint8_t *dst = (GLOBAL uint8_t *)GL64(&g, PASS_STAGE) +
-			((uint64_t)slot << GL(&g, PAGE_SHIFT)) + from;
+	slot = (ppc + pbase + rank(pass)) & GL(&g, PASS_MASK);
+	copy = ballot(((pass >> lane_id()) & 1) && pbase + rank(pass) < room);
+	while (copy) {
+		uint32_t l = __builtin_ctzll(copy), from, to, b;
+		GLOBAL uint8_t *src, *dst;
 
-		for (b = 0; b < to - from; b += 16)
+		copy &= copy - 1;
+		from = __builtin_amdgcn_readlane(off, l) & ~15u;
+		to = (__builtin_amdgcn_readlane(off, l) +
+		      __builtin_amdgcn_readlane(len, l) + 15) & ~15u;
+		src = (GLOBAL uint8_t *)GL64(&g, RX_BASE) +
+		      ((uint64_t)__builtin_amdgcn_readlane(page, l) <<
+		       GL(&g, PAGE_SHIFT)) + from;
+		dst = (GLOBAL uint8_t *)GL64(&g, PASS_STAGE) +
+		      ((uint64_t)__builtin_amdgcn_readlane(slot, l) <<
+		       GL(&g, PAGE_SHIFT)) + from;
+		for (b = 16 * lane_id(); b < to - from; b += 1024)
 			put128(dst + b, get128(src + b));
+	}
+	if (((pass >> lane_id()) & 1) && pbase + rank(pass) < room)
 		put64((GLOBAL uint64_t *)GL64(&g, PASS_RING) + slot,
 		      (uint64_t)(off | len << 16) << 32);
-	}
 
 	/* Every wave's entries are in memory before wave 0 says they are. */
 	stores_out();
