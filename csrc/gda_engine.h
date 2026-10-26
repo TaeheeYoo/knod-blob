@@ -300,6 +300,7 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 	GLOBAL const uint8_t *hpow;
 	uint32_t tot, clen, n, m, rounds, salt, iv_lo, iv_hi, spi, seq;
 	uint32_t z[8] = { 0 }, acc[4], x[4], c[4], k[4], j, b, i, w, fail;
+	uint32_t dl2[4];
 	uint32_t base, from, to, nb, lane = lane_id();
 	int slot, d, lim;
 
@@ -346,21 +347,6 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 			x[i] = aes_bswap32(4 * i >= nb ? 0 :
 					   4 * i + 4 <= nb ? w :
 					   w & ((1u << (8 * (nb - 4 * i))) - 1));
-		}
-		/* The power of H and the block that block 3 multiplies, with
-		 * the packet's sequence number, for the host to check.
-		 */
-		if (j == 3) {
-			GLOBAL uint32_t *dbg = g->entry->regress_dbg;
-			v4u v = *(GLOBAL const v4u *)(hpow + 16 * (m - j - 1));
-
-			put32(&dbg[0], aes_bswap32(seq));
-			put32(&dbg[1], aes_bswap32(v.x));
-			put32(&dbg[2], aes_bswap32(v.y));
-			put32(&dbg[3], aes_bswap32(v.z));
-			put32(&dbg[4], aes_bswap32(v.w));
-			for (i = 0; i < 3; i++)
-				put32(&dbg[5 + i], x[i]);
 		}
 		gda_ghash_add(z, x, hpow, m - j);
 	}
@@ -422,6 +408,8 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 
 	/* Every lane's sum: each half's in each of its lanes, then the two. */
 	gcm_reduce(acc, z);
+	for (w = 0; w < 4; w++)
+		dl2[w] = __builtin_amdgcn_readlane(acc[w], 2);
 #pragma unroll
 	for (w = 0; w < 4; w++) {
 		acc[w] ^= __builtin_amdgcn_ds_swizzle(acc[w], GDA_SWIZZLE_XOR(16));
@@ -442,6 +430,19 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 	for (i = 0; i < 4; i++)
 		fail |= (acc[i] ^ x[i]) !=
 			aes_bswap32(gda_ld32u(f + ESP_DATA + clen + 4 * i));
+
+	/* The last packet whose ICV failed: its sequence number, lane 2's
+	 * GHASH term and the wave's sum, for the host to check.
+	 */
+	if (uniform32(fail) && !lane) {
+		GLOBAL uint32_t *dbg = g->entry->regress_dbg;
+
+		put32(&dbg[0], aes_bswap32(seq));
+		for (i = 0; i < 4; i++)
+			put32(&dbg[1 + i], dl2[i]);
+		for (i = 0; i < 3; i++)
+			put32(&dbg[5 + i], acc[i]);
+	}
 
 	return KNOD_PERSIST_PASS_IPSEC | slot << KNOD_PERSIST_PASS_IPSEC_SA_SHIFT |
 	       (uniform32(fail) ? KNOD_PERSIST_PASS_IPSEC_FAIL : 0);
