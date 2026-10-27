@@ -219,12 +219,9 @@
 .endif
 
 .if \ipsec
-	// Its function has r0's register; the JIT's LDS temporaries keep r0.
 	ROUND_END_ARGS
-	v_mov_b32 v[KNOD_BLOB_PRO_PAGE_IDX_VREG + 1], v[BPF_R0]
 	ENGINE_CALL gda_ipsec_\nic
 	v_mov_b32 v13, v0
-	v_mov_b32 v[BPF_R0], v[KNOD_BLOB_PRO_PAGE_IDX_VREG + 1]
 .endif
 	ROUND_END_ARGS
 	ENGINE_CALL gda_round_end_\nic

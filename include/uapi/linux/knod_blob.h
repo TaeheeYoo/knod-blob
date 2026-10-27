@@ -164,11 +164,6 @@ enum knod_blob_kind {
  */
 #define KNOD_BLOB_JIT_VREG		64
 #define KNOD_BLOB_BPF_VREG(r)		(KNOD_BLOB_JIT_VREG + 2 * (r))
-/* An IPsec engine runs no BPF program, the receive kernel only: its functions
- * have the BPF registers too, below what the engine holds, and the engine
- * keeps r0 out of their way.  One that ran a program would not.
- */
-#define KNOD_BLOB_IPSEC_VREG_TOP	KNOD_BLOB_PRO_OFF_VREG
 
 /*
  * A map routine is a function the JIT calls, compiled from C to the AMDGPU

@@ -27,8 +27,6 @@ CLANG		?= clang
 LLC		?= $(shell $(CLANG) -print-prog-name=llc)
 JIT_VREG	:= $(shell sed -n 's/^\#define KNOD_BLOB_JIT_VREG[[:space:]]*//p' \
 		     include/uapi/linux/knod_blob.h)
-IPSEC_VREG	:= $(shell sed -n 's/^\#define KNOD_BLOB_PRO_OFF_VREG[[:space:]]*\([0-9]*\).*/\1/p' \
-		     include/uapi/linux/knod_blob.h)
 CSRC		:= $(wildcard csrc/*.c)
 BUILD		:= build
 # The preprocessor flags decide what goes in - a probe, or no probe - and they
@@ -114,14 +112,13 @@ define cfn_rules
 #
 # Through the IR, to give every function amdgpu-num-vgpr, which clang takes
 # for kernels only: a function that may not touch the VGPRs from
-# KNOD_BLOB_JIT_VREG up - KNOD_BLOB_IPSEC_VREG_TOP for an IPsec engine's - has
-# to be allocated below them, or a compiler that would rather not save the
-# callee-saved ones under them goes past them.
+# KNOD_BLOB_JIT_VREG up has to be allocated below them, or a compiler that
+# would rather not save the callee-saved ones under them goes past them.
 $(BUILD)/%.$(1).s: csrc/%.c $(wildcard csrc/*.h) $(UAPI_HDRS) | $(BUILD)
 	$(CLANG) -target amdgcn-amd-amdhsa -mcpu=$(CPU_$(1)) -mwavefrontsize64 \
 		-mcumode $(CFN_ATTR_$(1)) -O2 -nogpulib -ffreestanding -fno-builtin \
 		-Wall -Werror -Iinclude/uapi -S -emit-llvm $$< -o $$@.ll
-	sed -E 's/^(attributes #[0-9]+ = \{)/\1 "amdgpu-num-vgpr"="$$(if $$(findstring _ipsec,$$*),$(IPSEC_VREG),$(JIT_VREG))"/' \
+	sed -E 's/^(attributes #[0-9]+ = \{)/\1 "amdgpu-num-vgpr"="$(JIT_VREG)"/' \
 		$$@.ll > $$@.vgpr.ll
 	$(LLC) -O2 $$@.vgpr.ll -o $$@
 
