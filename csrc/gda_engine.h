@@ -749,6 +749,12 @@ static INLINE void gda_copy(GLOBAL uint8_t *dst, GLOBAL const uint8_t *src,
 	uint32_t b, i;
 	v4u r[4];
 
+#ifdef KNOD_GDA_COPY_SIMPLE
+	/* The copy as it was, a kilobyte at a time, to compare. */
+	for (b = 16 * lane_id(); b < n; b += 1024)
+		put128(dst + b, get128(src + b));
+	return;
+#endif
 	for (b = 16 * lane_id(); b < n; b += 4096) {
 #pragma unroll
 		for (i = 0; i < 4; i++)
