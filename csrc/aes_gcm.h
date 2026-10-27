@@ -130,6 +130,23 @@ AES_INLINE void gcm_to_ghash(uint32_t out[4], const uint32_t in[4])
 #define GCM_HERE(v)	do { } while (0)
 #endif
 
+/* Four integer products in their registers before anything after reads
+ * them.  RDNA3 gave a wrong and changing GHASH out of these multiplies back
+ * to back, the compiler's s_delay_alu notwithstanding.
+ */
+AES_INLINE uint32_t gcm_imul4(uint32_t a0, uint32_t b0, uint32_t a1,
+			      uint32_t b1, uint32_t a2, uint32_t b2,
+			      uint32_t a3, uint32_t b3)
+{
+	uint32_t p0 = a0 * b0, p1 = a1 * b1, p2 = a2 * b2, p3 = a3 * b3;
+
+#ifdef __AMDGPU__
+	__asm__("s_waitcnt_depctr depctr_va_vdst(0)"
+		: "+v"(p0), "+v"(p1), "+v"(p2), "+v"(p3));
+#endif
+	return p0 ^ p1 ^ p2 ^ p3;
+}
+
 /* The low half of a carry-less 32x32 multiply, from integer multiplies of
  * operands with every fourth bit kept: no carry crosses into a kept bit.
  */
@@ -141,16 +158,16 @@ AES_INLINE uint32_t gcm_bmul32(uint32_t x, uint32_t y)
 	uint32_t y2 = y & 0x44444444, y3 = y & 0x88888888;
 	uint32_t z0, z1, z2, z3;
 
-	z0 = x0 * y0 ^ x1 * y3 ^ x2 * y2 ^ x3 * y1;
+	z0 = gcm_imul4(x0, y0, x1, y3, x2, y2, x3, y1);
 	GCM_HERE(z0);
 	GCM_HERE(y0);
-	z1 = x0 * y1 ^ x1 * y0 ^ x2 * y3 ^ x3 * y2;
+	z1 = gcm_imul4(x0, y1, x1, y0, x2, y3, x3, y2);
 	GCM_HERE(z1);
 	GCM_HERE(y1);
-	z2 = x0 * y2 ^ x1 * y1 ^ x2 * y0 ^ x3 * y3;
+	z2 = gcm_imul4(x0, y2, x1, y1, x2, y0, x3, y3);
 	GCM_HERE(z2);
 	GCM_HERE(y2);
-	z3 = x0 * y3 ^ x1 * y2 ^ x2 * y1 ^ x3 * y0;
+	z3 = gcm_imul4(x0, y3, x1, y2, x2, y1, x3, y0);
 	return (z0 & 0x11111111) | (z1 & 0x22222222) |
 	       (z2 & 0x44444444) | (z3 & 0x88888888);
 }

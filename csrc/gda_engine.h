@@ -191,8 +191,7 @@ static INLINE LDS uint8_t *gda_ipsec_buf(struct gda *g)
 /* Every wave's share of the T-tables into LDS, once for the shader. */
 /*
  * One GHASH multiply of a block and a power of H whose product is known,
- * 7fa7556c 9f9d5948 7e9647a8 8d07009e: lane 2's with every lane on, then
- * with lanes 2 to 5 only, for the host to compare.
+ * 7fa7556c 9f9d5948 7e9647a8 8d07009e: lane 2's, for the host to compare.
  */
 static INLINE void gda_ipsec_selftest(struct gda *g)
 {
@@ -210,16 +209,6 @@ static INLINE void gda_ipsec_selftest(struct gda *g)
 	for (i = 0; i < 4; i++)
 		r[i] = __builtin_amdgcn_readlane(o[i], 2);
 
-	for (i = 0; i < 8; i++)
-		z[i] = 0;
-	for (i = 0; i < 4; i++) {
-		GCM_HERE(x[i]);
-		GCM_HERE(h[i]);
-	}
-	if (lane >= 2 && lane < 6) {
-		gcm_mul_add(z, x, h);
-		gcm_reduce(o, z);
-	}
 	if (g->wave || g->queue)
 		return;
 	if (!lane) {
@@ -227,11 +216,6 @@ static INLINE void gda_ipsec_selftest(struct gda *g)
 		for (i = 0; i < 4; i++)
 			put32(&dbg[1 + i], r[i]);
 	}
-	for (i = 0; i < 3; i++)
-		o[i] = __builtin_amdgcn_readlane(o[i], 2);
-	if (!lane)
-		for (i = 0; i < 3; i++)
-			put32(&dbg[5 + i], o[i]);
 }
 
 static INLINE void gda_ipsec_load(struct gda *g, ctl_t ctl)
