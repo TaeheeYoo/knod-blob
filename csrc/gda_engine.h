@@ -234,20 +234,35 @@ static INLINE void gda_ghash_add(uint32_t z[8], const uint32_t x[4],
 	gcm_mul_add(z, x, h);
 }
 
-/*
- * Four bytes of what goes out at @raw's place, @q bytes into the payload the
- * wave's window holds, which has @lim of them: the plaintext where it covers
- * them, @raw, the frame's own bytes, where it does not.
- */
-/* The wave's ChaCha20 keystream: block 1 + l from word 16 * l. */
-static INLINE LDS uint32_t *gda_ipsec_ks(struct gda *g)
+/* The wave's copy of the frame it is on. */
+static INLINE LDS uint32_t *gda_ipsec_frame(struct gda *g)
 {
 	return (LDS uint32_t *)(uintptr_t)
 		(uniform32(GL(g, LDS)) + KNOD_PERSIST_GDA_LDS_BYTES +
 		 KNOD_PERSIST_GDA_IPSEC_TTAB_BYTES +
 		 4 * KNOD_PERSIST_GDA_IPSEC_BUF_BYTES +
-		 KNOD_PERSIST_GDA_IPSEC_KS_BYTES * g->wave);
+		 KNOD_PERSIST_GDA_IPSEC_FRAME_BYTES * g->wave);
 }
+
+/* Four bytes from byte @b of an LDS copy, wherever they start. */
+static INLINE uint32_t gda_lds32u(LDS const uint32_t *fr, uint32_t b)
+{
+	uint32_t a = b >> 2;
+
+	return b & 3 ? __builtin_amdgcn_alignbyte(fr[a + 1], fr[a], b & 3) :
+		       fr[a];
+}
+
+static INLINE uint32_t gda_lds_be16(LDS const uint32_t *fr, uint32_t b)
+{
+	return bswap32(gda_lds32u(fr, b)) >> 16;
+}
+
+/*
+ * Four bytes of what goes out at @raw's place, @q bytes into the payload the
+ * wave's window holds, which has @lim of them: the plaintext where it covers
+ * them, @raw, the frame's own bytes, where it does not.
+ */
 
 static INLINE uint32_t gda_ipsec_take(LDS const uint8_t *buf, uint32_t raw,
 				      int q, int lim)
@@ -284,6 +299,32 @@ static INLINE int gda_ipsec_sa(struct gda *g, uint32_t spi)
 			return k;
 	}
 	return -1;
+}
+
+/*
+ * The page's bytes from @src - 4 + @sh into the wave's frame copy, its word
+ * i the four from there plus 4i, through @end bytes of it: a lane sixteen
+ * bytes and the word past them, a kilobyte an instruction, one wait.
+ */
+static INLINE void gda_ipsec_fetch(LDS uint32_t *fr, GLOBAL const uint8_t *src,
+				   uint32_t sh, uint32_t end, uint32_t lane)
+{
+	uint32_t q, i, hi, o[4];
+
+	for (q = lane; 16 * q < end; q += 64) {
+		GLOBAL const uint32_t *w =
+			(GLOBAL const uint32_t *)(src - 4) + 4 * q;
+		v4u v = get128(w);
+		uint32_t nx = get32(w + 4);
+
+		for (i = 0; i < 4; i++) {
+			hi = i < 3 ? v[i + 1] : nx;
+			o[i] = sh ? __builtin_amdgcn_alignbyte(hi, v[i], sh) :
+				    v[i];
+		}
+		*(LDS v4u *)(fr + 4 * q) = (v4u){ o[0], o[1], o[2], o[3] };
+	}
+	__builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
 }
 
 /*
@@ -340,33 +381,31 @@ static INLINE void gda_ipsec_chunk(uint32_t c[4], GLOBAL const uint8_t *f,
 } while (0)
 
 /*
- * ChaCha20-Poly1305 (rfc7539esp) for gda_ipsec_rx(): @key the SA's, the
- * nonce its salt and the packet's IV.  The one-time Poly1305 key is block 0
- * of the keystream, so its powers of r are the wave's to make.  A lane takes
- * every 64th sixteen bytes the tag runs over, by Horner with r^64, and its
- * sum times the power of r its last is from the end; the lanes' sums are
- * added up.  Then a lane makes a 64-byte keystream block, into LDS, and the
- * payload is decrypted a kilobyte window at a time as AES-GCM's is.
+ * ChaCha20-Poly1305 (rfc7539esp) for gda_ipsec_rx(), on the frame's copy in
+ * LDS: @fr, its payload the words from @pw.  @key is the SA's, the nonce its
+ * salt and the packet's IV.  Poly1305's one-time key is block 0, so its
+ * powers of r are the wave's to make: a lane takes every 64th sixteen bytes
+ * the tag runs over, by Horner with r^64, times the power of r its last is
+ * from the end, and the lanes' sums are added up.  Then a lane decrypts a
+ * 64-byte block of the copy, and the page takes the payload back sixteen
+ * aligned bytes a lane: @pg the page's address of the copy's byte 0.
  */
-static INLINE uint32_t gda_chacha_rx(struct gda *g, GLOBAL uint8_t *src,
-				     uint32_t off, GLOBAL const uint8_t *f,
+static INLINE uint32_t gda_chacha_rx(LDS uint32_t *fr, uint32_t pw,
+				     GLOBAL uint8_t *pg, uint32_t iv,
 				     const CONSTANT uint32_t *rk, uint32_t salt,
 				     uint32_t spi, uint32_t seq, uint32_t clen,
 				     uint32_t lane)
 {
-	LDS uint8_t *buf = gda_ipsec_buf(g);
-	LDS uint32_t *ks = gda_ipsec_ks(g);
 	uint32_t key[8], nonce[3], blk[16], s[4], w[4], tag[4];
-	uint32_t n = (clen + 15) / 16, nb = n + 2, i, k, e, last, fail;
-	uint32_t base, from, to, j;
+	uint32_t n = (clen + 15) / 16, nb = n + 2, i, k, e, last, fail, b;
+	GLOBAL uint8_t *c0, *c1;
 	struct poly r, cur, h, p, cv;
-	int d, lim;
 
 	for (i = 0; i < 8; i++)
 		key[i] = uniform32(rk[i]);
 	nonce[0] = salt;
-	nonce[1] = uniform32(gda_ld32u(f + ESP_IV));
-	nonce[2] = uniform32(gda_ld32u(f + ESP_IV + 4));
+	nonce[1] = uniform32(gda_lds32u(fr, iv));
+	nonce[2] = uniform32(gda_lds32u(fr, iv + 4));
 
 	chacha20_block(blk, key, 0, nonce);
 	poly_r(&r, blk);
@@ -384,18 +423,13 @@ static INLINE uint32_t gda_chacha_rx(struct gda *g, GLOBAL uint8_t *src,
 	last = 0;
 #pragma clang loop unroll(disable)
 	for (k = lane; k < nb; k += 64) {
-		if (!k) {
-			w[0] = spi;
-			w[1] = seq;
-			w[2] = 0;
-			w[3] = 0;
-		} else if (k == nb - 1) {
-			w[0] = 8;
-			w[1] = 0;
-			w[2] = clen;
-			w[3] = 0;
-		} else {
-			gda_ipsec_chunk(w, f, 16 * (k - 1), clen);
+		for (i = 0; i < 4; i++) {
+			b = 16 * (k - 1) + 4 * i;
+			w[i] = !k ? (i == 0 ? spi : i == 1 ? seq : 0) :
+			       k == nb - 1 ? (i == 0 ? 8 : i == 2 ? clen : 0) :
+			       b >= clen ? 0 :
+			       b + 4 <= clen ? fr[pw + b / 4] :
+			       fr[pw + b / 4] & ((1u << (8 * (clen - b))) - 1);
 		}
 		poly_from_words(&cv, w, 1);
 		poly_mul(&h, &h, &cur);
@@ -433,33 +467,31 @@ static INLINE uint32_t gda_chacha_rx(struct gda *g, GLOBAL uint8_t *src,
 	poly_tag(tag, &h, s);
 	fail = 0;
 	for (i = 0; i < 4; i++)
-		fail |= tag[i] != gda_ld32u(f + ESP_DATA + clen + 4 * i);
+		fail |= tag[i] != gda_lds32u(fr, 4 * pw + clen + 4 * i);
 
-	/* The keystream, block 1 + lane, then the payload through it. */
+	/* Block 1 + lane of the keystream over the copy's payload. */
 	if (64 * lane < clen) {
 		chacha20_block(blk, key, 1 + lane, nonce);
-		for (i = 0; i < 16; i++)
-			ks[16 * lane + i] = blk[i];
-	}
-#pragma clang loop unroll(disable)
-	for (base = 0; base < clen; base += 1024) {
-		lim = clen - base < 1024 ? clen - base : 1024;
-		from = (off + ESP_DATA + base) & ~15u;
-		to = (off + ESP_DATA + base + lim + 15) & ~15u;
-		d = off + ESP_DATA + base - from;
-
-		__builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
-		j = base / 16 + lane;
-		if (j < n) {
-			gda_ipsec_chunk(w, f, 16 * j, clen);
-			*(LDS v4u *)(buf + 16 * lane) =
-				(v4u){ w[0] ^ ks[4 * j], w[1] ^ ks[4 * j + 1],
-				       w[2] ^ ks[4 * j + 2], w[3] ^ ks[4 * j + 3] };
+		for (i = 0; i < 16; i++) {
+			b = 64 * lane + 4 * i;
+			if (b < clen)
+				fr[pw + b / 4] ^= b + 4 <= clen ? blk[i] :
+					blk[i] & ((1u << (8 * (clen - b))) - 1);
 		}
-		gda_ipsec_put(src, buf, from, to, d, lim, lane);
 	}
-	stores_out();
+	__builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
 
+	/* The page's sixteen-byte pieces over the payload, out of the copy. */
+	c0 = (GLOBAL uint8_t *)((uintptr_t)(pg + 4 * pw) & ~(uintptr_t)15);
+	c1 = (GLOBAL uint8_t *)(((uintptr_t)(pg + 4 * pw + clen) + 15) &
+				~(uintptr_t)15);
+	for (b = 16 * lane; c0 + b < c1; b += 1024) {
+		uint32_t at = c0 + b - pg;
+
+		put128(c0 + b, (v4u){ gda_lds32u(fr, at), gda_lds32u(fr, at + 4),
+				      gda_lds32u(fr, at + 8),
+				      gda_lds32u(fr, at + 12) });
+	}
 	return uniform32(fail);
 }
 
@@ -489,13 +521,23 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 	uint32_t tot, clen, n, m, rounds, salt, iv_lo, iv_hi, spi, seq;
 	uint32_t z[8] = { 0 }, acc[4], x[4], c[4], k[4], j, b, i, w, fail;
 	uint32_t base, from, to, nb, lane = lane_id();
+	LDS uint32_t *fr = gda_ipsec_frame(g);
+	uint32_t sh = (off + ESP_DATA) & 3, fo = off + 4 - sh;
 	int slot, d, lim;
 
+	/* The frame into LDS in one go, its payload on a word: copy byte fo
+	 * is the frame's first.
+	 */
 	if (len < ESP_DATA + ESP_ICV ||
-	    gda_be16(f + 12) != 0x0800 || (gda_ld32u(f + 14) & 0xff) != 0x45 ||
-	    (gda_be16(f + 20) & 0x3fff) || (gda_ld32u(f + 20) >> 24) != 50)
+	    fo + len + 4 + 16 > KNOD_PERSIST_GDA_IPSEC_FRAME_BYTES)
 		return 0;
-	tot = uniform32(gda_be16(f + 16));
+	gda_ipsec_fetch(fr, src, sh, fo + len + 4, lane);
+	if (gda_lds_be16(fr, fo + 12) != 0x0800 ||
+	    (gda_lds32u(fr, fo + 14) & 0xff) != 0x45 ||
+	    (gda_lds_be16(fr, fo + 20) & 0x3fff) ||
+	    (gda_lds32u(fr, fo + 20) >> 24) != 50)
+		return 0;
+	tot = uniform32(gda_lds_be16(fr, fo + 16));
 	if (tot < ESP_DATA - 14 + ESP_ICV || 14 + tot > len)
 		return 0;
 	clen = 14 + tot - ESP_DATA - ESP_ICV;
@@ -503,7 +545,7 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 	m = n + 2;
 	if (m > 256)
 		return 0;
-	spi = uniform32(gda_ld32u(f + ESP_SPI));
+	spi = uniform32(gda_lds32u(fr, fo + ESP_SPI));
 	slot = (int)uniform32(gda_ipsec_sa(g, spi));
 	if (slot < 0)
 		return 0;
@@ -519,10 +561,9 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 	salt = uniform32(get32(&sa->salt));
 	rk = (const CONSTANT uint32_t *)uniform64(get64(&sa->rk));
 	if (!rounds) {
-		if (clen > KNOD_PERSIST_GDA_IPSEC_KS_BYTES)
-			return 0;
-		seq = uniform32(gda_ld32u(f + ESP_SPI + 4));
-		fail = gda_chacha_rx(g, src, off, f, rk, salt, spi, seq, clen,
+		seq = uniform32(gda_lds32u(fr, fo + ESP_SPI + 4));
+		fail = gda_chacha_rx(fr, (fo + ESP_DATA) / 4, src - 4 + sh,
+				     fo + ESP_IV, rk, salt, spi, seq, clen,
 				     lane);
 		return KNOD_PERSIST_PASS_IPSEC |
 		       slot << KNOD_PERSIST_PASS_IPSEC_SA_SHIFT |
@@ -997,17 +1038,22 @@ v4u GDA_FN(gda_ipsec)(ctl_t ctl, uint32_t queue, uint32_t wave, uint32_t s,
 	gda_load(&g, ctl, uniform32(queue), uniform32(wave));
 	todo = ballot(((live >> lane_id()) & 1) && verdict == XDP_PASS);
 	while (todo) {
-		uint32_t l = __builtin_ctzll(todo), o, b;
+		uint32_t l = __builtin_ctzll(todo), o, b, n;
 
 		todo &= todo - 1;
 		o = __builtin_amdgcn_readlane(off, l);
+		n = __builtin_amdgcn_readlane(len, l);
+		/* Its LDS copy reads a little past it: not past its page. */
+		if (o + n + 32 > 1u << GL(&g, PAGE_SHIFT))
+			continue;
 		b = gda_ipsec_rx(&g, (GLOBAL uint8_t *)GL64(&g, RX_BASE) +
 				 ((uint64_t)__builtin_amdgcn_readlane(page, l) <<
 				  GL(&g, PAGE_SHIFT)) + (o & ~15u),
-				 o & 15, __builtin_amdgcn_readlane(len, l));
+				 o & 15, n);
 		if (lane_id() == l)
 			meta = b;
 	}
+	stores_out();
 	return (v4u){ meta, 0, 0, 0 };
 }
 #endif
