@@ -163,6 +163,7 @@ static INLINE void gda_post_rq(struct gda *g)
 #define AES_RK		CONSTANT
 #define AES_INLINE	static INLINE
 #include "aes_gcm.h"
+#include "chacha_poly.h"
 
 /* An ESP packet's offsets in its frame: Ethernet, an IPv4 header with no
  * options, the SPI and sequence, the IV; the ICV after the payload.
@@ -238,6 +239,16 @@ static INLINE void gda_ghash_add(uint32_t z[8], const uint32_t x[4],
  * wave's window holds, which has @lim of them: the plaintext where it covers
  * them, @raw, the frame's own bytes, where it does not.
  */
+/* The wave's ChaCha20 keystream: block 1 + l from word 16 * l. */
+static INLINE LDS uint32_t *gda_ipsec_ks(struct gda *g)
+{
+	return (LDS uint32_t *)(uintptr_t)
+		(uniform32(GL(g, LDS)) + KNOD_PERSIST_GDA_LDS_BYTES +
+		 KNOD_PERSIST_GDA_IPSEC_TTAB_BYTES +
+		 4 * KNOD_PERSIST_GDA_IPSEC_BUF_BYTES +
+		 KNOD_PERSIST_GDA_IPSEC_KS_BYTES * g->wave);
+}
+
 static INLINE uint32_t gda_ipsec_take(LDS const uint8_t *buf, uint32_t raw,
 				      int q, int lim)
 {
@@ -273,6 +284,183 @@ static INLINE int gda_ipsec_sa(struct gda *g, uint32_t spi)
 			return k;
 	}
 	return -1;
+}
+
+/*
+ * The wave's window over @lim bytes of payload back to the page, sixteen
+ * aligned bytes a lane from @from to @to, shifted by @d into place and the
+ * frame's own bytes around it.
+ */
+static INLINE void gda_ipsec_put(GLOBAL uint8_t *src, LDS const uint8_t *buf,
+				 uint32_t from, uint32_t to, int d, int lim,
+				 uint32_t lane)
+{
+	uint32_t b, i, w;
+
+	__builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
+	for (b = 16 * lane; b < to - from; b += 1024) {
+		v4u r = get128(src + from + b);
+		int q = b - d;
+
+		/* A word at a time, as gcm_mul()'s products. */
+#pragma unroll
+		for (i = 0; i < 4; i++, q += 4) {
+			w = gda_ipsec_take(buf, r[i], q, lim);
+			GCM_HERE(w);
+			GCM_HERE(q);
+			r[i] = w;
+		}
+		put128(src + from + b, r);
+	}
+	__builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
+}
+
+/* Sixteen bytes of payload from @b, zero past @clen, words as they come. */
+static INLINE void gda_ipsec_chunk(uint32_t c[4], GLOBAL const uint8_t *f,
+				   uint32_t b, uint32_t clen)
+{
+	uint32_t nb = clen - b < 16 ? clen - b : 16, i, w;
+
+#pragma unroll
+	for (i = 0; i < 4; i++) {
+		w = gda_ld32u(f + ESP_DATA + b + 4 * i);
+		c[i] = 4 * i >= nb ? 0 : 4 * i + 4 <= nb ? w :
+		       w & ((1u << (8 * (nb - 4 * i))) - 1);
+	}
+}
+
+/* @h plus the lane @pattern names's. */
+#define gda_poly_fold(h, pattern)	do {				\
+	uint32_t __i;							\
+									\
+	for (__i = 0; __i < 5; __i++)					\
+		(h)->l[__i] += __builtin_amdgcn_ds_swizzle((h)->l[__i],	\
+							   pattern);	\
+	poly_carry(h);							\
+} while (0)
+
+/*
+ * ChaCha20-Poly1305 (rfc7539esp) for gda_ipsec_rx(): @key the SA's, the
+ * nonce its salt and the packet's IV.  The one-time Poly1305 key is block 0
+ * of the keystream, so its powers of r are the wave's to make.  A lane takes
+ * every 64th sixteen bytes the tag runs over, by Horner with r^64, and its
+ * sum times the power of r its last is from the end; the lanes' sums are
+ * added up.  Then a lane makes a 64-byte keystream block, into LDS, and the
+ * payload is decrypted a kilobyte window at a time as AES-GCM's is.
+ */
+static INLINE uint32_t gda_chacha_rx(struct gda *g, GLOBAL uint8_t *src,
+				     uint32_t off, GLOBAL const uint8_t *f,
+				     const CONSTANT uint32_t *rk, uint32_t salt,
+				     uint32_t spi, uint32_t seq, uint32_t clen,
+				     uint32_t lane)
+{
+	LDS uint8_t *buf = gda_ipsec_buf(g);
+	LDS uint32_t *ks = gda_ipsec_ks(g);
+	uint32_t key[8], nonce[3], blk[16], s[4], w[4], tag[4];
+	uint32_t n = (clen + 15) / 16, nb = n + 2, i, k, e, last, fail;
+	uint32_t base, from, to, j;
+	struct poly r, cur, h, p, cv;
+	int d, lim;
+
+	for (i = 0; i < 8; i++)
+		key[i] = uniform32(rk[i]);
+	nonce[0] = salt;
+	nonce[1] = uniform32(gda_ld32u(f + ESP_IV));
+	nonce[2] = uniform32(gda_ld32u(f + ESP_IV + 4));
+
+	chacha20_block(blk, key, 0, nonce);
+	poly_r(&r, blk);
+	for (i = 0; i < 4; i++)
+		s[i] = blk[4 + i];
+
+	/* r^64, for each lane's Horner. */
+	cur = r;
+	for (i = 0; i < 6; i++)
+		poly_mul(&cur, &cur, &cur);
+
+	/* AAD first, the ciphertext, the lengths last. */
+	for (i = 0; i < 5; i++)
+		h.l[i] = 0;
+	last = 0;
+#pragma clang loop unroll(disable)
+	for (k = lane; k < nb; k += 64) {
+		if (!k) {
+			w[0] = spi;
+			w[1] = seq;
+			w[2] = 0;
+			w[3] = 0;
+		} else if (k == nb - 1) {
+			w[0] = 8;
+			w[1] = 0;
+			w[2] = clen;
+			w[3] = 0;
+		} else {
+			gda_ipsec_chunk(w, f, 16 * (k - 1), clen);
+		}
+		poly_from_words(&cv, w, 1);
+		poly_mul(&h, &h, &cur);
+		poly_add(&h, &cv);
+		poly_carry(&h);
+		last = k;
+	}
+
+	/* Times r^(nb - last), 1 to 64. */
+	e = nb - last;
+	p.l[0] = 1;
+	for (i = 1; i < 5; i++)
+		p.l[i] = 0;
+	cur = r;
+	for (i = 0; i < 7; i++) {
+		if (e >> i & 1)
+			poly_mul(&p, &p, &cur);
+		poly_mul(&cur, &cur, &cur);
+	}
+	poly_mul(&h, &h, &p);
+	if (lane >= nb)
+		for (i = 0; i < 5; i++)
+			h.l[i] = 0;
+
+	/* Each half's in each of its lanes, then the two. */
+	gda_poly_fold(&h, GDA_SWIZZLE_XOR(16));
+	gda_poly_fold(&h, GDA_SWIZZLE_XOR(8));
+	gda_poly_fold(&h, GDA_SWIZZLE_XOR(4));
+	gda_poly_fold(&h, GDA_SWIZZLE_XOR(2));
+	gda_poly_fold(&h, GDA_SWIZZLE_XOR(1));
+	for (i = 0; i < 5; i++)
+		h.l[i] = __builtin_amdgcn_readlane(h.l[i], 0) +
+			 __builtin_amdgcn_readlane(h.l[i], 32);
+	poly_carry(&h);
+	poly_tag(tag, &h, s);
+	fail = 0;
+	for (i = 0; i < 4; i++)
+		fail |= tag[i] != gda_ld32u(f + ESP_DATA + clen + 4 * i);
+
+	/* The keystream, block 1 + lane, then the payload through it. */
+	if (64 * lane < clen) {
+		chacha20_block(blk, key, 1 + lane, nonce);
+		for (i = 0; i < 16; i++)
+			ks[16 * lane + i] = blk[i];
+	}
+#pragma clang loop unroll(disable)
+	for (base = 0; base < clen; base += 1024) {
+		lim = clen - base < 1024 ? clen - base : 1024;
+		from = (off + ESP_DATA + base) & ~15u;
+		to = (off + ESP_DATA + base + lim + 15) & ~15u;
+		d = off + ESP_DATA + base - from;
+
+		__builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
+		j = base / 16 + lane;
+		if (j < n) {
+			gda_ipsec_chunk(w, f, 16 * j, clen);
+			*(LDS v4u *)(buf + 16 * lane) =
+				(v4u){ w[0] ^ ks[4 * j], w[1] ^ ks[4 * j + 1],
+				       w[2] ^ ks[4 * j + 2], w[3] ^ ks[4 * j + 3] };
+		}
+		gda_ipsec_put(src, buf, from, to, d, lim, lane);
+	}
+	stores_out();
+
+	return uniform32(fail);
 }
 
 /*
@@ -330,6 +518,16 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 	rounds = uniform32(get32(&sa->rounds));
 	salt = uniform32(get32(&sa->salt));
 	rk = (const CONSTANT uint32_t *)uniform64(get64(&sa->rk));
+	if (!rounds) {
+		if (clen > KNOD_PERSIST_GDA_IPSEC_KS_BYTES)
+			return 0;
+		seq = uniform32(gda_ld32u(f + ESP_SPI + 4));
+		fail = gda_chacha_rx(g, src, off, f, rk, salt, spi, seq, clen,
+				     lane);
+		return KNOD_PERSIST_PASS_IPSEC |
+		       slot << KNOD_PERSIST_PASS_IPSEC_SA_SHIFT |
+		       (fail ? KNOD_PERSIST_PASS_IPSEC_FAIL : 0);
+	}
 	hpow = (GLOBAL const uint8_t *)uniform64(get64(&sa->hpow));
 	seq = uniform32(gda_ld32u(f + ESP_SPI + 4));
 	iv_lo = uniform32(gda_ld32u(f + ESP_IV));
@@ -386,22 +584,7 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 				(v4u){ c[0] ^ k[0], c[1] ^ k[1], c[2] ^ k[2],
 				       c[3] ^ k[3] };
 		}
-		__builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
-		for (b = 16 * lane; b < to - from; b += 1024) {
-			v4u r = get128(src + from + b);
-			int q = b - d;
-
-			/* A word at a time, as gcm_mul()'s products. */
-#pragma unroll
-			for (i = 0; i < 4; i++, q += 4) {
-				w = gda_ipsec_take(buf, r[i], q, lim);
-				GCM_HERE(w);
-				GCM_HERE(q);
-				r[i] = w;
-			}
-			put128(src + from + b, r);
-		}
-		__builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
+		gda_ipsec_put(src, buf, from, to, d, lim, lane);
 	}
 	stores_out();
 
