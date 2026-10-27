@@ -235,27 +235,27 @@ static INLINE void gda_ghash_add(uint32_t z[8], const uint32_t x[4],
 }
 
 /*
- * Where an IPsec engine's time goes, into its queue's regress_dbg: cycles of
- * the CU the wave is on (twenty bits of them on gfx11), summed by lane 0.
+ * Where an IPsec engine's time goes, into its queue's regress_dbg: ticks of
+ * the GPU's 100 MHz clock, summed by lane 0 of each wave.
  */
 #define GDA_PROF_PKTS		0
 #define GDA_PROF_FETCH		1
 #define GDA_PROF_POLY		2
 #define GDA_PROF_DECRYPT	3
-#define GDA_PROF_PACKET		4
+#define GDA_PROF_IPSEC		4	/* gda_ipsec() whole */
 #define GDA_PROF_END_CALLS	5
-#define GDA_PROF_END		6
-#define GDA_PROF_ITER		7
+#define GDA_PROF_END		6	/* gda_round_end() whole */
+#define GDA_PROF_BEGIN		7	/* gda_round_begin(), idle too */
 
 static INLINE uint32_t gda_cyc(void)
 {
-	return (uint32_t)__builtin_readcyclecounter();
+	return (uint32_t)__builtin_readsteadycounter();
 }
 
 static INLINE void gda_prof(GLOBAL uint32_t *dbg, int i, uint32_t from)
 {
 	if (!lane_id())
-		add((gptr)&dbg[i], (gda_cyc() - from) & 0xfffff);
+		add((gptr)&dbg[i], gda_cyc() - from);
 }
 
 /* The wave's copy of the frame it is on. */
@@ -621,7 +621,6 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 		fail = gda_chacha_rx(fr, (fo + ESP_DATA) / 4, src - 4 + sh,
 				     fo + ESP_IV, sc->key, salt, spi, seq, clen,
 				     lane, dbg);
-		gda_prof(dbg, GDA_PROF_PACKET, t0);
 		if (!lane)
 			add((gptr)&dbg[GDA_PROF_PKTS], 1);
 		return KNOD_PERSIST_PASS_IPSEC |
@@ -983,7 +982,16 @@ static INLINE v16u gda_round_begin(ctl_t ctl, uint32_t queue, uint32_t wave,
 v16u GDA_FN(gda_round_begin)(ctl_t ctl, uint32_t queue, uint32_t wave,
 			      uint32_t s, uint32_t pk_lo, uint32_t pk_hi)
 {
+#ifdef GDA_IPSEC
+	uint32_t t0 = gda_cyc();
+	v16u r = gda_round_begin(ctl, queue, wave, s, pk_lo, pk_hi, 0);
+
+	ctl = (ctl_t)uniform64((uint64_t)ctl);
+	gda_prof(ctl->gda[uniform32(queue)].regress_dbg, GDA_PROF_BEGIN, t0);
+	return r;
+#else
 	return gda_round_begin(ctl, queue, wave, s, pk_lo, pk_hi, 0);
+#endif
 }
 
 #ifndef GDA_IPSEC
@@ -1092,13 +1100,13 @@ v4u GDA_FN(gda_ipsec)(ctl_t ctl, uint32_t queue, uint32_t wave, uint32_t s,
 	uint64_t live = (uint64_t)uniform32(hi) << 32 | uniform32(lo);
 	uint64_t todo;
 	struct gda_sa_cache sc = { .slot = ~0u };
-	uint32_t meta = 0;
+	uint32_t meta = 0, t0 = gda_cyc();
 
 	ctl = (ctl_t)uniform64((uint64_t)ctl);
 	gda_load(&g, ctl, uniform32(queue), uniform32(wave));
 	todo = ballot(((live >> lane_id()) & 1) && verdict == XDP_PASS);
 	while (todo) {
-		uint32_t l = __builtin_ctzll(todo), o, b, n, t = gda_cyc();
+		uint32_t l = __builtin_ctzll(todo), o, b, n;
 
 		todo &= todo - 1;
 		o = __builtin_amdgcn_readlane(off, l);
@@ -1112,9 +1120,9 @@ v4u GDA_FN(gda_ipsec)(ctl_t ctl, uint32_t queue, uint32_t wave, uint32_t s,
 				 o & 15, n, &sc);
 		if (lane_id() == l)
 			meta = b;
-		gda_prof(g.entry->regress_dbg, GDA_PROF_ITER, t);
 	}
 	stores_out();
+	gda_prof(g.entry->regress_dbg, GDA_PROF_IPSEC, t0);
 	return (v4u){ meta, 0, 0, 0 };
 }
 #endif
