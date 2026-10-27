@@ -130,23 +130,6 @@ AES_INLINE void gcm_to_ghash(uint32_t out[4], const uint32_t in[4])
 #define GCM_HERE(v)	do { } while (0)
 #endif
 
-/* Four integer products in their registers before anything after reads
- * them.  RDNA3 gave a wrong and changing GHASH out of these multiplies back
- * to back, the compiler's s_delay_alu notwithstanding.
- */
-AES_INLINE uint32_t gcm_imul4(uint32_t a0, uint32_t b0, uint32_t a1,
-			      uint32_t b1, uint32_t a2, uint32_t b2,
-			      uint32_t a3, uint32_t b3)
-{
-	uint32_t p0 = a0 * b0, p1 = a1 * b1, p2 = a2 * b2, p3 = a3 * b3;
-
-#ifdef __AMDGPU__
-	__asm__("s_waitcnt_depctr depctr_va_vdst(0)"
-		: "+v"(p0), "+v"(p1), "+v"(p2), "+v"(p3));
-#endif
-	return p0 ^ p1 ^ p2 ^ p3;
-}
-
 /* The low half of a carry-less 32x32 multiply, from integer multiplies of
  * operands with every fourth bit kept: no carry crosses into a kept bit.
  */
@@ -158,16 +141,16 @@ AES_INLINE uint32_t gcm_bmul32(uint32_t x, uint32_t y)
 	uint32_t y2 = y & 0x44444444, y3 = y & 0x88888888;
 	uint32_t z0, z1, z2, z3;
 
-	z0 = gcm_imul4(x0, y0, x1, y3, x2, y2, x3, y1);
+	z0 = x0 * y0 ^ x1 * y3 ^ x2 * y2 ^ x3 * y1;
 	GCM_HERE(z0);
 	GCM_HERE(y0);
-	z1 = gcm_imul4(x0, y1, x1, y0, x2, y3, x3, y2);
+	z1 = x0 * y1 ^ x1 * y0 ^ x2 * y3 ^ x3 * y2;
 	GCM_HERE(z1);
 	GCM_HERE(y1);
-	z2 = gcm_imul4(x0, y2, x1, y1, x2, y0, x3, y3);
+	z2 = x0 * y2 ^ x1 * y1 ^ x2 * y0 ^ x3 * y3;
 	GCM_HERE(z2);
 	GCM_HERE(y2);
-	z3 = gcm_imul4(x0, y3, x1, y2, x2, y1, x3, y0);
+	z3 = x0 * y3 ^ x1 * y2 ^ x2 * y1 ^ x3 * y0;
 	return (z0 & 0x11111111) | (z1 & 0x22222222) |
 	       (z2 & 0x44444444) | (z3 & 0x88888888);
 }
@@ -199,60 +182,124 @@ AES_INLINE uint32_t gcm_rev32(uint32_t x)
  * As in BearSSL's ghash_ctmul32, each 32x32 product is two halves of 32 bits:
  * the low one of the reversed operands, the high one the low one of the
  * operands as they are, reversed and shifted down one.  Karatsuba's sums are
- * linear too, so each product goes straight into the words it ends up in:
- * product 3g + r of the 64x64 multiply g at the words r's and g's offsets add
- * to, r = 0, 1, 2 at {0, 1}, {1, 2}, {1} and g at {0, 2}, {2, 4}, {2}.
+ * linear too, so each product goes straight into the words it ends up in,
+ * two landings on one word cancelling.  Written out: a table of them is one a
+ * compiler may leave in .rodata, which the blob does not carry.
  */
+/* Product halves @lo and @hi into @z from word @k up. */
+#define GCM_ADD(z, k, lo, hi)	do {				\
+	(z)[k] ^= (lo);						\
+	(z)[(k) + 1] ^= (hi);					\
+} while (0)
+
+/* @a * @b carry-less, in two halves.  Each product is added in and its halves
+ * pinned before the next starts, which keeps the registers down.
+ */
+AES_INLINE void gcm_clmul32(uint32_t a, uint32_t b, uint32_t *lo,
+			    uint32_t *hi)
+{
+	GCM_HERE(a);
+	GCM_HERE(b);
+	*lo = gcm_bmul32(gcm_rev32(a), gcm_rev32(b));
+	*hi = gcm_rev32(gcm_bmul32(a, b)) >> 1;
+}
+
 AES_INLINE void gcm_mul_add(uint32_t z[8], const uint32_t x[4],
 			    const uint32_t h[4])
 {
-	static const unsigned char rpos[3] = { 0x3, 0x6, 0x2 };
-	static const unsigned char gpos[3] = { 0x05, 0x14, 0x04 };
-	uint32_t xx[4], hh[4], xa[2], xb[2], ya, yb, lo, hi;
-	int g, r, i, j;
+	uint32_t a[4], b[4], c0, c1, d0, d1, lo, hi;
+	int i;
 
 	for (i = 0; i < 4; i++) {
-		xx[i] = x[i];
-		hh[i] = h[i];
+		a[i] = x[i];
+		b[i] = h[i];
 	}
-	for (g = 0; g < 3; g++) {
-		for (i = 0; i < 2; i++) {
-			if (g == 2) {
-				GCM_HERE(xx[i]);
-				GCM_HERE(xx[i + 2]);
-				GCM_HERE(hh[i]);
-				GCM_HERE(hh[i + 2]);
-			}
-			xa[i] = g == 2 ? xx[i] ^ xx[i + 2] : xx[2 * g + i];
-			xb[i] = g == 2 ? hh[i] ^ hh[i + 2] : hh[2 * g + i];
-		}
-		for (r = 0; r < 3; r++) {
-			if (r == 2) {
-				GCM_HERE(xa[0]);
-				GCM_HERE(xa[1]);
-				GCM_HERE(xb[0]);
-				GCM_HERE(xb[1]);
-			}
-			ya = r == 2 ? xa[0] ^ xa[1] : xa[r];
-			yb = r == 2 ? xb[0] ^ xb[1] : xb[r];
-			GCM_HERE(ya);
-			GCM_HERE(yb);
-			lo = gcm_bmul32(gcm_rev32(ya), gcm_rev32(yb));
-			hi = gcm_rev32(gcm_bmul32(ya, yb)) >> 1;
-			for (j = 0; j < 7; j++) {
-				if (!(rpos[r] & (1 << j)))
-					continue;
-				for (i = 0; i + j < 7; i++) {
-					if (!(gpos[g] & (1 << i)))
-						continue;
-					z[i + j] ^= lo;
-					z[i + j + 1] ^= hi;
-				}
-			}
-			GCM_HERE(lo);
-			GCM_HERE(hi);
-		}
+
+	/* The low 64 bits of each times the low. */
+	gcm_clmul32(a[0], b[0], &lo, &hi);
+	GCM_ADD(z, 0, lo, hi);
+	GCM_ADD(z, 1, lo, hi);
+	GCM_ADD(z, 2, lo, hi);
+	GCM_ADD(z, 3, lo, hi);
+	GCM_HERE(lo);
+	GCM_HERE(hi);
+	gcm_clmul32(a[1], b[1], &lo, &hi);
+	GCM_ADD(z, 1, lo, hi);
+	GCM_ADD(z, 2, lo, hi);
+	GCM_ADD(z, 3, lo, hi);
+	GCM_ADD(z, 4, lo, hi);
+	GCM_HERE(lo);
+	GCM_HERE(hi);
+	c0 = a[0];
+	c1 = a[1];
+	d0 = b[0];
+	d1 = b[1];
+	GCM_HERE(c0);
+	GCM_HERE(c1);
+	GCM_HERE(d0);
+	GCM_HERE(d1);
+	gcm_clmul32(c0 ^ c1, d0 ^ d1, &lo, &hi);
+	GCM_ADD(z, 1, lo, hi);
+	GCM_ADD(z, 3, lo, hi);
+	GCM_HERE(lo);
+	GCM_HERE(hi);
+
+	/* The high times the high. */
+	gcm_clmul32(a[2], b[2], &lo, &hi);
+	GCM_ADD(z, 2, lo, hi);
+	GCM_ADD(z, 3, lo, hi);
+	GCM_ADD(z, 4, lo, hi);
+	GCM_ADD(z, 5, lo, hi);
+	GCM_HERE(lo);
+	GCM_HERE(hi);
+	gcm_clmul32(a[3], b[3], &lo, &hi);
+	GCM_ADD(z, 3, lo, hi);
+	GCM_ADD(z, 4, lo, hi);
+	GCM_ADD(z, 5, lo, hi);
+	GCM_ADD(z, 6, lo, hi);
+	GCM_HERE(lo);
+	GCM_HERE(hi);
+	c0 = a[2];
+	c1 = a[3];
+	d0 = b[2];
+	d1 = b[3];
+	GCM_HERE(c0);
+	GCM_HERE(c1);
+	GCM_HERE(d0);
+	GCM_HERE(d1);
+	gcm_clmul32(c0 ^ c1, d0 ^ d1, &lo, &hi);
+	GCM_ADD(z, 3, lo, hi);
+	GCM_ADD(z, 5, lo, hi);
+	GCM_HERE(lo);
+	GCM_HERE(hi);
+
+	/* The sums times the sums. */
+	for (i = 0; i < 4; i++) {
+		GCM_HERE(a[i]);
+		GCM_HERE(b[i]);
 	}
+	c0 = a[0] ^ a[2];
+	c1 = a[1] ^ a[3];
+	d0 = b[0] ^ b[2];
+	d1 = b[1] ^ b[3];
+	gcm_clmul32(c0, d0, &lo, &hi);
+	GCM_ADD(z, 2, lo, hi);
+	GCM_ADD(z, 3, lo, hi);
+	GCM_HERE(lo);
+	GCM_HERE(hi);
+	gcm_clmul32(c1, d1, &lo, &hi);
+	GCM_ADD(z, 3, lo, hi);
+	GCM_ADD(z, 4, lo, hi);
+	GCM_HERE(lo);
+	GCM_HERE(hi);
+	GCM_HERE(c0);
+	GCM_HERE(c1);
+	GCM_HERE(d0);
+	GCM_HERE(d1);
+	gcm_clmul32(c0 ^ c1, d0 ^ d1, &lo, &hi);
+	GCM_ADD(z, 3, lo, hi);
+	GCM_HERE(lo);
+	GCM_HERE(hi);
 }
 
 /* x^128 = x^7 + x^2 + x + 1: fold the top words down, from the top, so what

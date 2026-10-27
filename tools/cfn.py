@@ -11,8 +11,10 @@ body, every function but the engine's own, which the engine puts inside it.
 
 The functions are called by the AMDGPU calling convention, which keeps s34 and
 up for the caller, and knod_blob.h has a function keep off the VGPRs the JIT
-holds from KNOD_BLOB_JIT_VREG up.  Refuses one that touches those, or that
-needs more stack than a call gets.
+holds from KNOD_BLOB_JIT_VREG up.  Refuses one that touches those, that
+needs more stack than a call gets, or that takes the address of a symbol: the
+blob carries the bodies only, so a constant table clang put in .rodata is not
+there to be read.
 """
 import argparse
 import re
@@ -31,6 +33,8 @@ def contract():
 
 
 REG = re.compile(r"\b([sv])(?:\[(\d+):(\d+)\]|(\d+)\b)")
+# A symbol by address, a constant clang left in .rodata say.
+SYMREF = re.compile(r"([\w.$]+)@(?:rel32|gotpcrel32|gotpcrel|abs32)")
 
 
 def vgprs(lines):
@@ -49,6 +53,11 @@ def emit(c, name, body, stack, out):
     top = max(vgprs(body), default=0)
     if top >= c["JIT_VREG"]:
         sys.exit(f"{name}: touches v{top}, which the JIT holds")
+    for line in body:
+        ref = SYMREF.search(line)
+        if ref:
+            sys.exit(f"{name}: refers to {ref[1]}, which is not in the "
+                     "body: the blob carries code only")
     short = name[len("cfn_"):]
     # Local labels are numbered per file; every function gets its own.
     body = [re.sub(r"\.L([\w$.]+)", rf".Lcfn_{short}_\1", line)
