@@ -6,7 +6,7 @@
  * The control block, and each queue's entry in it, which the host fills and
  * the engine in knod-blob's csrc/gda.c runs from.
  */
-#define KNOD_PERSIST_VERSION 0x4b500017
+#define KNOD_PERSIST_VERSION 0x4b500018
 #define KNOD_PERSIST_MAX_QUEUES 32
 /* What a shader that appends PASS entries the host waits on interrupts with;
  * the low 23 bits are all an interrupt carries on every generation.
@@ -24,15 +24,17 @@
  * 256 words, past the waves' meeting place; then for each of up to four waves
  * the aligned window over a kilobyte of payload it decrypts at a time; then
  * for each the frame it is on, read in one go and shifted so its ESP payload
- * starts on a word.
+ * starts on a word; then the round's PASS packets, which the waves share out.
  */
 #define KNOD_PERSIST_GDA_IPSEC_TTAB_BYTES 4096
 #define KNOD_PERSIST_GDA_IPSEC_BUF_BYTES 1056
 #define KNOD_PERSIST_GDA_IPSEC_FRAME_BYTES 4160
+#define KNOD_PERSIST_GDA_IPSEC_WORK_BYTES 3088
 #define KNOD_PERSIST_GDA_IPSEC_LDS_BYTES \
 	(KNOD_PERSIST_GDA_LDS_BYTES + KNOD_PERSIST_GDA_IPSEC_TTAB_BYTES + \
 	 4 * KNOD_PERSIST_GDA_IPSEC_BUF_BYTES + \
-	 4 * KNOD_PERSIST_GDA_IPSEC_FRAME_BYTES)
+	 4 * KNOD_PERSIST_GDA_IPSEC_FRAME_BYTES + \
+	 KNOD_PERSIST_GDA_IPSEC_WORK_BYTES)
 #define KNOD_PERSIST_GDA_WAVES_MAX 4
 #define KNOD_PERSIST_GDA_PASS_ENTRIES 16384
 /* regress_dbg[]: an RQ bound older than the one before it. */
