@@ -394,14 +394,18 @@ static INLINE void gda_ipsec_chunk(uint32_t c[4], GLOBAL const uint8_t *f,
 	}
 }
 
-/* @h plus the lane @pattern names's. */
-#define gda_poly_fold(h, pattern)	do {				\
-	uint32_t __i;							\
+/* @h times @r plus the lane @pattern names's, then @r squared. */
+#define gda_poly_tree(h, r, pattern)	do {				\
+	uint32_t __i, __o[5];						\
 									\
 	for (__i = 0; __i < 5; __i++)					\
-		(h)->l[__i] += __builtin_amdgcn_ds_swizzle((h)->l[__i],	\
-							   pattern);	\
+		__o[__i] = __builtin_amdgcn_ds_swizzle((h)->l[__i],	\
+						       pattern);	\
+	poly_mul(h, h, r);						\
+	for (__i = 0; __i < 5; __i++)					\
+		(h)->l[__i] += __o[__i];				\
 	poly_carry(h);							\
+	poly_mul(r, r, r);						\
 } while (0)
 
 /*
@@ -421,7 +425,7 @@ static INLINE uint32_t gda_chacha_rx(LDS uint32_t *fr, uint32_t pw,
 				     uint32_t lane, GLOBAL uint32_t *dbg)
 {
 	uint32_t nonce[3], blk[16], s[4], w[4], tag[4], t = gda_cyc();
-	uint32_t n = (clen + 15) / 16, nb = n + 2, i, k, e, last, fail, b;
+	uint32_t n = (clen + 15) / 16, nb = n + 2, i, k, kk, pad, c, fail, b;
 	GLOBAL uint8_t *c0, *c1;
 	struct poly r, cur, h, p, cv;
 
@@ -439,53 +443,52 @@ static INLINE uint32_t gda_chacha_rx(LDS uint32_t *fr, uint32_t pw,
 	for (i = 0; i < 6; i++)
 		poly_mul(&cur, &cur, &cur);
 
-	/* AAD first, the ciphertext, the lengths last. */
+	/*
+	 * AAD first, the ciphertext, the lengths last, after as many zero
+	 * pieces as give every lane the same number: lane l takes positions
+	 * l + 64k.
+	 */
+	kk = (nb + 63) / 64;
+	pad = 64 * kk - nb;
 	for (i = 0; i < 5; i++)
 		h.l[i] = 0;
-	last = 0;
 #pragma clang loop unroll(disable)
-	for (k = lane; k < nb; k += 64) {
+	for (k = lane; k < 64 * kk; k += 64) {
+		c = k - pad;
 		for (i = 0; i < 4; i++) {
-			b = 16 * (k - 1) + 4 * i;
-			w[i] = !k ? (i == 0 ? spi : i == 1 ? seq : 0) :
-			       k == nb - 1 ? (i == 0 ? 8 : i == 2 ? clen : 0) :
+			b = 16 * (c - 1) + 4 * i;
+			w[i] = !c ? (i == 0 ? spi : i == 1 ? seq : 0) :
+			       c == nb - 1 ? (i == 0 ? 8 : i == 2 ? clen : 0) :
 			       b >= clen ? 0 :
 			       b + 4 <= clen ? fr[pw + b / 4] :
 			       fr[pw + b / 4] & ((1u << (8 * (clen - b))) - 1);
 		}
-		poly_from_words(&cv, w, 1);
+		poly_from_words(&cv, w, k >= pad);
+		if (k < pad)
+			for (i = 0; i < 5; i++)
+				cv.l[i] = 0;
 		poly_mul(&h, &h, &cur);
 		poly_add(&h, &cv);
 		poly_carry(&h);
-		last = k;
 	}
 
-	/* Times r^(nb - last), 1 to 64. */
-	e = nb - last;
-	p.l[0] = 1;
-	for (i = 1; i < 5; i++)
-		p.l[i] = 0;
+	/* The lanes' sums, each times r^(63 - lane): pairs, each lower one
+	 * times r^j and its partner's added, j = 1 .. 16 in each half, then
+	 * the halves.  Times r once more, the last piece's power being 1.
+	 */
 	cur = r;
-	for (i = 0; i < 7; i++) {
-		if (e >> i & 1)
-			poly_mul(&p, &p, &cur);
-		poly_mul(&cur, &cur, &cur);
-	}
-	poly_mul(&h, &h, &p);
-	if (lane >= nb)
-		for (i = 0; i < 5; i++)
-			h.l[i] = 0;
-
-	/* Each half's in each of its lanes, then the two. */
-	gda_poly_fold(&h, GDA_SWIZZLE_XOR(16));
-	gda_poly_fold(&h, GDA_SWIZZLE_XOR(8));
-	gda_poly_fold(&h, GDA_SWIZZLE_XOR(4));
-	gda_poly_fold(&h, GDA_SWIZZLE_XOR(2));
-	gda_poly_fold(&h, GDA_SWIZZLE_XOR(1));
+	gda_poly_tree(&h, &cur, GDA_SWIZZLE_XOR(1));
+	gda_poly_tree(&h, &cur, GDA_SWIZZLE_XOR(2));
+	gda_poly_tree(&h, &cur, GDA_SWIZZLE_XOR(4));
+	gda_poly_tree(&h, &cur, GDA_SWIZZLE_XOR(8));
+	gda_poly_tree(&h, &cur, GDA_SWIZZLE_XOR(16));
 	for (i = 0; i < 5; i++)
-		h.l[i] = __builtin_amdgcn_readlane(h.l[i], 0) +
-			 __builtin_amdgcn_readlane(h.l[i], 32);
+		p.l[i] = __builtin_amdgcn_readlane(h.l[i], 32);
+	poly_mul(&h, &h, &cur);
+	for (i = 0; i < 5; i++)
+		h.l[i] = __builtin_amdgcn_readlane(h.l[i], 0) + p.l[i];
 	poly_carry(&h);
+	poly_mul(&h, &h, &r);
 	poly_tag(tag, &h, s);
 	fail = 0;
 	for (i = 0; i < 4; i++)
