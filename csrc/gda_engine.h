@@ -392,17 +392,15 @@ static INLINE void gda_ipsec_chunk(uint32_t c[4], GLOBAL const uint8_t *f,
  */
 static INLINE uint32_t gda_chacha_rx(LDS uint32_t *fr, uint32_t pw,
 				     GLOBAL uint8_t *pg, uint32_t iv,
-				     const CONSTANT uint32_t *rk, uint32_t salt,
+				     const uint32_t key[8], uint32_t salt,
 				     uint32_t spi, uint32_t seq, uint32_t clen,
 				     uint32_t lane)
 {
-	uint32_t key[8], nonce[3], blk[16], s[4], w[4], tag[4];
+	uint32_t nonce[3], blk[16], s[4], w[4], tag[4];
 	uint32_t n = (clen + 15) / 16, nb = n + 2, i, k, e, last, fail, b;
 	GLOBAL uint8_t *c0, *c1;
 	struct poly r, cur, h, p, cv;
 
-	for (i = 0; i < 8; i++)
-		key[i] = uniform32(rk[i]);
 	nonce[0] = salt;
 	nonce[1] = uniform32(gda_lds32u(fr, iv));
 	nonce[2] = uniform32(gda_lds32u(fr, iv + 4));
@@ -496,6 +494,17 @@ static INLINE uint32_t gda_chacha_rx(LDS uint32_t *fr, uint32_t pw,
 }
 
 /*
+ * The SA the round's last ESP packet had, which the next most likely has
+ * too: what decrypting with it takes, from the table and its keys' BO.  SAs
+ * come and go between rounds, the queues parked, so a round may keep it.
+ */
+struct gda_sa_cache {
+	uint32_t spi, slot, rounds, salt;	/* slot ~0 for none */
+	uint64_t rk, hpow;
+	uint32_t key[8];			/* ChaCha20's */
+};
+
+/*
  * A passed packet the wave is on, decrypted in its RX page if it is ESP of an
  * SA in the table: @src at the sixteen bytes it starts in, the packet @off
  * past them and @len long.  Everything but the payload stays as it came - the
@@ -510,7 +519,8 @@ static INLINE uint32_t gda_chacha_rx(LDS uint32_t *fr, uint32_t pw,
  * frame's own bytes around it.
  */
 static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
-				    uint32_t off, uint32_t len)
+				    uint32_t off, uint32_t len,
+				    struct gda_sa_cache *sc)
 {
 	GLOBAL const uint8_t *f = src + off;
 	GLOBAL const struct knod_persistent_ipsec_sa *sa;
@@ -546,30 +556,43 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 	if (m > 256)
 		return 0;
 	spi = uniform32(gda_lds32u(fr, fo + ESP_SPI));
-	slot = (int)uniform32(gda_ipsec_sa(g, spi));
-	if (slot < 0)
-		return 0;
+	if (sc->slot == ~0u || sc->spi != spi) {
+		slot = (int)uniform32(gda_ipsec_sa(g, spi));
+		if (slot < 0)
+			return 0;
+		sa = (GLOBAL const struct knod_persistent_ipsec_sa *)
+		     GL64(g, IPSEC_SA) + slot;
+		sc->spi = spi;
+		sc->slot = slot;
+		sc->rounds = uniform32(get32(&sa->rounds));
+		sc->salt = uniform32(get32(&sa->salt));
+		sc->rk = uniform64(get64(&sa->rk));
+		sc->hpow = uniform64(get64(&sa->hpow));
+		if (!sc->rounds)
+			for (i = 0; i < 8; i++)
+				sc->key[i] = uniform32(
+					((const CONSTANT uint32_t *)sc->rk)[i]);
+	}
+	slot = sc->slot;
+	rounds = sc->rounds;
+	salt = sc->salt;
+	rk = (const CONSTANT uint32_t *)sc->rk;
 	/* Made afresh for each packet: what comes of the lane is cheap, and
 	 * kept from one packet to the next it takes registers the multiply
 	 * wants.
 	 */
 	GCM_HERE(lane);
 
-	sa = (GLOBAL const struct knod_persistent_ipsec_sa *)GL64(g, IPSEC_SA) +
-	     slot;
-	rounds = uniform32(get32(&sa->rounds));
-	salt = uniform32(get32(&sa->salt));
-	rk = (const CONSTANT uint32_t *)uniform64(get64(&sa->rk));
 	if (!rounds) {
 		seq = uniform32(gda_lds32u(fr, fo + ESP_SPI + 4));
 		fail = gda_chacha_rx(fr, (fo + ESP_DATA) / 4, src - 4 + sh,
-				     fo + ESP_IV, rk, salt, spi, seq, clen,
+				     fo + ESP_IV, sc->key, salt, spi, seq, clen,
 				     lane);
 		return KNOD_PERSIST_PASS_IPSEC |
 		       slot << KNOD_PERSIST_PASS_IPSEC_SA_SHIFT |
 		       (fail ? KNOD_PERSIST_PASS_IPSEC_FAIL : 0);
 	}
-	hpow = (GLOBAL const uint8_t *)uniform64(get64(&sa->hpow));
+	hpow = (GLOBAL const uint8_t *)sc->hpow;
 	seq = uniform32(gda_ld32u(f + ESP_SPI + 4));
 	iv_lo = uniform32(gda_ld32u(f + ESP_IV));
 	iv_hi = uniform32(gda_ld32u(f + ESP_IV + 4));
@@ -1032,6 +1055,7 @@ v4u GDA_FN(gda_ipsec)(ctl_t ctl, uint32_t queue, uint32_t wave, uint32_t s,
 	struct gda g = { .s = s, .packets = (uint64_t)pk_hi << 32 | pk_lo };
 	uint64_t live = (uint64_t)uniform32(hi) << 32 | uniform32(lo);
 	uint64_t todo;
+	struct gda_sa_cache sc = { .slot = ~0u };
 	uint32_t meta = 0;
 
 	ctl = (ctl_t)uniform64((uint64_t)ctl);
@@ -1049,7 +1073,7 @@ v4u GDA_FN(gda_ipsec)(ctl_t ctl, uint32_t queue, uint32_t wave, uint32_t s,
 		b = gda_ipsec_rx(&g, (GLOBAL uint8_t *)GL64(&g, RX_BASE) +
 				 ((uint64_t)__builtin_amdgcn_readlane(page, l) <<
 				  GL(&g, PAGE_SHIFT)) + (o & ~15u),
-				 o & 15, n);
+				 o & 15, n, &sc);
 		if (lane_id() == l)
 			meta = b;
 	}
