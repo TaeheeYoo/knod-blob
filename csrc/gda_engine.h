@@ -328,25 +328,37 @@ static INLINE int gda_ipsec_sa(struct gda *g, uint32_t spi)
 /*
  * The page's bytes from @src - 4 + @sh into the wave's frame copy, its word
  * i the four from there plus 4i, through @end bytes of it: a lane sixteen
- * bytes and the word past them, a kilobyte an instruction, one wait.
+ * bytes and the word past them, two kilobytes' loads out before each wait:
+ * four would want more registers than the call has.
  */
 static INLINE void gda_ipsec_fetch(LDS uint32_t *fr, GLOBAL const uint8_t *src,
 				   uint32_t sh, uint32_t end, uint32_t lane)
 {
-	uint32_t q, i, hi, o[4];
+	GLOBAL const uint32_t *w = (GLOBAL const uint32_t *)(src - 4);
+	uint32_t q, i, j, hi, nx[2];
+	v4u v[2];
 
-	for (q = lane; 16 * q < end; q += 64) {
-		GLOBAL const uint32_t *w =
-			(GLOBAL const uint32_t *)(src - 4) + 4 * q;
-		v4u v = get128(w);
-		uint32_t nx = get32(w + 4);
+	for (q = lane; 16 * q < end; q += 128) {
+#pragma unroll
+		for (j = 0; j < 2; j++)
+			if (16 * (q + 64 * j) < end) {
+				v[j] = get128(w + 4 * (q + 64 * j));
+				nx[j] = get32(w + 4 * (q + 64 * j) + 4);
+			}
+#pragma unroll
+		for (j = 0; j < 2; j++)
+			if (16 * (q + 64 * j) < end) {
+				uint32_t o[4];
 
-		for (i = 0; i < 4; i++) {
-			hi = i < 3 ? v[i + 1] : nx;
-			o[i] = sh ? __builtin_amdgcn_alignbyte(hi, v[i], sh) :
-				    v[i];
-		}
-		*(LDS v4u *)(fr + 4 * q) = (v4u){ o[0], o[1], o[2], o[3] };
+				for (i = 0; i < 4; i++) {
+					hi = i < 3 ? v[j][i + 1] : nx[j];
+					o[i] = sh ? __builtin_amdgcn_alignbyte(
+							hi, v[j][i], sh) :
+						    v[j][i];
+				}
+				*(LDS v4u *)(fr + 4 * (q + 64 * j)) =
+					(v4u){ o[0], o[1], o[2], o[3] };
+			}
 	}
 	__builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
 }
@@ -714,6 +726,29 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 	       (uniform32(fail) ? KNOD_PERSIST_PASS_IPSEC_FAIL : 0);
 }
 #endif
+
+/*
+ * @n bytes from @src to @dst, sixteen a lane: every lane's loads out first,
+ * up to four kilobytes of them, and one wait before the stores, not a wait
+ * a kilobyte.
+ */
+static INLINE void gda_copy(GLOBAL uint8_t *dst, GLOBAL const uint8_t *src,
+			    uint32_t n)
+{
+	uint32_t b, i;
+	v4u r[4];
+
+	for (b = 16 * lane_id(); b < n; b += 4096) {
+#pragma unroll
+		for (i = 0; i < 4; i++)
+			if (b + 1024 * i < n)
+				r[i] = get128(src + b + 1024 * i);
+#pragma unroll
+		for (i = 0; i < 4; i++)
+			if (b + 1024 * i < n)
+				put128(dst + b + 1024 * i, r[i]);
+	}
+}
 
 /*
  * Pick up the rings where the last shader left them, or post them afresh for
@@ -1237,7 +1272,7 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 	slot = (ppc + pbase + rank(pass)) & GL(&g, PASS_MASK);
 	copy = ballot(((pass >> lane_id()) & 1) && pbase + rank(pass) < room);
 	while (copy) {
-		uint32_t l = __builtin_ctzll(copy), from, to, b;
+		uint32_t l = __builtin_ctzll(copy), from, to;
 		GLOBAL uint8_t *src, *dst;
 
 		copy &= copy - 1;
@@ -1250,8 +1285,7 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 		dst = (GLOBAL uint8_t *)GL64(&g, PASS_STAGE) +
 		      ((uint64_t)__builtin_amdgcn_readlane(slot, l) <<
 		       GL(&g, PAGE_SHIFT)) + from;
-		for (b = 16 * lane_id(); b < to - from; b += 1024)
-			put128(dst + b, get128(src + b));
+		gda_copy(dst, src, to - from);
 	}
 	if (((pass >> lane_id()) & 1) && pbase + rank(pass) < room)
 		put64((GLOBAL uint64_t *)GL64(&g, PASS_RING) + slot,
