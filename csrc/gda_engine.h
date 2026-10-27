@@ -427,18 +427,16 @@ static INLINE void gda_ipsec_chunk(uint32_t c[4], GLOBAL const uint8_t *f,
  * powers of r are the wave's to make: a lane takes every 64th sixteen bytes
  * the tag runs over, by Horner with r^64, times the power of r its last is
  * from the end, and the lanes' sums are added up.  Then a lane decrypts a
- * 64-byte block of the copy, and the page takes the payload back sixteen
- * aligned bytes a lane: @pg the page's address of the copy's byte 0.
+ * 64-byte block of the copy, which goes to the host from there.
  */
 static INLINE uint32_t gda_chacha_rx(LDS uint32_t *fr, uint32_t pw,
-				     GLOBAL uint8_t *pg, uint32_t iv,
+				     uint32_t iv,
 				     const uint32_t key[8], uint32_t salt,
 				     uint32_t spi, uint32_t seq, uint32_t clen,
 				     uint32_t lane, GLOBAL uint32_t *dbg)
 {
 	uint32_t nonce[3], blk[16], s[4], w[4], tag[4], t = gda_cyc();
 	uint32_t n = (clen + 15) / 16, nb = n + 2, i, k, kk, pad, c, fail, b;
-	GLOBAL uint8_t *c0, *c1;
 	struct poly r, cur, h, p, cv;
 
 	nonce[0] = salt;
@@ -520,17 +518,6 @@ static INLINE uint32_t gda_chacha_rx(LDS uint32_t *fr, uint32_t pw,
 	}
 	__builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
 
-	/* The page's sixteen-byte pieces over the payload, out of the copy. */
-	c0 = (GLOBAL uint8_t *)((uintptr_t)(pg + 4 * pw) & ~(uintptr_t)15);
-	c1 = (GLOBAL uint8_t *)(((uintptr_t)(pg + 4 * pw + clen) + 15) &
-				~(uintptr_t)15);
-	for (b = 16 * lane; c0 + b < c1; b += 1024) {
-		uint32_t at = c0 + b - pg;
-
-		put128(c0 + b, (v4u){ gda_lds32u(fr, at), gda_lds32u(fr, at + 4),
-				      gda_lds32u(fr, at + 8),
-				      gda_lds32u(fr, at + 12) });
-	}
 	gda_prof(dbg, GDA_PROF_DECRYPT, t);
 	return uniform32(fail);
 }
@@ -562,7 +549,7 @@ struct gda_sa_cache {
  */
 static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 				    uint32_t off, uint32_t len,
-				    struct gda_sa_cache *sc)
+				    struct gda_sa_cache *sc, uint32_t *in_lds)
 {
 	GLOBAL const uint8_t *f = src + off;
 	GLOBAL const struct knod_persistent_ipsec_sa *sa;
@@ -580,13 +567,16 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 	int slot, d, lim;
 
 	/* The frame into LDS in one go, its payload on a word: copy byte fo
-	 * is the frame's first.
+	 * is the frame's first.  From then on the copy is what goes out, but
+	 * for AES-GCM, which decrypts the page.
 	 */
+	*in_lds = 0;
 	if (len < ESP_DATA + ESP_ICV ||
 	    fo + len + 4 + 16 > KNOD_PERSIST_GDA_IPSEC_FRAME_BYTES)
 		return 0;
 	gda_ipsec_fetch(fr, src, sh, fo + len + 4, lane);
 	gda_prof(dbg, GDA_PROF_FETCH, t0);
+	*in_lds = 1;
 	if (gda_lds_be16(fr, fo + 12) != 0x0800 ||
 	    (gda_lds32u(fr, fo + 14) & 0xff) != 0x45 ||
 	    (gda_lds_be16(fr, fo + 20) & 0x3fff) ||
@@ -630,7 +620,7 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 
 	if (!rounds) {
 		seq = uniform32(gda_lds32u(fr, fo + ESP_SPI + 4));
-		fail = gda_chacha_rx(fr, (fo + ESP_DATA) / 4, src - 4 + sh,
+		fail = gda_chacha_rx(fr, (fo + ESP_DATA) / 4,
 				     fo + ESP_IV, sc->key, salt, spi, seq, clen,
 				     lane, dbg);
 		if (!lane)
@@ -640,6 +630,7 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 		       (fail ? KNOD_PERSIST_PASS_IPSEC_FAIL : 0);
 	}
 	hpow = (GLOBAL const uint8_t *)sc->hpow;
+	*in_lds = 0;
 	seq = uniform32(gda_ld32u(f + ESP_SPI + 4));
 	iv_lo = uniform32(gda_ld32u(f + ESP_IV));
 	iv_hi = uniform32(gda_ld32u(f + ESP_IV + 4));
@@ -1120,11 +1111,29 @@ static INLINE struct gda_share gda_share(struct gda *g, uint32_t left)
 
 #ifdef GDA_IPSEC
 /*
- * After the program, before gda_round_end(): the packets that pass decrypted
- * where they are, for gda_round_end() to copy as any other.  Returns each
- * lane's KNOD_PERSIST_PASS_IPSEC* bits, for gda_round_end() to put in its
- * entry.  Apart from it, since the two together want more VGPRs than a call
- * has.
+ * The frame copy in @fr to the host: @n bytes from its page's sixteen
+ * aligned ones the frame starts in, @off bytes in, a lane sixteen bytes.
+ */
+static INLINE void gda_ipsec_out(GLOBAL uint8_t *dst, LDS const uint32_t *fr,
+				 uint32_t off, uint32_t n)
+{
+	uint32_t b, at, sh = (off + ESP_DATA) & 3;
+
+	for (b = 16 * lane_id(); b < n; b += 1024) {
+		at = b + 4 - sh;
+		put128(dst + b, (v4u){ gda_lds32u(fr, at), gda_lds32u(fr, at + 4),
+				       gda_lds32u(fr, at + 8),
+				       gda_lds32u(fr, at + 12) });
+	}
+}
+
+/*
+ * After the program, before gda_round_end(): the packets that pass, to the
+ * host, decrypted on the way if they are ESP of an SA in the table.  The
+ * PASS slots are reserved here, as gda_round_end() does for an engine
+ * without IPsec, and a packet goes from its LDS copy - nothing is read back
+ * from the page it was decrypted in - but for AES-GCM's, decrypted in the
+ * page.  The entries too; gda_round_end() publishes them.
  */
 v4u GDA_FN(gda_ipsec)(ctl_t ctl, uint32_t queue, uint32_t wave, uint32_t s,
 		      uint32_t pk_lo, uint32_t pk_hi, uint32_t verdict,
@@ -1133,29 +1142,77 @@ v4u GDA_FN(gda_ipsec)(ctl_t ctl, uint32_t queue, uint32_t wave, uint32_t s,
 {
 	struct gda g = { .s = s, .packets = (uint64_t)pk_hi << 32 | pk_lo };
 	uint64_t live = (uint64_t)uniform32(hi) << 32 | uniform32(lo);
-	uint64_t todo;
 	struct gda_sa_cache sc = { .slot = ~0u };
-	uint32_t meta = 0, t0 = gda_cyc();
+	uint32_t meta = 0, t0 = gda_cyc(), ppc, pcc, room, pbase = 0;
+	uint32_t i;
+	uint64_t pass, ok;
 
 	ctl = (ctl_t)uniform64((uint64_t)ctl);
 	gda_load(&g, ctl, uniform32(queue), uniform32(wave));
-	todo = ballot(((live >> lane_id()) & 1) && verdict == XDP_PASS);
-	while (todo) {
-		uint32_t l = __builtin_ctzll(todo), o, b, n;
+	pass = ballot(((live >> lane_id()) & 1) && verdict == XDP_PASS);
 
-		todo &= todo - 1;
+	/* The PASS slots, as gda_round_end() would have them. */
+	if (!lane_id())
+		g.meet->p[g.wave] = __builtin_popcountll(pass);
+	if (!g.wave) {
+		ppc = GL(&g, PASS_PC);
+		pcc = GL(&g, PASS_CC);
+		if (GL(&g, PASS_MASK) + 1 - (ppc - pcc) < 64 * GL(&g, WAVES))
+			pcc = get32((GLOBAL uint8_t *)GL64(&g, PASS_RING) +
+				    8 * (GL(&g, PASS_MASK) + 1) +
+				    KNOD_PERSIST_PASS_CC);
+		if (!lane_id()) {
+			g.meet->pass_pc = ppc;
+			g.meet->pass_room = GL(&g, PASS_MASK) + 1 - (ppc - pcc);
+		}
+	}
+	barrier();
+	ppc = g.meet->pass_pc;
+	room = g.meet->pass_room;
+	for (i = 0; i < KNOD_PERSIST_GDA_WAVES_MAX; i++)
+		if (i < g.wave && i < GL(&g, WAVES))
+			pbase += g.meet->p[i];
+	ok = ballot(((pass >> lane_id()) & 1) && pbase + rank(pass) < room);
+
+	while (ok) {
+		uint32_t l = __builtin_ctzll(ok), o, n, b = 0, in_lds = 0;
+		uint32_t from, to, slot;
+		GLOBAL uint8_t *src, *dst;
+
+		ok &= ok - 1;
+		slot = (ppc + pbase +
+			__builtin_popcountll(pass & ((1ull << l) - 1))) &
+		       GL(&g, PASS_MASK);
 		o = __builtin_amdgcn_readlane(off, l);
 		n = __builtin_amdgcn_readlane(len, l);
+		from = o & ~15u;
+		to = (o + n + 15) & ~15u;
+		src = (GLOBAL uint8_t *)GL64(&g, RX_BASE) +
+		      ((uint64_t)__builtin_amdgcn_readlane(page, l) <<
+		       GL(&g, PAGE_SHIFT)) + from;
+		dst = (GLOBAL uint8_t *)GL64(&g, PASS_STAGE) +
+		      ((uint64_t)slot << GL(&g, PAGE_SHIFT)) + from;
 		/* Its LDS copy reads a little past it: not past its page. */
-		if (o + n + 32 > 1u << GL(&g, PAGE_SHIFT))
-			continue;
-		b = gda_ipsec_rx(&g, (GLOBAL uint8_t *)GL64(&g, RX_BASE) +
-				 ((uint64_t)__builtin_amdgcn_readlane(page, l) <<
-				  GL(&g, PAGE_SHIFT)) + (o & ~15u),
-				 o & 15, n, &sc);
+		if (o + n + 32 <= 1u << GL(&g, PAGE_SHIFT))
+			b = gda_ipsec_rx(&g, src, o & 15, n, &sc, &in_lds);
+		if (in_lds)
+			gda_ipsec_out(dst, gda_ipsec_frame(&g), o & 15,
+				      to - from);
+		else
+			/* Rare here: a kilobyte at a time keeps the
+			 * registers for the decrypting.
+			 */
+			for (i = 16 * lane_id(); i < to - from; i += 1024)
+				put128(dst + i, get128(src + i));
 		if (lane_id() == l)
 			meta = b;
 	}
+	if (((pass >> lane_id()) & 1) && pbase + rank(pass) < room)
+		put64((GLOBAL uint64_t *)GL64(&g, PASS_RING) +
+		      ((ppc + pbase + rank(pass)) & GL(&g, PASS_MASK)),
+		      (uint64_t)(off | len << 16) << 32 |
+		      nic_rx_csum(&g, GL(&g, CI) + 64 * g.wave + lane_id()) |
+		      meta);
 	stores_out();
 	gda_prof(g.entry->regress_dbg, GDA_PROF_IPSEC, t0);
 	return (v4u){ meta, 0, 0, 0 };
@@ -1204,7 +1261,9 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 	pass = ballot(in && verdict == XDP_PASS);
 	if (!lane_id()) {
 		g.meet->k[g.wave] = __builtin_popcountll(tx);
+#ifndef GDA_IPSEC
 		g.meet->p[g.wave] = __builtin_popcountll(pass);
+#endif
 	}
 	if (!g.wave) {
 		pc = GL(&g, SQ_PC);
@@ -1214,9 +1273,11 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 		/* A dead SQ has room for none: the waves see it full. */
 		if (GL(&g, TX_DEAD))
 			cc = pc - GL(&g, SQ_MASK) - 1;
+#ifndef GDA_IPSEC
 		/* The PASS slots free: what the host had finished with when
 		 * last looked, and a look past the ring for more only when
-		 * that might not do for a whole round.
+		 * that might not do for a whole round.  gda_ipsec() has done
+		 * so for an IPsec engine.
 		 */
 		ppc = GL(&g, PASS_PC);
 		pcc = GL(&g, PASS_CC);
@@ -1226,11 +1287,14 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 				    KNOD_PERSIST_PASS_CC);
 			SET(&g, PASS_CC, pcc);
 		}
+#endif
 		if (!lane_id()) {
 			g.meet->sq_pc = pc;
 			g.meet->sq_cc = cc;
+#ifndef GDA_IPSEC
 			g.meet->pass_pc = ppc;
 			g.meet->pass_room = GL(&g, PASS_MASK) + 1 - (ppc - pcc);
+#endif
 		}
 	}
 	barrier();
@@ -1269,6 +1333,7 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 	 * piece rather than sixty-four pieces of sixty-four packets.  Then
 	 * each lane's entry.  The RX pages are free once this round ends.
 	 */
+#ifndef GDA_IPSEC
 	slot = (ppc + pbase + rank(pass)) & GL(&g, PASS_MASK);
 	copy = ballot(((pass >> lane_id()) & 1) && pbase + rank(pass) < room);
 	while (copy) {
@@ -1291,6 +1356,7 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 		put64((GLOBAL uint64_t *)GL64(&g, PASS_RING) + slot,
 		      (uint64_t)(off | len << 16) << 32 | nic_rx_csum(&g, pos) |
 		      meta);
+#endif
 
 	/* Every wave's entries are in memory before wave 0 says they are. */
 	stores_out();
@@ -1342,6 +1408,13 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 		gda_save(&g);
 	}
 #ifdef GDA_IPSEC
+	/* gda_ipsec() took the PASS packets. */
+	(void)pass;
+	(void)copy;
+	(void)pbase;
+	(void)pcc;
+	(void)slot;
+	(void)meta;
 	gda_prof(g.entry->regress_dbg, GDA_PROF_END, t0);
 	if (!lane_id())
 		add((gptr)&g.entry->regress_dbg[GDA_PROF_END_CALLS], 1);
