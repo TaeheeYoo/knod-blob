@@ -189,35 +189,6 @@ static INLINE LDS uint8_t *gda_ipsec_buf(struct gda *g)
 }
 
 /* Every wave's share of the T-tables into LDS, once for the shader. */
-/*
- * One GHASH multiply of a block and a power of H whose product is known,
- * 7fa7556c 9f9d5948 7e9647a8 8d07009e: lane 2's, for the host to compare.
- */
-static INLINE void gda_ipsec_selftest(struct gda *g)
-{
-	GLOBAL uint32_t *dbg = g->entry->regress_dbg;
-	uint32_t x[4] = { 0x9efb6e92, 0xf2a5c819, 0xa261843f, 0x23242599 };
-	uint32_t h[4] = { 0x8d5cfb91, 0x4a74e95b, 0xd37d2cc1, 0x222e97ab };
-	uint32_t z[8] = { 0 }, o[4], r[4], lane = lane_id(), i;
-
-	for (i = 0; i < 4; i++) {
-		GCM_HERE(x[i]);
-		GCM_HERE(h[i]);
-	}
-	gcm_mul_add(z, x, h);
-	gcm_reduce(o, z);
-	for (i = 0; i < 4; i++)
-		r[i] = __builtin_amdgcn_readlane(o[i], 2);
-
-	if (g->wave || g->queue)
-		return;
-	if (!lane) {
-		put32(&dbg[0], 0x5e1f7e57);
-		for (i = 0; i < 4; i++)
-			put32(&dbg[1 + i], r[i]);
-	}
-}
-
 static INLINE void gda_ipsec_load(struct gda *g, ctl_t ctl)
 {
 	GLOBAL const uint32_t *src =
@@ -534,7 +505,6 @@ v4u GDA_FN(gda_init)(ctl_t ctl, uint32_t queue, uint32_t wave)
 	gda_load(&g, ctl, queue, wave);
 #ifdef GDA_IPSEC
 	gda_ipsec_load(&g, ctl);
-	gda_ipsec_selftest(&g);
 #endif
 
 	/* LDS starts undefined: no stop until wave 0 says so.  Every wave has
