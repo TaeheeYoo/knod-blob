@@ -23,6 +23,12 @@ ENGINE_FNS	:= $(shell grep -oh 'CFN_BODY_[a-z_0-9]*' src/gda_engine*.S | \
 ABI_HDR		:= include/uapi/linux/knod_blob.h
 UAPI_HDRS	:= $(wildcard include/uapi/linux/*.h)
 CLANG		?= clang
+# The llc of the same LLVM, for the routines' IR.
+LLC		?= $(shell $(CLANG) -print-prog-name=llc)
+JIT_VREG	:= $(shell sed -n 's/^\#define KNOD_BLOB_JIT_VREG[[:space:]]*//p' \
+		     include/uapi/linux/knod_blob.h)
+IPSEC_VREG	:= $(shell sed -n 's/^\#define KNOD_BLOB_PRO_OFF_VREG[[:space:]]*\([0-9]*\).*/\1/p' \
+		     include/uapi/linux/knod_blob.h)
 CSRC		:= $(wildcard csrc/*.c)
 BUILD		:= build
 # The preprocessor flags decide what goes in - a probe, or no probe - and they
@@ -105,10 +111,19 @@ $(foreach i,$(ISAS),$(eval $(call isa_rules,bpf-persistent,$(i))))
 # macros the engine in src/ puts inside itself, and the routines a program
 # calls.
 define cfn_rules
+#
+# Through the IR, to give every function amdgpu-num-vgpr, which clang takes
+# for kernels only: a function that may not touch the VGPRs from
+# KNOD_BLOB_JIT_VREG up - KNOD_BLOB_IPSEC_VREG_TOP for an IPsec engine's - has
+# to be allocated below them, or a compiler that would rather not save the
+# callee-saved ones under them goes past them.
 $(BUILD)/%.$(1).s: csrc/%.c $(wildcard csrc/*.h) $(UAPI_HDRS) | $(BUILD)
 	$(CLANG) -target amdgcn-amd-amdhsa -mcpu=$(CPU_$(1)) -mwavefrontsize64 \
 		-mcumode $(CFN_ATTR_$(1)) -O2 -nogpulib -ffreestanding -fno-builtin \
-		-Wall -Werror -Iinclude/uapi -S $$< -o $$@
+		-Wall -Werror -Iinclude/uapi -S -emit-llvm $$< -o $$@.ll
+	sed -E 's/^(attributes #[0-9]+ = \{)/\1 "amdgpu-num-vgpr"="$$(if $$(findstring _ipsec,$$*),$(IPSEC_VREG),$(JIT_VREG))"/' \
+		$$@.ll > $$@.vgpr.ll
+	$(LLC) -O2 $$@.vgpr.ll -o $$@
 
 $(BUILD)/cfn.$(1).inc $(BUILD)/routines.$(1).S &: \
 		$(patsubst csrc/%.c,$(BUILD)/%.$(1).s,$(CSRC)) \

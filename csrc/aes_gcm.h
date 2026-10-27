@@ -126,8 +126,14 @@ AES_INLINE void gcm_to_ghash(uint32_t out[4], const uint32_t in[4])
  */
 #ifdef __AMDGPU__
 #define GCM_HERE(v)	__asm__ volatile("" : "+v"(v))
+/* @v, and @a..@d only from then on: what reads them waits for @v. */
+#define GCM_AFTER(v, a, b, c, d)	\
+	__asm__ volatile("" : "+v"(v), "+v"(a), "+v"(b), "+v"(c), "+v"(d))
+#define GCM_AFTER2(v, a, b)	__asm__ volatile("" : "+v"(v), "+v"(a), "+v"(b))
 #else
 #define GCM_HERE(v)	do { } while (0)
+#define GCM_AFTER(v, a, b, c, d)	do { } while (0)
+#define GCM_AFTER2(v, a, b)	do { } while (0)
 #endif
 
 /* The low half of a carry-less 32x32 multiply, from integer multiplies of
@@ -141,15 +147,13 @@ AES_INLINE uint32_t gcm_bmul32(uint32_t x, uint32_t y)
 	uint32_t y2 = y & 0x44444444, y3 = y & 0x88888888;
 	uint32_t z0, z1, z2, z3;
 
+	/* A row at a time: each pins the operands the next one reads. */
 	z0 = x0 * y0 ^ x1 * y3 ^ x2 * y2 ^ x3 * y1;
-	GCM_HERE(z0);
-	GCM_HERE(y0);
+	GCM_AFTER(z0, y0, y1, y2, y3);
 	z1 = x0 * y1 ^ x1 * y0 ^ x2 * y3 ^ x3 * y2;
-	GCM_HERE(z1);
-	GCM_HERE(y1);
+	GCM_AFTER(z1, y0, y1, y2, y3);
 	z2 = x0 * y2 ^ x1 * y1 ^ x2 * y0 ^ x3 * y3;
-	GCM_HERE(z2);
-	GCM_HERE(y2);
+	GCM_AFTER(z2, y0, y1, y2, y3);
 	z3 = x0 * y3 ^ x1 * y2 ^ x2 * y1 ^ x3 * y0;
 	return (z0 & 0x11111111) | (z1 & 0x22222222) |
 	       (z2 & 0x44444444) | (z3 & 0x88888888);
@@ -192,8 +196,9 @@ AES_INLINE uint32_t gcm_rev32(uint32_t x)
 	(z)[(k) + 1] ^= (hi);					\
 } while (0)
 
-/* @a * @b carry-less, in two halves.  Each product is added in and its halves
- * pinned before the next starts, which keeps the registers down.
+/* @a * @b carry-less, in two halves.  Each product is added in before the
+ * next one's operands are let go, which keeps the registers down whatever the
+ * compiler would rather schedule.
  */
 AES_INLINE void gcm_clmul32(uint32_t a, uint32_t b, uint32_t *lo,
 			    uint32_t *hi)
@@ -201,6 +206,7 @@ AES_INLINE void gcm_clmul32(uint32_t a, uint32_t b, uint32_t *lo,
 	GCM_HERE(a);
 	GCM_HERE(b);
 	*lo = gcm_bmul32(gcm_rev32(a), gcm_rev32(b));
+	GCM_AFTER2(*lo, a, b);
 	*hi = gcm_rev32(gcm_bmul32(a, b)) >> 1;
 }
 
@@ -221,15 +227,15 @@ AES_INLINE void gcm_mul_add(uint32_t z[8], const uint32_t x[4],
 	GCM_ADD(z, 1, lo, hi);
 	GCM_ADD(z, 2, lo, hi);
 	GCM_ADD(z, 3, lo, hi);
-	GCM_HERE(lo);
-	GCM_HERE(hi);
+	GCM_AFTER(lo, a[0], a[1], a[2], a[3]);
+	GCM_AFTER(hi, b[0], b[1], b[2], b[3]);
 	gcm_clmul32(a[1], b[1], &lo, &hi);
 	GCM_ADD(z, 1, lo, hi);
 	GCM_ADD(z, 2, lo, hi);
 	GCM_ADD(z, 3, lo, hi);
 	GCM_ADD(z, 4, lo, hi);
-	GCM_HERE(lo);
-	GCM_HERE(hi);
+	GCM_AFTER(lo, a[0], a[1], a[2], a[3]);
+	GCM_AFTER(hi, b[0], b[1], b[2], b[3]);
 	c0 = a[0];
 	c1 = a[1];
 	d0 = b[0];
@@ -241,8 +247,8 @@ AES_INLINE void gcm_mul_add(uint32_t z[8], const uint32_t x[4],
 	gcm_clmul32(c0 ^ c1, d0 ^ d1, &lo, &hi);
 	GCM_ADD(z, 1, lo, hi);
 	GCM_ADD(z, 3, lo, hi);
-	GCM_HERE(lo);
-	GCM_HERE(hi);
+	GCM_AFTER(lo, a[0], a[1], a[2], a[3]);
+	GCM_AFTER(hi, b[0], b[1], b[2], b[3]);
 
 	/* The high times the high. */
 	gcm_clmul32(a[2], b[2], &lo, &hi);
@@ -250,15 +256,15 @@ AES_INLINE void gcm_mul_add(uint32_t z[8], const uint32_t x[4],
 	GCM_ADD(z, 3, lo, hi);
 	GCM_ADD(z, 4, lo, hi);
 	GCM_ADD(z, 5, lo, hi);
-	GCM_HERE(lo);
-	GCM_HERE(hi);
+	GCM_AFTER(lo, a[0], a[1], a[2], a[3]);
+	GCM_AFTER(hi, b[0], b[1], b[2], b[3]);
 	gcm_clmul32(a[3], b[3], &lo, &hi);
 	GCM_ADD(z, 3, lo, hi);
 	GCM_ADD(z, 4, lo, hi);
 	GCM_ADD(z, 5, lo, hi);
 	GCM_ADD(z, 6, lo, hi);
-	GCM_HERE(lo);
-	GCM_HERE(hi);
+	GCM_AFTER(lo, a[0], a[1], a[2], a[3]);
+	GCM_AFTER(hi, b[0], b[1], b[2], b[3]);
 	c0 = a[2];
 	c1 = a[3];
 	d0 = b[2];
@@ -270,8 +276,8 @@ AES_INLINE void gcm_mul_add(uint32_t z[8], const uint32_t x[4],
 	gcm_clmul32(c0 ^ c1, d0 ^ d1, &lo, &hi);
 	GCM_ADD(z, 3, lo, hi);
 	GCM_ADD(z, 5, lo, hi);
-	GCM_HERE(lo);
-	GCM_HERE(hi);
+	GCM_AFTER(lo, a[0], a[1], a[2], a[3]);
+	GCM_AFTER(hi, b[0], b[1], b[2], b[3]);
 
 	/* The sums times the sums. */
 	for (i = 0; i < 4; i++) {
@@ -285,21 +291,21 @@ AES_INLINE void gcm_mul_add(uint32_t z[8], const uint32_t x[4],
 	gcm_clmul32(c0, d0, &lo, &hi);
 	GCM_ADD(z, 2, lo, hi);
 	GCM_ADD(z, 3, lo, hi);
-	GCM_HERE(lo);
-	GCM_HERE(hi);
+	GCM_AFTER(lo, a[0], a[1], a[2], a[3]);
+	GCM_AFTER(hi, b[0], b[1], b[2], b[3]);
 	gcm_clmul32(c1, d1, &lo, &hi);
 	GCM_ADD(z, 3, lo, hi);
 	GCM_ADD(z, 4, lo, hi);
-	GCM_HERE(lo);
-	GCM_HERE(hi);
+	GCM_AFTER(lo, a[0], a[1], a[2], a[3]);
+	GCM_AFTER(hi, b[0], b[1], b[2], b[3]);
 	GCM_HERE(c0);
 	GCM_HERE(c1);
 	GCM_HERE(d0);
 	GCM_HERE(d1);
 	gcm_clmul32(c0 ^ c1, d0 ^ d1, &lo, &hi);
 	GCM_ADD(z, 3, lo, hi);
-	GCM_HERE(lo);
-	GCM_HERE(hi);
+	GCM_AFTER(lo, a[0], a[1], a[2], a[3]);
+	GCM_AFTER(hi, b[0], b[1], b[2], b[3]);
 }
 
 /* x^128 = x^7 + x^2 + x + 1: fold the top words down, from the top, so what

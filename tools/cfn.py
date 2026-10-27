@@ -11,7 +11,8 @@ body, every function but the engine's own, which the engine puts inside it.
 
 The functions are called by the AMDGPU calling convention, which keeps s34 and
 up for the caller, and knod_blob.h has a function keep off the VGPRs the JIT
-holds from KNOD_BLOB_JIT_VREG up.  Refuses one that touches those, that
+holds from KNOD_BLOB_JIT_VREG up, an IPsec engine's from
+KNOD_BLOB_IPSEC_VREG_TOP.  Refuses one that touches those, that
 needs more stack than a call gets, or that takes the address of a symbol: the
 blob carries the bodies only, so a constant table clang put in .rodata is not
 there to be read.
@@ -29,7 +30,10 @@ def contract():
     def val(name):
         return int(re.search(rf"^#define {name}\s+(\S+)", text, re.M)[1], 0)
 
-    return {n: val("KNOD_BLOB_" + n) for n in ("CALL_STACK_BYTES", "JIT_VREG")}
+    c = {n: val("KNOD_BLOB_" + n) for n in ("CALL_STACK_BYTES", "JIT_VREG",
+                                             "PRO_OFF_VREG")}
+    c["IPSEC_VREG_TOP"] = c["PRO_OFF_VREG"]
+    return c
 
 
 REG = re.compile(r"\b([sv])(?:\[(\d+):(\d+)\]|(\d+)\b)")
@@ -51,7 +55,10 @@ def emit(c, name, body, stack, out):
         sys.exit(f"{name}: needs {stack} bytes of stack, a call gets "
                  f"{c['CALL_STACK_BYTES']}")
     top = max(vgprs(body), default=0)
-    if top >= c["JIT_VREG"]:
+    if name.endswith("_ipsec"):
+        if top >= c["IPSEC_VREG_TOP"]:
+            sys.exit(f"{name}: touches v{top}, which the engine holds")
+    elif top >= c["JIT_VREG"]:
         sys.exit(f"{name}: touches v{top}, which the JIT holds")
     for line in body:
         ref = SYMREF.search(line)
