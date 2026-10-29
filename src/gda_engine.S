@@ -9,6 +9,8 @@
 #define BNXT_P5		GDA_CAT(knod_gda_engine_f, KNOD_PERSIST_FMT_BNXT_P5)
 #define BNXT_P7		GDA_CAT(knod_gda_engine_f, KNOD_PERSIST_FMT_BNXT_P7)
 #define IPSEC_MLX5_CX5	GDA_CAT(knod_gda_engine_ipsec_f, KNOD_PERSIST_FMT_MLX5_CX5)
+#define IPSEC_BNXT_P5	GDA_CAT(knod_gda_engine_ipsec_f, KNOD_PERSIST_FMT_BNXT_P5)
+#define IPSEC_BNXT_P7	GDA_CAT(knod_gda_engine_ipsec_f, KNOD_PERSIST_FMT_BNXT_P7)
 
 	GDA_ENGINE MLX5_CX5, mlx5_cx5, 0
 	CFN_BODY_gda_init_mlx5_cx5
@@ -34,3 +36,17 @@
 	CFN_BODY_gda_ipsec_mlx5_cx5_ipsec
 	CFN_BODY_gda_round_end_mlx5_cx5_ipsec
 	GDA_ENGINE_END IPSEC_MLX5_CX5
+
+	GDA_ENGINE IPSEC_BNXT_P5, bnxt_p5_ipsec, 0, 1
+	CFN_BODY_gda_init_bnxt_p5_ipsec
+	CFN_BODY_gda_round_begin_bnxt_p5_ipsec
+	CFN_BODY_gda_ipsec_bnxt_p5_ipsec
+	CFN_BODY_gda_round_end_bnxt_p5_ipsec
+	GDA_ENGINE_END IPSEC_BNXT_P5
+
+	GDA_ENGINE IPSEC_BNXT_P7, bnxt_p7_ipsec, 0, 1
+	CFN_BODY_gda_init_bnxt_p7_ipsec
+	CFN_BODY_gda_round_begin_bnxt_p7_ipsec
+	CFN_BODY_gda_ipsec_bnxt_p7_ipsec
+	CFN_BODY_gda_round_end_bnxt_p7_ipsec
+	GDA_ENGINE_END IPSEC_BNXT_P7
