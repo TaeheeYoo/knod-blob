@@ -114,10 +114,12 @@ define cfn_rules
 # for kernels only: a function that may not touch the VGPRs from
 # KNOD_BLOB_JIT_VREG up has to be allocated below them, or a compiler that
 # would rather not save the callee-saved ones under them goes past them.
-$(BUILD)/%.$(1).s: csrc/%.c $(wildcard csrc/*.h) $(UAPI_HDRS) | $(BUILD)
+$(BUILD)/%.$(1).s: csrc/%.c $(wildcard csrc/*.h) $(UAPI_HDRS) $(FLAGS_STAMP) \
+		| $(BUILD)
 	$(CLANG) -target amdgcn-amd-amdhsa -mcpu=$(CPU_$(1)) -mwavefrontsize64 \
 		-mcumode $(CFN_ATTR_$(1)) -O2 -nogpulib -ffreestanding -fno-builtin \
-		-Wall -Werror -Iinclude/uapi -S -emit-llvm $$< -o $$@.ll
+		-Wall -Werror -Iinclude/uapi $(EXTRA_CPPFLAGS) -S -emit-llvm $$< \
+		-o $$@.ll
 	sed -E 's/^(attributes #[0-9]+ = \{)/\1 "amdgpu-num-vgpr"="$(JIT_VREG)"/' \
 		$$@.ll > $$@.vgpr.ll
 	$(LLC) -O2 $$@.vgpr.ll -o $$@

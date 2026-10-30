@@ -235,8 +235,9 @@ static INLINE void gda_ghash_add(uint32_t z[8], const uint32_t x[4],
 }
 
 /*
- * Where an IPsec engine's time goes, into its queue's regress_dbg: ticks of
- * the GPU's 100 MHz clock, summed by lane 0 of each wave.
+ * Where an IPsec engine's time goes, built with -DKNOD_IPSEC_PROF: into its
+ * queue's regress_dbg, ticks of the GPU's 100 MHz clock, summed by lane 0 of
+ * each wave.  /srv/share/bin/ipsec_prof.sh reads them.
  */
 #define GDA_PROF_PKTS		0
 #define GDA_PROF_FETCH		1
@@ -254,8 +255,10 @@ static INLINE uint32_t gda_cyc(void)
 
 static INLINE void gda_prof(GLOBAL uint32_t *dbg, int i, uint32_t from)
 {
+#ifdef KNOD_IPSEC_PROF
 	if (!lane_id())
 		add((gptr)&dbg[i], gda_cyc() - from);
+#endif
 }
 
 /* The wave's copy of the frame it is on. */
@@ -643,8 +646,10 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 		fail = gda_chacha_rx(fr, (fo + ESP_DATA) / 4,
 				     fo + ESP_IV, sc->key, salt, spi, seq, clen,
 				     lane, dbg);
+#ifdef KNOD_IPSEC_PROF
 		if (!lane)
 			add((gptr)&dbg[GDA_PROF_PKTS], 1);
+#endif
 		return KNOD_PERSIST_PASS_IPSEC |
 		       slot << KNOD_PERSIST_PASS_IPSEC_SA_SHIFT |
 		       (fail ? KNOD_PERSIST_PASS_IPSEC_FAIL : 0);
@@ -1460,8 +1465,10 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 	(void)slot;
 	(void)meta;
 	gda_prof(g.entry->regress_dbg, GDA_PROF_END, t0);
+#ifdef KNOD_IPSEC_PROF
 	if (!lane_id())
 		add((gptr)&g.entry->regress_dbg[GDA_PROF_END_CALLS], 1);
+#endif
 #endif
 	return (v4u){ g.s, g.packets, g.packets >> 32, 0 };
 }
