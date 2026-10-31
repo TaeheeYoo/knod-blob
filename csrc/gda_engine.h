@@ -1225,8 +1225,9 @@ static INLINE v16u gda_round_begin(ctl_t ctl, uint32_t queue, uint32_t wave,
 			nic_tx_reap(&g, GL(&g, SQ_PC));
 			gda_rq_release(&g);
 		}
+		/* A queue the host sends on looks for its frames often. */
 		idle = GL(&g, IDLE_ROUNDS);
-		if (idle < 64) {
+		if (idle < 64 || GL64(&g, HTX)) {
 			SET(&g, IDLE_ROUNDS, idle + 1);
 			__builtin_amdgcn_s_sleep(1);
 		} else {
