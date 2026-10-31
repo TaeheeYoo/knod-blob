@@ -90,6 +90,7 @@ struct gda_meet {
 	uint32_t pass_room;	/* ...and the slots free for this one */
 	uint32_t sq_pc;
 	uint32_t sq_cc;
+	uint32_t htx;		/* host frames wait: a round, even empty */
 	uint32_t n[KNOD_PERSIST_GDA_WAVES_MAX];	/* each wave's run of CQEs */
 	uint32_t k[KNOD_PERSIST_GDA_WAVES_MAX];	/* ...its XDP_TX count */
 	uint32_t p[KNOD_PERSIST_GDA_WAVES_MAX];	/* ...its XDP_PASS count */

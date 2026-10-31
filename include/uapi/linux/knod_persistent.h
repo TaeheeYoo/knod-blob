@@ -93,6 +93,17 @@
 #define KNOD_PERSIST_HTX_PC 0
 #define KNOD_PERSIST_HTX_CC 64
 #define KNOD_PERSIST_HTX_LEN(e) ((e) & 0xffff)
+/* Where in its slot a frame starts: the shader reads a little before it. */
+#define KNOD_PERSIST_HTX_HEAD	64
+/* ...and ESP of SA KNOD_PERSIST_HTX_SA() to seal on the way, its header
+ * KNOD_PERSIST_HTX_ESP_OFF() bytes into the frame, the trailer and room
+ * for the ICV already there.
+ */
+#define KNOD_PERSIST_HTX_ESP		(1ull << 16)
+#define KNOD_PERSIST_HTX_SA_SHIFT	24
+#define KNOD_PERSIST_HTX_SA(e)		(((e) >> 24) & 0xff)
+#define KNOD_PERSIST_HTX_ESP_OFF_SHIFT	32
+#define KNOD_PERSIST_HTX_ESP_OFF(e)	(((e) >> 32) & 0xffff)
 /* A PASS entry's low half: what the NIC found of its checksums. */
 #define KNOD_PERSIST_PASS_CSUM_OK	(1 << 0)	/* IP and L4 good */
 #define KNOD_PERSIST_PASS_CSUM_INNER	(1 << 1)	/* the inner ones too */
