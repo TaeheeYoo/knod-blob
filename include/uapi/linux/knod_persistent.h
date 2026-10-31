@@ -6,7 +6,7 @@
  * The control block, and each queue's entry in it, which the host fills and
  * the engine in knod-blob's csrc/gda.c runs from.
  */
-#define KNOD_PERSIST_VERSION 0x4b500019
+#define KNOD_PERSIST_VERSION 0x4b50001a
 #define KNOD_PERSIST_MAX_QUEUES 32
 /* What a shader that appends PASS entries the host waits on interrupts with;
  * the low 23 bits are all an interrupt carries on every generation.
