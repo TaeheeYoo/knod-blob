@@ -1657,6 +1657,23 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 		      meta);
 #endif
 
+	/* The host's frames for after the round, as many as the SQ has room
+	 * for past the round's own.
+	 */
+	if (!g.wave) {
+		struct gda_htx h = { 0 };
+
+		if (gda_htx_room(&g))
+			gda_htx_take(&g, &h, gda_htx_room(&g) - x.given);
+		if (!lane_id()) {
+			g.meet->htx_n = h.n;
+			g.meet->htx_next[0] = 0;
+			g.meet->htx_next[1] = 0;
+			g.meet->htx_ok[0] = 0;
+			g.meet->htx_ok[1] = 0;
+		}
+	}
+
 	/* Every wave's entries are in memory before wave 0 says they are. */
 	stores_out();
 	barrier();
@@ -1723,107 +1740,119 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 	return (v4u){ g.s, g.packets, g.packets >> 32, 0 };
 }
 
+/*
+ * Every wave: the round's host frames, AES-GCM ESP if @gcm or the rest, one
+ * at a time, whichever wave is free: copied to their pool pages, ESP sealed
+ * on the way.  Whether each may go, in LDS.  How many frames there are.
+ */
+static INLINE uint32_t gda_htx_work(struct gda *g, int gcm)
+{
+	uint32_t n = uniform32(g->meet->htx_n), k;
+	GLOBAL const uint8_t *src;
+	struct gda_htx h;
+	GLOBAL uint8_t *dst;
+	uint64_t e;
+	int ok;
+
+	if (!n)
+		return 0;
+	gda_htx_take(g, &h, n);
+	for (;;) {
+		k = 0;
+		if (!lane_id())
+			k = __atomic_fetch_add(&g->meet->htx_next[gcm], 1,
+					       __ATOMIC_RELAXED);
+		k = __builtin_amdgcn_readfirstlane(k);
+		if (k >= n)
+			break;
+		e = gda_htx_frame(g, &h, k, &src, &dst);
+		ok = 1;
+#ifdef GDA_IPSEC
+		if (gda_htx_is_gcm(g, e) != gcm)
+			continue;
+		if (e & KNOD_PERSIST_HTX_ESP)
+			ok = KNOD_PERSIST_HTX_ESP_OFF(e) == ESP_SPI &&
+			     gda_htx_seal(g, dst, src, KNOD_PERSIST_HTX_LEN(e),
+					  KNOD_PERSIST_HTX_SA(e), gcm);
+		else
+#else
+		if (e & KNOD_PERSIST_HTX_ESP)
+			ok = 0;
+		else
+#endif
+			gda_copy(dst, src, (KNOD_PERSIST_HTX_LEN(e) + 15) & ~15u);
+		if (ok && !lane_id())
+			__atomic_fetch_or(&g->meet->htx_ok[k / 32], 1u << (k & 31),
+					  __ATOMIC_RELAXED);
+	}
+	stores_out();
+	return n;
+}
+
 #ifdef GDA_IPSEC
 /*
- * After gda_round_end(), wave 0: of the frames gda_host_tx() is to send, the
- * ones ESP of an AES-GCM SA sealed to their pool pages, in a call of their
- * own for the registers it takes.  Which they were and which went right, for
- * gda_host_tx() in LDS.
+ * After gda_round_end(): the host frames of AES-GCM SAs sealed, in a call of
+ * their own for the registers it takes.
  */
 v4u GDA_FN(gda_host_gcm)(ctl_t ctl, uint32_t queue, uint32_t wave,
 			 uint32_t s, uint32_t pk_lo, uint32_t pk_hi)
 {
 	struct gda g = { .s = s, .packets = (uint64_t)pk_hi << 32 | pk_lo };
-	GLOBAL const uint8_t *src;
-	uint64_t gcm = 0, ok = 0, e;
-	struct gda_htx h = { 0 };
-	GLOBAL uint8_t *dst;
-	uint32_t l;
 
 	ctl = (ctl_t)uniform64((uint64_t)ctl);
 	gda_load(&g, ctl, uniform32(queue), uniform32(wave));
-	if (g.wave)
-		goto out;
-	if (gda_htx_room(&g))
-		gda_htx_take(&g, &h, gda_htx_room(&g));
-	for (l = 0; l < h.n; l++) {
-		e = gda_htx_frame(&g, &h, l, &src, &dst);
-		if (!gda_htx_is_gcm(&g, e))
-			continue;
-		gcm |= 1ull << l;
-		if (KNOD_PERSIST_HTX_ESP_OFF(e) == ESP_SPI &&
-		    gda_htx_seal(&g, dst, src, KNOD_PERSIST_HTX_LEN(e),
-				 KNOD_PERSIST_HTX_SA(e), 1))
-			ok |= 1ull << l;
-	}
-	if (!lane_id()) {
-		g.meet->htx_n = h.n;
-		g.meet->htx_gcm[0] = gcm;
-		g.meet->htx_gcm[1] = gcm >> 32;
-		g.meet->htx_ok[0] = ok;
-		g.meet->htx_ok[1] = ok >> 32;
-	}
-out:
+	gda_htx_work(&g, 1);
+	return (v4u){ g.s, g.packets, g.packets >> 32, 0 };
+}
+
+/* ...and then the rest, ChaCha20-Poly1305 and plain, likewise. */
+v4u GDA_FN(gda_host_chacha)(ctl_t ctl, uint32_t queue, uint32_t wave,
+			    uint32_t s, uint32_t pk_lo, uint32_t pk_hi)
+{
+	struct gda g = { .s = s, .packets = (uint64_t)pk_hi << 32 | pk_lo };
+
+	ctl = (ctl_t)uniform64((uint64_t)ctl);
+	gda_load(&g, ctl, uniform32(queue), uniform32(wave));
+	gda_htx_work(&g, 0);
 	return (v4u){ g.s, g.packets, g.packets >> 32, 0 };
 }
 #endif
 
 /*
- * After gda_round_end() - and gda_host_gcm() - wave 0: the frames the host
- * queued, each copied to its pool page, ESP sealed on the way, and posted on
- * the SQ.  They hold no RQ entry, so their WQEs say where the CQ stands.  A
- * frame that could not be sealed is skipped, its slot freed all the same.
+ * After gda_round_end() - or an IPsec engine's gda_host_gcm() and
+ * gda_host_chacha() - the rest of the host's frames, then wave 0 posts every
+ * one that may go.  They hold no RQ entry, so their
+ * WQEs say where the CQ stands.  A frame that could not be sealed is
+ * skipped, its slot freed all the same.
  */
 v4u GDA_FN(gda_host_tx)(ctl_t ctl, uint32_t queue, uint32_t wave,
 			uint32_t s, uint32_t pk_lo, uint32_t pk_hi)
 {
 	struct gda g = { .s = s, .packets = (uint64_t)pk_hi << 32 | pk_lo };
-	uint32_t l, len, page, pc, sent;
-	GLOBAL const uint8_t *src;
-	uint64_t done = 0, go = 0, e;
-	struct gda_htx h = { 0 };
-	GLOBAL uint8_t *dst;
-	int ok;
+	uint32_t n, len = 0, page, pc, sent;
+	struct gda_htx h;
+	uint64_t go;
 
 	ctl = (ctl_t)uniform64((uint64_t)ctl);
 	gda_load(&g, ctl, uniform32(queue), uniform32(wave));
-	if (g.wave || !gda_htx_room(&g))
-		goto out;
-	gda_htx_take(&g, &h, gda_htx_room(&g));
 #ifdef GDA_IPSEC
-	/* The same frames gda_host_gcm() looked at, none come since. */
-	h.n = uniform32(g.meet->htx_n) < h.n ? uniform32(g.meet->htx_n) : h.n;
-	done = (uint64_t)uniform32(g.meet->htx_gcm[1]) << 32 |
-	       uniform32(g.meet->htx_gcm[0]);
+	n = uniform32(g.meet->htx_n);
+#else
+	n = gda_htx_work(&g, 0);
+#endif
+	if (!n)
+		goto out;
+	barrier();
+	if (g.wave)
+		goto out;
+
+	gda_htx_take(&g, &h, n);
 	go = (uint64_t)uniform32(g.meet->htx_ok[1]) << 32 |
 	     uniform32(g.meet->htx_ok[0]);
-#endif
-	if (!h.n)
-		goto out;
-	for (l = 0; l < h.n; l++) {
-		if ((done >> l) & 1)
-			continue;
-		e = gda_htx_frame(&g, &h, l, &src, &dst);
-		ok = 1;
-		if (e & KNOD_PERSIST_HTX_ESP) {
-#ifdef GDA_IPSEC
-			ok = KNOD_PERSIST_HTX_ESP_OFF(e) == ESP_SPI &&
-			     gda_htx_seal(&g, dst, src, KNOD_PERSIST_HTX_LEN(e),
-					  KNOD_PERSIST_HTX_SA(e), 0);
-#else
-			ok = 0;
-#endif
-		} else {
-			gda_copy(dst, src, (KNOD_PERSIST_HTX_LEN(e) + 15) & ~15u);
-		}
-		if (ok)
-			go |= 1ull << l;
-	}
-
 	pc = GL(&g, SQ_PC);
 	sent = __builtin_popcountll(go);
-	len = lane_id() < h.n ?
-	      KNOD_PERSIST_HTX_LEN(gda_htx_entry(&h, lane_id())) : 0;
+	if (lane_id() < n)
+		len = KNOD_PERSIST_HTX_LEN(gda_htx_entry(&h, lane_id()));
 	page = h.pool + ((h.cc + lane_id()) & h.pmask);
 	if ((go >> lane_id()) & 1) {
 		nic_tx_post(&g, pc + rank(go), page, 0, len,
@@ -1834,7 +1863,7 @@ v4u GDA_FN(gda_host_tx)(ctl_t ctl, uint32_t queue, uint32_t wave,
 	/* The slots are copied out before the host is told it has them. */
 	stores_out();
 	if (!lane_id())
-		put32(h.ctl + KNOD_PERSIST_HTX_CC, h.cc + h.n);
+		put32(h.ctl + KNOD_PERSIST_HTX_CC, h.cc + n);
 	if (sent) {
 		SET64(&g, TX_PKTS, GL64(&g, TX_PKTS) + sent);
 		pc += sent;

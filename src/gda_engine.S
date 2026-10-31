@@ -39,6 +39,7 @@
 	CFN_BODY_gda_ipsec_mlx5_cx5_ipsec
 	CFN_BODY_gda_round_end_mlx5_cx5_ipsec
 	CFN_BODY_gda_host_gcm_mlx5_cx5_ipsec
+	CFN_BODY_gda_host_chacha_mlx5_cx5_ipsec
 	CFN_BODY_gda_host_tx_mlx5_cx5_ipsec
 	GDA_ENGINE_END IPSEC_MLX5_CX5
 
@@ -48,6 +49,7 @@
 	CFN_BODY_gda_ipsec_bnxt_p5_ipsec
 	CFN_BODY_gda_round_end_bnxt_p5_ipsec
 	CFN_BODY_gda_host_gcm_bnxt_p5_ipsec
+	CFN_BODY_gda_host_chacha_bnxt_p5_ipsec
 	CFN_BODY_gda_host_tx_bnxt_p5_ipsec
 	GDA_ENGINE_END IPSEC_BNXT_P5
 
@@ -57,5 +59,6 @@
 	CFN_BODY_gda_ipsec_bnxt_p7_ipsec
 	CFN_BODY_gda_round_end_bnxt_p7_ipsec
 	CFN_BODY_gda_host_gcm_bnxt_p7_ipsec
+	CFN_BODY_gda_host_chacha_bnxt_p7_ipsec
 	CFN_BODY_gda_host_tx_bnxt_p7_ipsec
 	GDA_ENGINE_END IPSEC_BNXT_P7

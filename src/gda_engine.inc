@@ -2,7 +2,8 @@
 //
 // The kernel every GDA shader starts in, around the engine in csrc/: gda_init()
 // once, then every round gda_round_begin(), the program, gda_round_end() and
-// gda_host_tx().
+// gda_host_tx(), an IPsec engine's gda_host_gcm() and gda_host_chacha() before
+// that.
 // The program goes right after it, and the call's offset to it is
 // <engine>_call's to patch.
 //
@@ -232,6 +233,11 @@
 	v_mov_b32 v6, v2
 .if \ipsec
 	ENGINE_CALL gda_host_gcm_\nic
+	s_mov_b64 exec, -1
+	v_mov_b32 v4, v0
+	v_mov_b32 v5, v1
+	v_mov_b32 v6, v2
+	ENGINE_CALL gda_host_chacha_\nic
 	s_mov_b64 exec, -1
 	v_mov_b32 v4, v0
 	v_mov_b32 v5, v1

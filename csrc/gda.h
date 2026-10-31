@@ -91,9 +91,9 @@ struct gda_meet {
 	uint32_t sq_pc;
 	uint32_t sq_cc;
 	uint32_t htx;		/* host frames wait: a round, even empty */
-	uint32_t htx_n;		/* gda_host_gcm()'s: the frames it saw, */
-	uint32_t htx_gcm[2];	/* ...the AES-GCM ones, */
-	uint32_t htx_ok[2];	/* ...and those sealed */
+	uint32_t htx_n;		/* host frames to go this round, */
+	uint32_t htx_next[2];	/* ...the next to take, AES-GCM or the rest, */
+	uint32_t htx_ok[2];	/* ...and a bit each for those that may go */
 	uint32_t n[KNOD_PERSIST_GDA_WAVES_MAX];	/* each wave's run of CQEs */
 	uint32_t k[KNOD_PERSIST_GDA_WAVES_MAX];	/* ...its XDP_TX count */
 	uint32_t p[KNOD_PERSIST_GDA_WAVES_MAX];	/* ...its XDP_PASS count */
