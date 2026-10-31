@@ -78,6 +78,7 @@ enum {
 	GL_RQ_TOLD,		/* bnxt's: the RQ bound the NIC has */
 	GL_IPSEC_SA,		/* the IPsec engine's: its SA table */
 	GL_IPSEC_SA_MASK = GL_IPSEC_SA + 2,
+	GL_HTX,			/* host TX buffer: zero for none */
 	GL_COUNT,
 };
 _Static_assert(GL_COUNT <= 64, "a lane each");

@@ -767,6 +767,52 @@ static INLINE void gda_copy(GLOBAL uint8_t *dst, GLOBAL const uint8_t *src,
 }
 
 /*
+ * Wave 0's: up to @room frames the host queued, each copied to its pool page
+ * and posted on the SQ from @pc.  They hold no RQ entry, so their WQEs say
+ * @pos, where the CQ stands once the round is over.  How many went.
+ */
+static INLINE uint32_t gda_host_tx(struct gda *g, uint32_t pc, uint32_t room,
+				   uint32_t pos)
+{
+	uint32_t mask = get32(&g->entry->htx_mask), shift = GL(g, PAGE_SHIFT);
+	uint32_t pool = get32(&g->entry->htx_pool), cc, n, slot, len = 0, l, s;
+	uint32_t pmask = get32(&g->entry->htx_pool_mask), page;
+	GLOBAL uint8_t *htx = (GLOBAL uint8_t *)GL64(g, HTX), *ring, *ctl, *dst;
+
+	ring = htx + ((uint64_t)(mask + 1) << shift);
+	ctl = ring + 8 * (mask + 1);
+	cc = get32(ctl + KNOD_PERSIST_HTX_CC);
+	n = get32(ctl + KNOD_PERSIST_HTX_PC) - cc;
+	n = n < room ? n : room;
+	n = n < 64 ? n : 64;
+	if (!n)
+		return 0;
+	slot = (cc + lane_id()) & mask;
+	page = pool + ((cc + lane_id()) & pmask);
+	if (lane_id() < n)
+		len = KNOD_PERSIST_HTX_LEN(get64(ring + 8 * slot));
+	for (l = 0; l < n; l++) {
+		s = __builtin_amdgcn_readlane(slot, l);
+		dst = (GLOBAL uint8_t *)GL64(g, RX_BASE) +
+		      ((uint64_t)__builtin_amdgcn_readlane(page, l) << shift);
+		gda_copy(dst, htx + ((uint64_t)s << shift),
+			 (__builtin_amdgcn_readlane(len, l) + 15) & ~15u);
+	}
+	if (lane_id() < n) {
+		nic_tx_post(g, pc + lane_id(), page, 0, len,
+			    lane_id() == n - 1);
+		put32(g->ring + KNOD_PERSIST_RING_RQPOS_OFF +
+		      4 * ((pc + lane_id()) & GL(g, SQ_MASK)), pos);
+	}
+	/* The slots are copied out before the host is told it has them. */
+	stores_out();
+	if (!lane_id())
+		put32(ctl + KNOD_PERSIST_HTX_CC, cc + n);
+	SET64(g, TX_PKTS, GL64(g, TX_PKTS) + n);
+	return n;
+}
+
+/*
  * Pick up the rings where the last shader left them, or post them afresh for
  * a new build.  A wave the queue does not need, or a queue whose rings the NIC
  * did not give us, ends here.
@@ -830,6 +876,7 @@ v4u GDA_FN(gda_init)(ctl_t ctl, uint32_t queue, uint32_t wave)
 	    load((gptr)(GL64(&g, PARAM) + KNOD_BLOB_PARAM_PAGE_SHIFT)));
 	SET(&g, CI, get32(&e->ci));
 	SET64(&g, RING, get64(&e->ring));
+	SET64(&g, HTX, get64(&e->htx));
 	fresh = get32(&e->posted_gen) != get32(&e->gen);
 	/* Where the last shader left the RQ, so the bound is seen to move on
 	 * from there.
@@ -974,6 +1021,19 @@ static INLINE v16u gda_round_begin(ctl_t ctl, uint32_t queue, uint32_t wave,
 		if (!g.wave && GL(&g, SQ_PC) != GL(&g, SQ_CC)) {
 			nic_tx_reap(&g, GL(&g, SQ_PC));
 			gda_rq_release(&g);
+		}
+		if (!g.wave && GL64(&g, HTX) && !GL(&g, TX_DEAD)) {
+			uint32_t pc = GL(&g, SQ_PC);
+
+			pc += gda_host_tx(&g, pc, GL(&g, SQ_MASK) + 1 -
+					  NIC_SQ_SPARE - (pc - GL(&g, SQ_CC)),
+					  GL(&g, CI));
+			if (pc != GL(&g, SQ_PC)) {
+				SET(&g, SQ_PC, pc);
+				nic_tx_ring(&g, pc);
+				SET(&g, IDLE_ROUNDS, 0);
+				continue;
+			}
 		}
 		idle = GL(&g, IDLE_ROUNDS);
 		if (idle < 64) {
@@ -1438,9 +1498,13 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 			}
 		}
 		SET64(&g, TX_FULL, GL64(&g, TX_FULL) + x.asked - x.given);
-		if (x.given) {
-			SET64(&g, TX_PKTS, GL64(&g, TX_PKTS) + x.given);
-			pc += x.given;
+		SET64(&g, TX_PKTS, GL64(&g, TX_PKTS) + x.given);
+		pc += x.given;
+		/* The host's frames after the round's own, holding nothing. */
+		if (GL64(&g, HTX) && !GL(&g, TX_DEAD))
+			pc += gda_host_tx(&g, pc, left - x.given,
+					  GL(&g, CI) + n);
+		if (pc != GL(&g, SQ_PC)) {
 			SET(&g, SQ_PC, pc);
 			nic_tx_ring(&g, pc);
 		}
