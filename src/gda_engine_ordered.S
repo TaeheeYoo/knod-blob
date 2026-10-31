@@ -14,6 +14,7 @@
 	CFN_BODY_gda_round_begin_ordered_mlx5_cx5
 	CFN_BODY_gda_parked_mlx5_cx5
 	CFN_BODY_gda_round_end_mlx5_cx5
+	CFN_BODY_gda_host_tx_mlx5_cx5
 	GDA_ENGINE_END MLX5_CX5
 
 	GDA_ENGINE BNXT_P5, bnxt_p5, 1
@@ -21,6 +22,7 @@
 	CFN_BODY_gda_round_begin_ordered_bnxt_p5
 	CFN_BODY_gda_parked_bnxt_p5
 	CFN_BODY_gda_round_end_bnxt_p5
+	CFN_BODY_gda_host_tx_bnxt_p5
 	GDA_ENGINE_END BNXT_P5
 
 	GDA_ENGINE BNXT_P7, bnxt_p7, 1
@@ -28,4 +30,5 @@
 	CFN_BODY_gda_round_begin_ordered_bnxt_p7
 	CFN_BODY_gda_parked_bnxt_p7
 	CFN_BODY_gda_round_end_bnxt_p7
+	CFN_BODY_gda_host_tx_bnxt_p7
 	GDA_ENGINE_END BNXT_P7
