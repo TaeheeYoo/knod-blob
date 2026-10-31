@@ -948,7 +948,6 @@ static INLINE int gda_htx_seal(struct gda *g, GLOBAL uint8_t *dst,
 struct gda_htx {
 	GLOBAL uint8_t *htx, *ring, *ctl;
 	uint32_t mask, pool, pmask, cc, n;
-	uint64_t e;		/* lane l's: frame l's entry */
 };
 
 /* Up to @room of the frames waiting, sixty-four at most. */
@@ -965,8 +964,12 @@ static INLINE void gda_htx_take(struct gda *g, struct gda_htx *h,
 	h->n = get32(h->ctl + KNOD_PERSIST_HTX_PC) - h->cc;
 	h->n = h->n < room ? h->n : room;
 	h->n = h->n < 64 ? h->n : 64;
-	h->e = lane_id() < h->n ?
-	       get64(h->ring + 8 * ((h->cc + lane_id()) & h->mask)) : 0;
+}
+
+/* Frame @l's ring entry. */
+static INLINE uint64_t gda_htx_entry(struct gda_htx *h, uint32_t l)
+{
+	return get64(h->ring + 8 * ((h->cc + l) & h->mask));
 }
 
 /* Frame @l's entry, where it is and where it goes. */
@@ -980,8 +983,7 @@ static INLINE uint64_t gda_htx_frame(struct gda *g, struct gda_htx *h,
 	       KNOD_PERSIST_HTX_HEAD;
 	*dst = (GLOBAL uint8_t *)GL64(g, RX_BASE) +
 	       ((uint64_t)(h->pool + ((h->cc + l) & h->pmask)) << shift);
-	return uniform64((uint64_t)__builtin_amdgcn_readlane(h->e >> 32, l) <<
-			 32 | __builtin_amdgcn_readlane(h->e, l));
+	return uniform64(gda_htx_entry(h, l));
 }
 
 /* The SQ's room for the host's frames once the round's own are on it. */
@@ -1820,7 +1822,8 @@ v4u GDA_FN(gda_host_tx)(ctl_t ctl, uint32_t queue, uint32_t wave,
 
 	pc = GL(&g, SQ_PC);
 	sent = __builtin_popcountll(go);
-	len = KNOD_PERSIST_HTX_LEN(h.e);
+	len = lane_id() < h.n ?
+	      KNOD_PERSIST_HTX_LEN(gda_htx_entry(&h, lane_id())) : 0;
 	page = h.pool + ((h.cc + lane_id()) & h.pmask);
 	if ((go >> lane_id()) & 1) {
 		nic_tx_post(&g, pc + rank(go), page, 0, len,
