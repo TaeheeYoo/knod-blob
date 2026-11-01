@@ -797,15 +797,9 @@ static INLINE void gda_copy(GLOBAL uint8_t *dst, GLOBAL const uint8_t *src,
 /* Whether the host has frames waiting to go. */
 static INLINE uint32_t gda_htx_pending(struct gda *g)
 {
-	uint32_t mask = get32(&g->entry->htx_mask);
-	GLOBAL uint8_t *ctl;
-
 	if (!GL64(g, HTX) || GL(g, TX_DEAD))
 		return 0;
-	ctl = (GLOBAL uint8_t *)GL64(g, HTX) +
-	      ((uint64_t)(mask + 1) << GL(g, PAGE_SHIFT)) + 8 * (mask + 1);
-	return get32(ctl + KNOD_PERSIST_HTX_PC) !=
-	       get32(ctl + KNOD_PERSIST_HTX_CC);
+	return get32(&g->entry->htx_pc) != get32(&g->entry->htx_cc);
 }
 
 #ifdef GDA_IPSEC
@@ -960,8 +954,8 @@ static INLINE void gda_htx_take(struct gda *g, struct gda_htx *h,
 	h->htx = (GLOBAL uint8_t *)GL64(g, HTX);
 	h->ring = h->htx + ((uint64_t)(h->mask + 1) << GL(g, PAGE_SHIFT));
 	h->ctl = h->ring + 8 * (h->mask + 1);
-	h->cc = get32(h->ctl + KNOD_PERSIST_HTX_CC);
-	h->n = get32(h->ctl + KNOD_PERSIST_HTX_PC) - h->cc;
+	h->cc = get32(&g->entry->htx_cc);
+	h->n = get32(&g->entry->htx_pc) - h->cc;
 	h->n = h->n < room ? h->n : room;
 	h->n = h->n < 64 ? h->n : 64;
 }
@@ -1863,8 +1857,10 @@ v4u GDA_FN(gda_host_tx)(ctl_t ctl, uint32_t queue, uint32_t wave,
 	}
 	/* The slots are copied out before the host is told it has them. */
 	stores_out();
-	if (!lane_id())
+	if (!lane_id()) {
 		put32(h.ctl + KNOD_PERSIST_HTX_CC, h.cc + n);
+		put32(&g.entry->htx_cc, h.cc + n);
+	}
 	if (sent) {
 		SET64(&g, TX_PKTS, GL64(&g, TX_PKTS) + sent);
 		pc += sent;
