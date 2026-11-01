@@ -1761,21 +1761,28 @@ static INLINE uint32_t gda_htx_work(struct gda *g, int gcm)
 		if (k >= n)
 			break;
 		e = gda_htx_frame(g, &h, k, &src, &dst);
+		/* The kernel's SDMA puts a frame in its pool page: ESP is
+		 * sealed there, the rest goes as it is.  An engine without
+		 * IPsec still copies one from its slot.
+		 */
 		ok = 1;
 #ifdef GDA_IPSEC
 		if (gda_htx_is_gcm(g, e) != gcm)
 			continue;
 		if (e & KNOD_PERSIST_HTX_ESP)
-			ok = KNOD_PERSIST_HTX_ESP_OFF(e) == ESP_SPI &&
-			     gda_htx_seal(g, dst, src, KNOD_PERSIST_HTX_LEN(e),
+			ok = (e & KNOD_PERSIST_HTX_INPLACE) &&
+			     KNOD_PERSIST_HTX_ESP_OFF(e) == ESP_SPI &&
+			     gda_htx_seal(g, dst, dst, KNOD_PERSIST_HTX_LEN(e),
 					  KNOD_PERSIST_HTX_SA(e), gcm);
 		else
+			ok = (e & KNOD_PERSIST_HTX_INPLACE) != 0;
+		(void)src;
 #else
 		if (e & KNOD_PERSIST_HTX_ESP)
 			ok = 0;
-		else
-#endif
+		else if (!(e & KNOD_PERSIST_HTX_INPLACE))
 			gda_copy(dst, src, (KNOD_PERSIST_HTX_LEN(e) + 15) & ~15u);
+#endif
 		if (ok && !lane_id())
 			__atomic_fetch_or(&g->meet->htx_ok[k / 32], 1u << (k & 31),
 					  __ATOMIC_RELAXED);
@@ -1859,7 +1866,10 @@ v4u GDA_FN(gda_host_tx)(ctl_t ctl, uint32_t queue, uint32_t wave,
 	stores_out();
 	if (!lane_id()) {
 		put32(h.ctl + KNOD_PERSIST_HTX_CC, h.cc + n);
-		put32(&g.entry->htx_cc, h.cc + n);
+		/* Read back with get32() next round: the same kind of
+		 * access, so that round sees it.
+		 */
+		store((gptr)&g.entry->htx_cc, h.cc + n);
 	}
 	if (sent) {
 		SET64(&g, TX_PKTS, GL64(&g, TX_PKTS) + sent);
