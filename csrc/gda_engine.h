@@ -1866,7 +1866,10 @@ v4u GDA_FN(gda_host_tx)(ctl_t ctl, uint32_t queue, uint32_t wave,
 	stores_out();
 	if (!lane_id()) {
 		put32(h.ctl + KNOD_PERSIST_HTX_CC, h.cc + n);
-		put32(&g.entry->htx_cc, h.cc + n);
+		/* Read back with get32() next round: the same kind of
+		 * access, so that round sees it.
+		 */
+		store((gptr)&g.entry->htx_cc, h.cc + n);
 	}
 	if (sent) {
 		SET64(&g, TX_PKTS, GL64(&g, TX_PKTS) + sent);
