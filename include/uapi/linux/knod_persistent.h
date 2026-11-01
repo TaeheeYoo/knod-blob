@@ -203,8 +203,9 @@ struct knod_persistent_gda {
 	 * entries, each its slot's length in the low 16 bits, then the
 	 * host's own count at KNOD_PERSIST_HTX_PC and the shader's consumer
 	 * at _CC, which the host reads there.  The shader reads both here:
-	 * htx_pc, which the host writes, and htx_cc, its own copy.  Frame i goes from slot i & htx_mask to the RX buffer's
-	 * page htx_pool + (i & htx_pool_mask), past every page the RQ posts,
+	 * htx_pc, which the host writes, and htx_cc, its own copy.  Frame i
+	 * goes from slot i & htx_mask to the RX buffer's page
+	 * htx_pool + (i & htx_pool_mask), past every page the RQ posts,
 	 * and is sent from there on the queue's SQ.  As many pool pages as
 	 * SQ entries or more: one is not taken again before its WQE is done.
 	 * htx zero for none.
