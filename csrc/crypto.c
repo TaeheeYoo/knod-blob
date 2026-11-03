@@ -25,10 +25,18 @@ _Static_assert(KNOD_CRYPTO_SCRATCH_BYTES >= KNOD_BLOB_CALL_STACK_BYTES,
 _Static_assert(__builtin_offsetof(struct knod_crypto_args, flags) ==
 	       KNOD_CRYPTO_ARGS_FLAGS_OFF, "the entry reads the flags there");
 
+/* Debug: the time now into one of @t's fields, if there is @t. */
+static void crypto_time(GLOBAL struct knod_crypto_time *t,
+			GLOBAL uint32_t *field)
+{
+	if (t && !lane_id())
+		put32(field, gda_cyc());
+}
+
 static uint32_t crypto_do(GLOBAL uint32_t *src,
 			  GLOBAL const struct knod_crypto_key *k,
 			  LDS uint32_t *fr, uint32_t op, uint32_t alen,
-			  uint32_t clen)
+			  uint32_t clen, GLOBAL struct knod_crypto_time *t)
 {
 	uint32_t key[8], aad[4], i, lane = lane_id(), in, out, seal, fail;
 
@@ -38,6 +46,7 @@ static uint32_t crypto_do(GLOBAL uint32_t *src,
 	for (i = lane; 4 * i < in; i += 64)
 		fr[i] = get32(src + i);
 	__builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
+	crypto_time(t, &t->fetched);
 	for (i = 0; i < 8; i++)
 		key[i] = uniform32(get32(&k->key[i]));
 	for (i = 0; i < 4; i++)
@@ -45,6 +54,7 @@ static uint32_t crypto_do(GLOBAL uint32_t *src,
 	fail = gda_chacha_aead(fr, (alen + KNOD_CRYPTO_IV) / 4, alen, key,
 			       uniform32(get32(&k->salt)), aad, alen, clen,
 			       lane, (GLOBAL uint32_t *)0, seal);
+	crypto_time(t, &t->sealed);
 	if (fail)
 		return KNOD_CRYPTO_ST_BADTAG;
 	for (i = lane; 4 * i < out; i += 64)
@@ -60,16 +70,19 @@ static uint32_t crypto_hw_id(void)
 
 void cfn_crypto_kernel(args_t a, uint32_t wg, uint32_t lds)
 {
+	uint32_t slot, op, alen, clen, st, t0 = gda_cyc(), tl;
 	GLOBAL const struct knod_crypto_key *k;
-	GLOBAL struct knod_crypto_desc *d;
-	uint32_t slot, op, alen, clen, st, t0 = gda_cyc();
 	GLOBAL struct knod_crypto_time *t;
+	GLOBAL struct knod_crypto_desc *d;
 	GLOBAL uint32_t *src;
 
 	a = (args_t)uniform64((uint64_t)a);
 	wg = uniform32(wg);
 	if (wg >= uniform32(load((gptr)&a->n)))
 		return;
+	t = (GLOBAL struct knod_crypto_time *)uniform64(get64(&a->times));
+	if (t)
+		t += wg;
 	slot = uniform32(load((gptr)uniform64(get64(&a->slots)) + wg));
 	d = (GLOBAL struct knod_crypto_desc *)uniform64(get64(&a->descs)) +
 	    slot;
@@ -81,20 +94,25 @@ void cfn_crypto_kernel(args_t a, uint32_t wg, uint32_t lds)
 	clen = uniform32(get32(&d->cryptlen));
 	alen = uniform32(get32(&d->assoclen)) - KNOD_CRYPTO_IV;
 
+	tl = gda_cyc();
+	if (t && !lane_id())
+		put32(&t->loaded, tl);
 	st = KNOD_CRYPTO_ST_UNSUPPORTED;
 	if (uniform32(get32(&k->rounds)) == 0 &&
 	    alen <= KNOD_CRYPTO_AAD && !(alen & 3) &&
 	    uniform32(get32(&d->authsize)) == KNOD_CRYPTO_TAG &&
 	    clen <= KNOD_CRYPTO_LDS_TEXT && op <= KNOD_CRYPTO_OP_DECRYPT)
 		st = crypto_do(src, k, (LDS uint32_t *)(uintptr_t)uniform32(lds),
-			       op, alen, clen);
+			       op, alen, clen, t);
+	else if (t && !lane_id()) {
+		put32(&t->fetched, tl);
+		put32(&t->sealed, tl);
+	}
 	/* The text and tag before the verdict the host goes by. */
 	__builtin_amdgcn_fence(__ATOMIC_RELEASE, "agent");
 	if (!lane_id())
 		store((gptr)&d->status, st);
-	t = (GLOBAL struct knod_crypto_time *)uniform64(get64(&a->times));
 	if (t && !lane_id()) {
-		t += wg;
 		put32(&t->start, t0);
 		put32(&t->end, gda_cyc());
 		put32(&t->hw_id, crypto_hw_id());

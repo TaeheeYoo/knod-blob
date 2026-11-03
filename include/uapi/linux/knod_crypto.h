@@ -70,14 +70,19 @@ struct knod_crypto_args {
 
 /*
  * Where a workgroup's time went, its wave's lane 0 writes: the GPU's
- * 100 MHz counter when it began and ended, and the unit it ran on, HW_ID1:
- * its WGP bits 13:10, shader array 16, shader engine 20:18.
+ * 100 MHz counter when it began, had its descriptor and key, had its
+ * request in LDS, had sealed or opened it, and ended; and the unit it ran
+ * on, HW_ID1: its WGP bits 13:10, shader array 16, shader engine 20:18.
+ * One it left unsupported has the three between at loaded.
  */
 struct knod_crypto_time {
 	__u32 start;
+	__u32 loaded;
+	__u32 fetched;
+	__u32 sealed;
 	__u32 end;
 	__u32 hw_id;
-	__u32 pad;
+	__u32 pad[2];
 };
 #endif /* !__ASSEMBLY__ */
 
