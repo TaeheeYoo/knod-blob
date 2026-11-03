@@ -94,17 +94,19 @@ static INLINE void gda_chacha_xor(LDS uint32_t *fr, uint32_t pw,
 /*
  * Open the payload in @fr, or with @seal, seal it: the keystream over it
  * after the tag is checked, or before the tag is made and put past it.
- * Whether the tag failed.
+ * The tag covers @alen bytes of AAD first, up to 16, @aad's words zero past
+ * them.  Whether the tag failed.
  */
-static INLINE uint32_t gda_chacha_rx(LDS uint32_t *fr, uint32_t pw,
-				     uint32_t iv,
-				     const uint32_t key[8], uint32_t salt,
-				     uint32_t spi, uint32_t seq, uint32_t clen,
-				     uint32_t lane, GLOBAL uint32_t *dbg,
-				     int seal)
+static INLINE uint32_t gda_chacha_aead(LDS uint32_t *fr, uint32_t pw,
+				       uint32_t iv,
+				       const uint32_t key[8], uint32_t salt,
+				       const uint32_t aad[4], uint32_t alen,
+				       uint32_t clen, uint32_t lane,
+				       GLOBAL uint32_t *dbg, int seal)
 {
 	uint32_t nonce[3], blk[16], s[4], w[4], tag[4], t = gda_cyc();
-	uint32_t n = (clen + 15) / 16, nb = n + 2, i, k, kk, pad, c, fail, b;
+	uint32_t n = (clen + 15) / 16, ab = alen ? 1 : 0, nb = n + 1 + ab;
+	uint32_t i, k, kk, pad, c, fail, b;
 	struct poly r, cur, h, p, cv;
 
 	nonce[0] = salt;
@@ -136,9 +138,10 @@ static INLINE uint32_t gda_chacha_rx(LDS uint32_t *fr, uint32_t pw,
 	for (k = lane; k < 64 * kk; k += 64) {
 		c = k - pad;
 		for (i = 0; i < 4; i++) {
-			b = 16 * (c - 1) + 4 * i;
-			w[i] = !c ? (i == 0 ? spi : i == 1 ? seq : 0) :
-			       c == nb - 1 ? (i == 0 ? 8 : i == 2 ? clen : 0) :
+			b = 16 * (c - ab) + 4 * i;
+			w[i] = ab && !c ? (i == 0 ? aad[0] : i == 1 ? aad[1] :
+					   i == 2 ? aad[2] : aad[3]) :
+			       c == nb - 1 ? (i == 0 ? alen : i == 2 ? clen : 0) :
 			       b >= clen ? 0 :
 			       b + 4 <= clen ? fr[pw + b / 4] :
 			       fr[pw + b / 4] & ((1u << (8 * (clen - b))) - 1);
@@ -190,6 +193,20 @@ static INLINE uint32_t gda_chacha_rx(LDS uint32_t *fr, uint32_t pw,
 
 	gda_prof(dbg, GDA_PROF_DECRYPT, t);
 	return uniform32(fail);
+}
+
+/* gda_chacha_aead() on an ESP packet's: its SPI and sequence the AAD. */
+static INLINE uint32_t gda_chacha_rx(LDS uint32_t *fr, uint32_t pw,
+				     uint32_t iv,
+				     const uint32_t key[8], uint32_t salt,
+				     uint32_t spi, uint32_t seq, uint32_t clen,
+				     uint32_t lane, GLOBAL uint32_t *dbg,
+				     int seal)
+{
+	const uint32_t aad[4] = { spi, seq, 0, 0 };
+
+	return gda_chacha_aead(fr, pw, iv, key, salt, aad, 8, clen, lane, dbg,
+			       seal);
 }
 
 #endif /* KNOD_CHACHA_LDS_H */
