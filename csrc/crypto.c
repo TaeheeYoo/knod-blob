@@ -89,10 +89,6 @@ static uint32_t crypto_hw_id(void)
 	return __builtin_amdgcn_s_getreg(23 | 31 << 11);
 }
 
-/* The most text a request brings: 64 KB of slots, its AAD, IV and tag. */
-#define KNOD_CRYPTO_BIG_TEXT	(65536 - KNOD_CRYPTO_AAD - KNOD_CRYPTO_IV - \
-				 KNOD_CRYPTO_TAG)
-
 /* Block @bl's sixteen words at @p, as many as are within @clen. */
 static void crypto_big_load(GLOBAL const uint32_t *p, uint32_t bl,
 			    uint32_t clen, uint32_t d[16])
@@ -276,7 +272,7 @@ void cfn_crypto_kernel(args_t a, uint32_t wg, uint32_t lds)
 	else if (!k.rounds && alen <= KNOD_CRYPTO_AAD && !(alen & 3) &&
 		 d.authsize == KNOD_CRYPTO_TAG &&
 		 d.op <= KNOD_CRYPTO_OP_DECRYPT &&
-		 d.cryptlen <= KNOD_CRYPTO_BIG_TEXT) {
+		 d.cryptlen <= KNOD_CRYPTO_TEXT_MAX) {
 		if (t && !lane_id())
 			put32(&t->fetched, tl);
 		st = crypto_big(src, &k, d.op == KNOD_CRYPTO_OP_ENCRYPT, alen,
