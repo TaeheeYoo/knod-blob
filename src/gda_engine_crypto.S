@@ -7,15 +7,21 @@
 // s14 - and it calls cfn_crypto_kernel(args, workgroup, lds) and ends.
 
 #include "common.inc"
+#include <linux/knod_crypto.h>
 
 	.text
 	.globl knod_crypto_kernel
 	.p2align 2
 knod_crypto_kernel:
-#if !defined(KNOD_NO_ICACHE_INV)
+	// Only for code just installed: every wave's s_icache_inv would
+	// throw out the others' fetched code.
+	s_load_dword s24, s[8:9], KNOD_CRYPTO_ARGS_FLAGS_OFF
+	s_waitcnt lgkmcnt(0)
+	s_bitcmp1_b32 s24, 0
+	s_cbranch_scc0 .Lcrypto_cached
 	s_icache_inv
 	s_waitcnt vmcnt(0) lgkmcnt(0)
-#endif
+.Lcrypto_cached:
 #if KNOD_ISA == 10
 	s_and_b32 s[KNOD_BLOB_PRO_SCRATCH_DESC_SREG + 1], \
 		  s[KNOD_BLOB_PRO_SCRATCH_DESC_SREG + 1], 0xffff

@@ -20,6 +20,8 @@ _Static_assert(KNOD_CRYPTO_AAD + KNOD_CRYPTO_IV + KNOD_CRYPTO_LDS_TEXT +
 	       KNOD_CRYPTO_TAG + 4 <= KNOD_CRYPTO_LDS_BYTES, "the LDS copy");
 
 typedef GLOBAL const struct knod_crypto_args *args_t;
+_Static_assert(__builtin_offsetof(struct knod_crypto_args, flags) ==
+	       KNOD_CRYPTO_ARGS_FLAGS_OFF, "the entry reads the flags there");
 
 static uint32_t crypto_do(GLOBAL uint32_t *src,
 			  GLOBAL const struct knod_crypto_key *k,
