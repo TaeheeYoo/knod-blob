@@ -46,12 +46,17 @@ def vgprs(lines):
     return v
 
 
+# Functions only their own entry calls, not a JIT program, and the VGPRs
+# below which they stay: the Makefile's NUM_VGPR_<file>.
+OWN_ENTRY = {"cfn_crypto_kernel": 128}
+
+
 def emit(c, name, body, stack, out):
     if stack > c["CALL_STACK_BYTES"]:
         sys.exit(f"{name}: needs {stack} bytes of stack, a call gets "
                  f"{c['CALL_STACK_BYTES']}")
     top = max(vgprs(body), default=0)
-    if top >= c["JIT_VREG"]:
+    if top >= OWN_ENTRY.get(name, c["JIT_VREG"]):
         sys.exit(f"{name}: touches v{top}, which the JIT holds")
     for line in body:
         ref = SYMREF.search(line)

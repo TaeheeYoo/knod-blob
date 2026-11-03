@@ -93,24 +93,67 @@ static uint32_t crypto_hw_id(void)
 #define KNOD_CRYPTO_BIG_TEXT	(65536 - KNOD_CRYPTO_AAD - KNOD_CRYPTO_IV - \
 				 KNOD_CRYPTO_TAG)
 
-/* The keystream over @clen bytes at @p, a lane a 64-byte block at a time. */
+/* Block @bl's sixteen words at @p, as many as are within @clen. */
+static void crypto_big_load(GLOBAL const uint32_t *p, uint32_t bl,
+			    uint32_t clen, uint32_t d[16])
+{
+	uint32_t i;
+
+	for (i = 0; i < 16; i++)
+		if (64 * bl + 4 * i < clen)
+			d[i] = p[16 * bl + i];
+}
+
+/*
+ * The keystream over @clen bytes at @p, a lane a 64-byte block at a time:
+ * the next round's block loaded before this one's keystream is made, so
+ * the load is out while it is.
+ */
 static void crypto_big_xor(GLOBAL uint32_t *p, const uint32_t key[8],
 			   const uint32_t nonce[3], uint32_t clen,
 			   uint32_t lane)
 {
-	uint32_t blk[16], i, b, bl;
+	uint32_t blk[16], d[16], cur[16], i, b, bl;
 
+	if (64 * lane < clen)
+		crypto_big_load(p, lane, clen, d);
 	for (bl = lane; 64 * bl < clen; bl += 64) {
+		for (i = 0; i < 16; i++)
+			cur[i] = d[i];
+		if (64 * (bl + 64) < clen)
+			crypto_big_load(p, bl + 64, clen, d);
 		chacha20_block(blk, key, 1 + bl, nonce);
 		for (i = 0; i < 16; i++) {
 			b = 64 * bl + 4 * i;
 			if (b < clen)
-				p[b / 4] ^= b + 4 <= clen ? blk[i] :
-					blk[i] & ((1u << (8 * (clen - b))) - 1);
+				p[b / 4] = cur[i] ^ (b + 4 <= clen ? blk[i] :
+					blk[i] & ((1u << (8 * (clen - b))) - 1));
 		}
 	}
 	/* Every lane's words out before the others read them. */
 	__builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "workgroup");
+}
+
+/*
+ * The four words Poly1305 takes at position @c of what it runs over: the
+ * AAD's block if there is one, the text's sixteen bytes, zero past them,
+ * or the lengths last.
+ */
+static void crypto_big_words(GLOBAL const uint32_t *p, const uint32_t aad[4],
+			     uint32_t ab, uint32_t alen, uint32_t clen,
+			     uint32_t nb, uint32_t c, uint32_t w[4])
+{
+	uint32_t i, b;
+
+	for (i = 0; i < 4; i++) {
+		b = 16 * (c - ab) + 4 * i;
+		w[i] = ab && !c ? (i == 0 ? aad[0] : i == 1 ? aad[1] :
+				   i == 2 ? aad[2] : aad[3]) :
+		       c == nb - 1 ? (i == 0 ? alen : i == 2 ? clen : 0) :
+		       b >= clen ? 0 :
+		       b + 4 <= clen ? p[b / 4] :
+		       p[b / 4] & ((1u << (8 * (clen - b))) - 1);
+	}
 }
 
 /*
@@ -124,8 +167,8 @@ static uint32_t crypto_big(GLOBAL uint32_t *src,
 {
 	GLOBAL uint32_t *p = src + (alen + KNOD_CRYPTO_IV) / 4;
 	uint32_t n = (clen + 15) / 16, ab = alen ? 1 : 0, nb = n + 1 + ab;
-	uint32_t nonce[3], blk[16], s[4], w[4], tag[4], aad[4];
-	uint32_t lane = lane_id(), i, j, kk, pad, c, b, x;
+	uint32_t nonce[3], blk[16], s[4], w[4], cw[4], tag[4], aad[4];
+	uint32_t lane = lane_id(), i, j, kk, pad, x;
 	GLOBAL uint8_t *pb = (GLOBAL uint8_t *)p;
 	struct poly r, cur, h, q, cv;
 
@@ -148,19 +191,16 @@ static uint32_t crypto_big(GLOBAL uint32_t *src,
 	pad = 64 * kk - nb;
 	for (i = 0; i < 5; i++)
 		h.l[i] = 0;
+	/* The next position's words loaded before this one's are taken in. */
+	crypto_big_words(p, aad, ab, alen, clen, nb, lane - pad, w);
 #pragma clang loop unroll(disable)
 	for (j = lane; j < 64 * kk; j += 64) {
-		c = j - pad;
-		for (i = 0; i < 4; i++) {
-			b = 16 * (c - ab) + 4 * i;
-			w[i] = ab && !c ? (i == 0 ? aad[0] : i == 1 ? aad[1] :
-					   i == 2 ? aad[2] : aad[3]) :
-			       c == nb - 1 ? (i == 0 ? alen : i == 2 ? clen : 0) :
-			       b >= clen ? 0 :
-			       b + 4 <= clen ? p[b / 4] :
-			       p[b / 4] & ((1u << (8 * (clen - b))) - 1);
-		}
-		poly_from_words(&cv, w, j >= pad);
+		for (i = 0; i < 4; i++)
+			cw[i] = w[i];
+		if (j + 64 < 64 * kk)
+			crypto_big_words(p, aad, ab, alen, clen, nb,
+					 j + 64 - pad, w);
+		poly_from_words(&cv, cw, j >= pad);
 		if (j < pad)
 			for (i = 0; i < 5; i++)
 				cv.l[i] = 0;
