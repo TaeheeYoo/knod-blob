@@ -22,6 +22,8 @@
 
 /* A workgroup's LDS, the host's to give each: the request's copy. */
 #define KNOD_CRYPTO_LDS_BYTES		4160
+/* Each lane's scratch, the host's to give: the kernel's call stack only. */
+#define KNOD_CRYPTO_SCRATCH_BYTES	128
 
 /* The kernel's code is new: each wave invalidates the instruction cache. */
 #define KNOD_CRYPTO_ARGS_ICACHE_INV	1

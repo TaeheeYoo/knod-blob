@@ -39,7 +39,7 @@ knod_crypto_kernel:
 	v_mov_b32 v1, s9
 	v_mov_b32 v2, s12
 	v_mov_b32 v3, 0			// the workgroup's LDS
-	s_mov_b32 s32, KNOD_BLOB_CALL_STACK_OFF
+	s_mov_b32 s32, 0			// no BPF stack below it
 	s_getpc_b64 s[24:25]
 .Lpc_crypto_kernel:
 	s_add_u32 s24, s24, .Lcfn_crypto_kernel - .Lpc_crypto_kernel
