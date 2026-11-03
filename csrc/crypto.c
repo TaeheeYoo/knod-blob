@@ -89,6 +89,114 @@ static uint32_t crypto_hw_id(void)
 	return __builtin_amdgcn_s_getreg(23 | 31 << 11);
 }
 
+/* The most text a request brings: 64 KB of slots, its AAD, IV and tag. */
+#define KNOD_CRYPTO_BIG_TEXT	(65536 - KNOD_CRYPTO_AAD - KNOD_CRYPTO_IV - \
+				 KNOD_CRYPTO_TAG)
+
+/* The keystream over @clen bytes at @p, a lane a 64-byte block at a time. */
+static void crypto_big_xor(GLOBAL uint32_t *p, const uint32_t key[8],
+			   const uint32_t nonce[3], uint32_t clen,
+			   uint32_t lane)
+{
+	uint32_t blk[16], i, b, bl;
+
+	for (bl = lane; 64 * bl < clen; bl += 64) {
+		chacha20_block(blk, key, 1 + bl, nonce);
+		for (i = 0; i < 16; i++) {
+			b = 64 * bl + 4 * i;
+			if (b < clen)
+				p[b / 4] ^= b + 4 <= clen ? blk[i] :
+					blk[i] & ((1u << (8 * (clen - b))) - 1);
+		}
+	}
+	/* Every lane's words out before the others read them. */
+	__builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "workgroup");
+}
+
+/*
+ * A request past the LDS copy's reach, sealed or opened where it is in its
+ * slots: gda_chacha_aead() over memory instead of LDS.  Whether the tag
+ * failed.
+ */
+static uint32_t crypto_big(GLOBAL uint32_t *src,
+			   const struct knod_crypto_key *k, uint32_t seal,
+			   uint32_t alen, uint32_t clen)
+{
+	GLOBAL uint32_t *p = src + (alen + KNOD_CRYPTO_IV) / 4;
+	uint32_t n = (clen + 15) / 16, ab = alen ? 1 : 0, nb = n + 1 + ab;
+	uint32_t nonce[3], blk[16], s[4], w[4], tag[4], aad[4];
+	uint32_t lane = lane_id(), i, j, kk, pad, c, b, x;
+	GLOBAL uint8_t *pb = (GLOBAL uint8_t *)p;
+	struct poly r, cur, h, q, cv;
+
+	nonce[0] = k->salt;
+	nonce[1] = uniform32(src[alen / 4]);
+	nonce[2] = uniform32(src[alen / 4 + 1]);
+	for (i = 0; i < 4; i++)
+		aad[i] = 4 * i < alen ? uniform32(src[i]) : 0;
+	chacha20_block(blk, k->key, 0, nonce);
+	poly_r(&r, blk);
+	for (i = 0; i < 4; i++)
+		s[i] = blk[4 + i];
+	if (seal)
+		crypto_big_xor(p, k->key, nonce, clen, lane);
+
+	cur = r;
+	for (i = 0; i < 6; i++)
+		poly_mul(&cur, &cur, &cur);
+	kk = (nb + 63) / 64;
+	pad = 64 * kk - nb;
+	for (i = 0; i < 5; i++)
+		h.l[i] = 0;
+#pragma clang loop unroll(disable)
+	for (j = lane; j < 64 * kk; j += 64) {
+		c = j - pad;
+		for (i = 0; i < 4; i++) {
+			b = 16 * (c - ab) + 4 * i;
+			w[i] = ab && !c ? (i == 0 ? aad[0] : i == 1 ? aad[1] :
+					   i == 2 ? aad[2] : aad[3]) :
+			       c == nb - 1 ? (i == 0 ? alen : i == 2 ? clen : 0) :
+			       b >= clen ? 0 :
+			       b + 4 <= clen ? p[b / 4] :
+			       p[b / 4] & ((1u << (8 * (clen - b))) - 1);
+		}
+		poly_from_words(&cv, w, j >= pad);
+		if (j < pad)
+			for (i = 0; i < 5; i++)
+				cv.l[i] = 0;
+		poly_mul(&h, &h, &cur);
+		poly_add(&h, &cv);
+		poly_carry(&h);
+	}
+	cur = r;
+	gda_poly_tree(&h, &cur, GDA_SWIZZLE_XOR(1));
+	gda_poly_tree(&h, &cur, GDA_SWIZZLE_XOR(2));
+	gda_poly_tree(&h, &cur, GDA_SWIZZLE_XOR(4));
+	gda_poly_tree(&h, &cur, GDA_SWIZZLE_XOR(8));
+	gda_poly_tree(&h, &cur, GDA_SWIZZLE_XOR(16));
+	for (i = 0; i < 5; i++)
+		q.l[i] = __builtin_amdgcn_readlane(h.l[i], 32);
+	poly_mul(&h, &h, &cur);
+	for (i = 0; i < 5; i++)
+		h.l[i] = __builtin_amdgcn_readlane(h.l[i], 0) + q.l[i];
+	poly_carry(&h);
+	poly_mul(&h, &h, &r);
+	poly_tag(tag, &h, s);
+
+	/* A byte a lane: the tag need not start on a word. */
+	x = lane < 4 ? tag[0] : lane < 8 ? tag[1] : lane < 12 ? tag[2] : tag[3];
+	x = x >> (8 * (lane & 3)) & 0xff;
+	if (seal) {
+		if (lane < 16)
+			pb[clen + lane] = x;
+		return 0;
+	}
+	if (__builtin_amdgcn_ballot_w64(lane < 16 && pb[clen + lane] != x))
+		return 1;
+	crypto_big_xor(p, k->key, nonce, clen, lane);
+	return 0;
+}
+
 /*
  * The arguments, the batch's slot list, the descriptor and the key are the
  * host's and do not change while the kernel runs: scalar loads, a few in
@@ -121,11 +229,21 @@ void cfn_crypto_kernel(args_t a, uint32_t wg, uint32_t lds)
 		put32(&t->loaded, tl);
 	st = KNOD_CRYPTO_ST_UNSUPPORTED;
 	if (!k.rounds && alen <= KNOD_CRYPTO_AAD && !(alen & 3) &&
-	    d.authsize == KNOD_CRYPTO_TAG && d.cryptlen <= KNOD_CRYPTO_LDS_TEXT &&
-	    d.op <= KNOD_CRYPTO_OP_DECRYPT)
+	    d.authsize == KNOD_CRYPTO_TAG && d.op <= KNOD_CRYPTO_OP_DECRYPT &&
+	    d.cryptlen <= KNOD_CRYPTO_LDS_TEXT)
 		st = crypto_do(src, &k, (LDS uint32_t *)(uintptr_t)uniform32(lds),
 			       d.op, alen, d.cryptlen, t);
-	else if (t && !lane_id()) {
+	else if (!k.rounds && alen <= KNOD_CRYPTO_AAD && !(alen & 3) &&
+		 d.authsize == KNOD_CRYPTO_TAG &&
+		 d.op <= KNOD_CRYPTO_OP_DECRYPT &&
+		 d.cryptlen <= KNOD_CRYPTO_BIG_TEXT) {
+		if (t && !lane_id())
+			put32(&t->fetched, tl);
+		st = crypto_big(src, &k, d.op == KNOD_CRYPTO_OP_ENCRYPT, alen,
+				d.cryptlen) ? KNOD_CRYPTO_ST_BADTAG :
+					      KNOD_CRYPTO_ST_OK;
+		crypto_time(t, &t->sealed);
+	} else if (t && !lane_id()) {
 		put32(&t->fetched, tl);
 		put32(&t->sealed, tl);
 	}
