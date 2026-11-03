@@ -4,7 +4,7 @@
 // workgroup of one wave each, as include/uapi/linux/knod_crypto.h has it.
 // The host dispatches it with the GDA engine's kernel descriptor layout -
 // kernarg at s[8:9], the workgroup at s12, gfx10's scratch wave offset at
-// s14 - and it calls cfn_crypto_kernel(args, workgroup) and ends.
+// s14 - and it calls cfn_crypto_kernel(args, workgroup, lds) and ends.
 
 #include "common.inc"
 
@@ -32,6 +32,7 @@ knod_crypto_kernel:
 	v_mov_b32 v0, s8
 	v_mov_b32 v1, s9
 	v_mov_b32 v2, s12
+	v_mov_b32 v3, 0			// the workgroup's LDS
 	s_mov_b32 s32, KNOD_BLOB_CALL_STACK_OFF
 	s_getpc_b64 s[24:25]
 .Lpc_crypto_kernel:
