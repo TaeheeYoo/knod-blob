@@ -65,6 +65,19 @@ struct knod_crypto_args {
 	__u32 n;		/* requests in the batch */
 	__u32 flags;		/* KNOD_CRYPTO_ARGS_* */
 	__u32 pad;
+	__u64 times;		/* struct knod_crypto_time a workgroup, or 0 */
+};
+
+/*
+ * Where a workgroup's time went, its wave's lane 0 writes: the GPU's
+ * 100 MHz counter when it began and ended, and the unit it ran on, HW_ID1:
+ * its WGP bits 13:10, shader array 16, shader engine 20:18.
+ */
+struct knod_crypto_time {
+	__u32 start;
+	__u32 end;
+	__u32 hw_id;
+	__u32 pad;
 };
 #endif /* !__ASSEMBLY__ */
 

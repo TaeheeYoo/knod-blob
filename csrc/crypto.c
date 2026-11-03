@@ -52,11 +52,18 @@ static uint32_t crypto_do(GLOBAL uint32_t *src,
 	return KNOD_CRYPTO_ST_OK;
 }
 
+/* The unit the wave runs on: HW_ID1, gfx10.3 and gfx11 alike. */
+static uint32_t crypto_hw_id(void)
+{
+	return __builtin_amdgcn_s_getreg(23 | 31 << 11);
+}
+
 void cfn_crypto_kernel(args_t a, uint32_t wg, uint32_t lds)
 {
 	GLOBAL const struct knod_crypto_key *k;
 	GLOBAL struct knod_crypto_desc *d;
-	uint32_t slot, op, alen, clen, st;
+	uint32_t slot, op, alen, clen, st, t0 = gda_cyc();
+	GLOBAL struct knod_crypto_time *t;
 	GLOBAL uint32_t *src;
 
 	a = (args_t)uniform64((uint64_t)a);
@@ -85,4 +92,11 @@ void cfn_crypto_kernel(args_t a, uint32_t wg, uint32_t lds)
 	__builtin_amdgcn_fence(__ATOMIC_RELEASE, "agent");
 	if (!lane_id())
 		store((gptr)&d->status, st);
+	t = (GLOBAL struct knod_crypto_time *)uniform64(get64(&a->times));
+	if (t && !lane_id()) {
+		t += wg;
+		put32(&t->start, t0);
+		put32(&t->end, gda_cyc());
+		put32(&t->hw_id, crypto_hw_id());
+	}
 }
