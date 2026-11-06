@@ -404,6 +404,61 @@ struct gda_sa_cache {
 };
 
 /*
+ * Whether the inner TCP or UDP checksum of a tunnel-mode ESP packet the
+ * wave decrypted in its LDS copy is good: the plaintext from byte @pt, its
+ * @clen bytes an inner IPv4 packet, padding and the trailer.  Every lane
+ * sums its words of the segment, the pseudo-header the inner IP header's,
+ * and the lanes' sums are added up.  Anything else - a fragment, options
+ * past what is there, another protocol - is not found good, for the stack
+ * to check.
+ */
+static INLINE uint32_t gda_ipsec_inner_csum(LDS const uint32_t *fr,
+					    uint32_t pt, uint32_t clen)
+{
+	uint32_t lane = lane_id(), vihl, ihl, tot, proto, l4, n, i, b, w;
+	uint64_t sum = 0, all;
+
+	if (clen < 2 || (gda_lds32u(fr, pt + clen - 2) >> 8 & 0xff) != 4)
+		return 0;		/* next header: not IPv4 in IPv4 */
+	vihl = gda_lds32u(fr, pt) & 0xff;
+	ihl = 4 * (vihl & 15);
+	tot = gda_lds_be16(fr, pt + 2);
+	proto = gda_lds32u(fr, pt + 8) >> 8 & 0xff;
+	if ((vihl >> 4) != 4 || ihl < 20 || tot < ihl + 8 || tot > clen ||
+	    (gda_lds_be16(fr, pt + 6) & 0x3fff) ||
+	    (proto != 6 && proto != 17))
+		return 0;
+	l4 = tot - ihl;
+	/* A UDP packet with no checksum has none to check. */
+	if (proto == 17 && !(gda_lds32u(fr, pt + ihl + 4) >> 16))
+		return 1;
+	n = (l4 + 3) / 4;
+	for (i = lane; i < n; i += 64) {
+		b = 4 * i;
+		w = gda_lds32u(fr, pt + ihl + b);
+		if (b + 4 > l4)
+			w &= (1u << (8 * (l4 - b))) - 1;
+		sum += w;
+	}
+	/* The pseudo-header, in memory order as the rest: addresses, then a
+	 * zero byte, the protocol and the segment's length.
+	 */
+	if (!lane)
+		sum += (uint64_t)gda_lds32u(fr, pt + 12) +
+		       gda_lds32u(fr, pt + 16) +
+		       (proto << 8 | (l4 & 0xff) << 24 | (l4 >> 8) << 16);
+	all = 0;
+	/* readlane gives an int: unsigned before it widens. */
+	for (i = 0; i < 64; i++)
+		all += (uint32_t)__builtin_amdgcn_readlane((uint32_t)sum, i) +
+		       ((uint64_t)(uint32_t)__builtin_amdgcn_readlane(
+				(uint32_t)(sum >> 32), i) << 32);
+	while (all >> 16)
+		all = (all & 0xffff) + (all >> 16);
+	return all == 0xffff;
+}
+
+/*
  * A passed packet the wave is on, decrypted in its RX page if it is ESP of an
  * SA in the table: @src at the sixteen bytes it starts in, the packet @off
  * past them and @len long.  Everything but the payload stays as it came - the
@@ -497,9 +552,13 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 		if (!lane)
 			add((gptr)&dbg[GDA_PROF_PKTS], 1);
 #endif
+		/* The stack need not sum the plaintext again: it is here. */
 		return KNOD_PERSIST_PASS_IPSEC |
 		       slot << KNOD_PERSIST_PASS_IPSEC_SA_SHIFT |
-		       (fail ? KNOD_PERSIST_PASS_IPSEC_FAIL : 0);
+		       (fail ? KNOD_PERSIST_PASS_IPSEC_FAIL :
+			uniform32(gda_ipsec_inner_csum(fr, fo + ESP_DATA,
+						       clen)) ?
+			KNOD_PERSIST_PASS_IPSEC_CSUM : 0);
 	}
 	hpow = (GLOBAL const uint8_t *)sc->hpow;
 	*in_lds = 0;
