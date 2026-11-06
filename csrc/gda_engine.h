@@ -403,6 +403,22 @@ struct gda_sa_cache {
 	uint32_t key[8];			/* ChaCha20's */
 };
 
+/* Whether every lane's sum of words, folded, is a good checksum. */
+static INLINE uint32_t gda_wave_csum_ok(uint64_t sum)
+{
+	uint64_t all = 0;
+	uint32_t i;
+
+	/* readlane gives an int: unsigned before it widens. */
+	for (i = 0; i < 64; i++)
+		all += (uint32_t)__builtin_amdgcn_readlane((uint32_t)sum, i) +
+		       ((uint64_t)(uint32_t)__builtin_amdgcn_readlane(
+				(uint32_t)(sum >> 32), i) << 32);
+	while (all >> 16)
+		all = (all & 0xffff) + (all >> 16);
+	return all == 0xffff;
+}
+
 /*
  * Whether the inner TCP or UDP checksum of a tunnel-mode ESP packet the
  * wave decrypted in its LDS copy is good: the plaintext from byte @pt, its
@@ -416,7 +432,7 @@ static INLINE uint32_t gda_ipsec_inner_csum(LDS const uint32_t *fr,
 					    uint32_t pt, uint32_t clen)
 {
 	uint32_t lane = lane_id(), vihl, ihl, tot, proto, l4, n, i, b, w;
-	uint64_t sum = 0, all;
+	uint64_t sum = 0;
 
 	if (clen < 2 || (gda_lds32u(fr, pt + clen - 2) >> 8 & 0xff) != 4)
 		return 0;		/* next header: not IPv4 in IPv4 */
@@ -447,15 +463,34 @@ static INLINE uint32_t gda_ipsec_inner_csum(LDS const uint32_t *fr,
 		sum += (uint64_t)gda_lds32u(fr, pt + 12) +
 		       gda_lds32u(fr, pt + 16) +
 		       (proto << 8 | (l4 & 0xff) << 24 | (l4 >> 8) << 16);
-	all = 0;
-	/* readlane gives an int: unsigned before it widens. */
-	for (i = 0; i < 64; i++)
-		all += (uint32_t)__builtin_amdgcn_readlane((uint32_t)sum, i) +
-		       ((uint64_t)(uint32_t)__builtin_amdgcn_readlane(
-				(uint32_t)(sum >> 32), i) << 32);
-	while (all >> 16)
-		all = (all & 0xffff) + (all >> 16);
-	return all == 0xffff;
+	return gda_wave_csum_ok(sum);
+}
+
+/*
+ * Whether the inner TCP or UDP checksum of a tunnel-mode ESP packet AES-GCM
+ * decrypted is good, from what the decrypting kept of it: the inner IP
+ * header's first 24 bytes and its UDP checksum field in @hd, its total
+ * length @itot, the next header @nh and every lane's sum @cs of the segment
+ * past a 20-byte header.  Options, a fragment or another protocol are left
+ * for the stack to check.
+ */
+static INLINE uint32_t gda_gcm_inner_csum(const uint32_t *hd, uint32_t itot,
+					  uint32_t clen, uint32_t nh,
+					  uint64_t cs)
+{
+	uint32_t proto = hd[2] >> 8 & 0xff, l4 = itot - 20;
+
+	if (nh != 4 || (hd[0] & 0xff) != 0x45 || itot < 28 || itot > clen ||
+	    (__builtin_bswap16(hd[1] >> 16) & 0x3fff) ||
+	    (proto != 6 && proto != 17))
+		return 0;
+	/* A UDP packet with no checksum has none to check. */
+	if (proto == 17 && !(hd[5] >> 16))
+		return 1;
+	if (!lane_id())
+		cs += (uint64_t)hd[3] + hd[4] +
+		      (proto << 8 | (l4 & 0xff) << 24 | (l4 >> 8) << 16);
+	return gda_wave_csum_ok(cs);
 }
 
 /*
@@ -485,6 +520,8 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 	uint32_t tot, clen, n, m, rounds, salt, iv_lo, iv_hi, spi, seq;
 	uint32_t z[8] = { 0 }, acc[4], x[4], c[4], k[4], j, b, i, w, fail;
 	uint32_t base, from, to, nb, lane = lane_id();
+	uint32_t pt[4] = { 0 }, hd[6] = { 0 }, itot = 0, nh = 0, q, csum;
+	uint64_t cs = 0;
 	LDS uint32_t *fr = gda_ipsec_frame(g);
 	uint32_t sh = (off + ESP_DATA) & 3, fo = off + 4 - sh;
 	GLOBAL uint32_t *dbg = g->entry->regress_dbg;
@@ -613,13 +650,45 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 			}
 			gcm_counter(x, salt, iv_lo, iv_hi, j + 1);
 			aes_encrypt_block(t, rk, rounds, k, x);
+#pragma unroll
+			for (i = 0; i < 4; i++)
+				pt[i] = c[i] ^ k[i];
 			*(LDS v4u *)(buf + 16 * lane) =
-				(v4u){ c[0] ^ k[0], c[1] ^ k[1], c[2] ^ k[2],
-				       c[3] ^ k[3] };
+				(v4u){ pt[0], pt[1], pt[2], pt[3] };
+		}
+		/* The inner IP header, blocks 1 and 2: lanes 0 and 1's. */
+		if (!base) {
+			hd[0] = __builtin_amdgcn_readlane(pt[0], 0);
+			hd[1] = __builtin_amdgcn_readlane(pt[1], 0);
+			hd[2] = __builtin_amdgcn_readlane(pt[2], 0);
+			hd[3] = __builtin_amdgcn_readlane(pt[3], 0);
+			hd[4] = __builtin_amdgcn_readlane(pt[0], 1);
+			hd[5] = __builtin_amdgcn_readlane(pt[2], 1);
+			itot = __builtin_bswap16(hd[0] >> 16);
+		}
+		/* The inner checksum's sum where the plaintext is: the words
+		 * of the segment, from past the 20-byte header to its end.
+		 */
+		if (j <= n) {
+			if (j == n)
+				nh = pt[(clen - 1 - b) / 4] >>
+				     8 * ((clen - 1 - b) & 3) & 0xff;
+#pragma unroll
+			for (i = 0; i < 4; i++) {
+				q = b + 4 * i;
+				if (q < 20 || q >= itot)
+					continue;
+				cs += q + 4 > itot ?
+				      pt[i] & ((1u << (8 * (itot - q))) - 1) :
+				      pt[i];
+			}
 		}
 		gda_ipsec_put(src, buf, from, to, d, lim, lane);
 	}
 	stores_out();
+	csum = gda_gcm_inner_csum(hd, itot, clen,
+				  __builtin_amdgcn_readlane(nh, (n - 1) & 63),
+				  cs);
 
 	/* Every lane's sum: each half's in each of its lanes, then the two. */
 	gcm_reduce(acc, z);
@@ -645,7 +714,8 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 			aes_bswap32(gda_ld32u(f + ESP_DATA + clen + 4 * i));
 
 	return KNOD_PERSIST_PASS_IPSEC | slot << KNOD_PERSIST_PASS_IPSEC_SA_SHIFT |
-	       (uniform32(fail) ? KNOD_PERSIST_PASS_IPSEC_FAIL : 0);
+	       (uniform32(fail) ? KNOD_PERSIST_PASS_IPSEC_FAIL :
+		csum ? KNOD_PERSIST_PASS_IPSEC_CSUM : 0);
 }
 #endif
 
