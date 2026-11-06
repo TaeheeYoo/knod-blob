@@ -13,7 +13,7 @@ ASM_CPP		?= clang -x assembler-with-cpp -E
 FEATURES	:= core
 # The core's: what a queue comes up with, and the GDA engine's receive kernel,
 # which runs the NIC's rings with no feature's code in them.
-SRC_core	:= src/gda_rx.S src/gda_engine.S
+SRC_core	:= src/gda_rx.S src/gda_engine.S src/gda_engine_crypto.S
 SRC_bpf-persistent := $(filter-out $(SRC_core),$(wildcard src/*.S))
 # The routines a program calls are every C function but the engines' own,
 # which src/gda_engine*.S put inside themselves.
@@ -27,6 +27,10 @@ CLANG		?= clang
 LLC		?= $(shell $(CLANG) -print-prog-name=llc)
 JIT_VREG	:= $(shell sed -n 's/^\#define KNOD_BLOB_JIT_VREG[[:space:]]*//p' \
 		     include/uapi/linux/knod_blob.h)
+# The crypto kernel's function is called from its own entry, not a JIT
+# program, so the VGPRs from KNOD_BLOB_JIT_VREG up are its too, below the
+# GDA descriptor's KNOD_GDA_VGPR_COUNT it is dispatched with.
+NUM_VGPR_crypto	:= 128
 CSRC		:= $(wildcard csrc/*.c)
 BUILD		:= build
 # The preprocessor flags decide what goes in - a probe, or no probe - and they
@@ -120,7 +124,7 @@ $(BUILD)/%.$(1).s: csrc/%.c $(wildcard csrc/*.h) $(UAPI_HDRS) $(FLAGS_STAMP) \
 		-mcumode $(CFN_ATTR_$(1)) -O2 -nogpulib -ffreestanding -fno-builtin \
 		-Wall -Werror -Iinclude/uapi $(EXTRA_CPPFLAGS) -S -emit-llvm $$< \
 		-o $$@.ll
-	sed -E 's/^(attributes #[0-9]+ = \{)/\1 "amdgpu-num-vgpr"="$(JIT_VREG)"/' \
+	sed -E 's/^(attributes #[0-9]+ = \{)/\1 "amdgpu-num-vgpr"="$$(or $$(NUM_VGPR_$$*),$(JIT_VREG))"/' \
 		$$@.ll > $$@.vgpr.ll
 	$(LLC) -O2 $$@.vgpr.ll -o $$@
 
