@@ -550,8 +550,6 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 	clen = 14 + tot - ESP_DATA - ESP_ICV;
 	n = (clen + 15) / 16;
 	m = n + 2;
-	if (m > 256)
-		return 0;
 	spi = uniform32(gda_lds32u(fr, fo + ESP_SPI));
 	if (sc->slot == ~0u || sc->spi != spi) {
 		slot = (int)uniform32(gda_ipsec_sa(g, spi));
@@ -597,6 +595,9 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 						       clen)) ?
 			KNOD_PERSIST_PASS_IPSEC_CSUM : 0);
 	}
+	/* GHASH's powers of H: the SA's table has 256. */
+	if (m > 256)
+		return 0;
 	hpow = (GLOBAL const uint8_t *)sc->hpow;
 	*in_lds = 0;
 	seq = uniform32(gda_ld32u(f + ESP_SPI + 4));
@@ -861,13 +862,14 @@ static INLINE int gda_htx_seal(struct gda *g, GLOBAL uint8_t *dst,
 	    tot < ESP_DATA - 14 + ESP_ICV || 14 + tot > len)
 		return 0;
 	clen = 14 + tot - ESP_DATA - ESP_ICV;
-	if ((clen + 15) / 16 + 2 > 256)
-		return 0;
 	rk = (const CONSTANT uint32_t *)uniform64(get64(&sa->rk));
 	rounds = uniform32(get32(&sa->rounds));
 	salt = uniform32(get32(&sa->salt));
 	seq = uniform32(gda_lds32u(fr, fo + ESP_SPI + 4));
 	if (!!rounds != !!gcm)
+		return 0;
+	/* GHASH's powers of H: the SA's table has 256. */
+	if (gcm && (clen + 15) / 16 + 2 > 256)
 		return 0;
 	if (gcm) {
 		gda_gcm_seal(g, fr, (fo + ESP_DATA) / 4, fo + ESP_IV, rk,
