@@ -76,13 +76,16 @@ static INLINE void gda_chacha_xor(LDS uint32_t *fr, uint32_t pw,
 				  const uint32_t nonce[3], uint32_t clen,
 				  uint32_t lane)
 {
-	uint32_t blk[16], i, b;
+	uint32_t blk[16], i, b, k;
 
-	/* Block 1 + lane of the keystream over the copy's payload. */
-	if (64 * lane < clen) {
-		chacha20_block(blk, key, 1 + lane, nonce);
+	/* Block 1 + k of the keystream over the copy's payload, a lane every
+	 * 64th: past four kilobytes a lane takes more than one.
+	 */
+#pragma clang loop unroll(disable)
+	for (k = lane; 64 * k < clen; k += 64) {
+		chacha20_block(blk, key, 1 + k, nonce);
 		for (i = 0; i < 16; i++) {
-			b = 64 * lane + 4 * i;
+			b = 64 * k + 4 * i;
 			if (b < clen)
 				fr[pw + b / 4] ^= b + 4 <= clen ? blk[i] :
 					blk[i] & ((1u << (8 * (clen - b))) - 1);
