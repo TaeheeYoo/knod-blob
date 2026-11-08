@@ -160,6 +160,7 @@ static INLINE void gda_post_rq(struct gda *g)
 
 #ifdef GDA_IPSEC
 #define AES_TAB		LDS
+#define AES_TAB_STRIDE	KNOD_PERSIST_GDA_IPSEC_TTAB_COPIES
 #define AES_RK		CONSTANT
 #define AES_INLINE	static INLINE
 #include "aes_gcm.h"
@@ -173,14 +174,21 @@ static INLINE void gda_post_rq(struct gda *g)
 #define ESP_DATA	50
 #define ESP_ICV		16
 
-/* The AES T-tables in LDS, past where the waves meet. */
+/* The AES T-table's copies in LDS, past where the waves meet. */
 static INLINE LDS uint32_t *gda_ipsec_ttab(struct gda *g)
 {
 	return (LDS uint32_t *)(uintptr_t)
 		(uniform32(GL(g, LDS)) + KNOD_PERSIST_GDA_LDS_BYTES);
 }
 
-/* Every wave's share of the T-tables into LDS, once for the shader. */
+/* The lane's copy of it. */
+static INLINE LDS const uint32_t *gda_aes_tab(struct gda *g)
+{
+	return gda_ipsec_ttab(g) +
+	       (lane_id() & (KNOD_PERSIST_GDA_IPSEC_TTAB_COPIES - 1));
+}
+
+/* Every wave's share of T0's copies into LDS, once for the shader. */
 static INLINE void gda_ipsec_load(struct gda *g, ctl_t ctl)
 {
 	GLOBAL const uint32_t *src =
@@ -191,8 +199,9 @@ static INLINE void gda_ipsec_load(struct gda *g, ctl_t ctl)
 	SET64(g, IPSEC_SA, get64(&ctl->ipsec_sa));
 	SET(g, IPSEC_SA_MASK, get32(&ctl->ipsec_sa_mask));
 	for (i = 64 * g->wave + lane_id();
-	     i < KNOD_PERSIST_GDA_IPSEC_TTAB_BYTES / 4; i += 64 * GL(g, WAVES))
-		t[i] = src[i];
+	     i < KNOD_PERSIST_GDA_IPSEC_TTAB_LDS_BYTES / 4;
+	     i += 64 * GL(g, WAVES))
+		t[i] = src[i / KNOD_PERSIST_GDA_IPSEC_TTAB_COPIES];
 }
 
 /* Four bytes of a packet at any offset, as a little-endian word: gfx10 drops
@@ -232,8 +241,7 @@ static INLINE LDS uint32_t *gda_ipsec_frame(struct gda *g)
 {
 	return (LDS uint32_t *)(uintptr_t)
 		(uniform32(GL(g, LDS)) + KNOD_PERSIST_GDA_LDS_BYTES +
-		 KNOD_PERSIST_GDA_IPSEC_TTAB_BYTES +
-		 4 * KNOD_PERSIST_GDA_IPSEC_BUF_BYTES +
+		 KNOD_PERSIST_GDA_IPSEC_TTAB_LDS_BYTES +
 		 KNOD_PERSIST_GDA_IPSEC_FRAME_BYTES * g->wave);
 }
 
@@ -252,8 +260,7 @@ static INLINE LDS struct gda_ipsec_work *gda_ipsec_work(struct gda *g)
 {
 	return (LDS struct gda_ipsec_work *)(uintptr_t)
 		(uniform32(GL(g, LDS)) + KNOD_PERSIST_GDA_LDS_BYTES +
-		 KNOD_PERSIST_GDA_IPSEC_TTAB_BYTES +
-		 4 * KNOD_PERSIST_GDA_IPSEC_BUF_BYTES +
+		 KNOD_PERSIST_GDA_IPSEC_TTAB_LDS_BYTES +
 		 4 * KNOD_PERSIST_GDA_IPSEC_FRAME_BYTES);
 }
 
@@ -412,7 +419,7 @@ static INLINE uint32_t gda_gcm_open(struct gda *g, LDS uint32_t *fr,
 				    uint32_t spi, uint32_t seq, uint32_t clen,
 				    GLOBAL uint32_t *dbg)
 {
-	LDS const uint32_t *t = gda_ipsec_ttab(g);
+	LDS const uint32_t *t = gda_aes_tab(g);
 	uint32_t t0 = gda_cyc();
 	uint32_t n = (clen + 15) / 16, m = n + 2, lane = lane_id();
 	uint32_t iv_lo = uniform32(gda_lds32u(fr, iv));
@@ -634,7 +641,7 @@ static INLINE void gda_gcm_seal(struct gda *g, LDS uint32_t *fr, uint32_t pw,
 				GLOBAL const uint8_t *hpow, uint32_t spi,
 				uint32_t seq, uint32_t clen)
 {
-	LDS const uint32_t *t = gda_ipsec_ttab(g);
+	LDS const uint32_t *t = gda_aes_tab(g);
 	uint32_t n = (clen + 15) / 16, m = n + 2, lane = lane_id();
 	uint32_t iv_lo = uniform32(gda_lds32u(fr, iv));
 	uint32_t iv_hi = uniform32(gda_lds32u(fr, iv + 4));
