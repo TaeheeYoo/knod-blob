@@ -16,8 +16,8 @@
  */
 #define GDA_PROF_PKTS		0
 #define GDA_PROF_FETCH		1
-#define GDA_PROF_POLY		2
-#define GDA_PROF_DECRYPT	3
+#define GDA_PROF_POLY		2	/* Poly1305, or GHASH and the tag */
+#define GDA_PROF_DECRYPT	3	/* ChaCha20, or AES-CTR */
 #define GDA_PROF_IPSEC		4	/* gda_ipsec() whole */
 #define GDA_PROF_END_CALLS	5
 #define GDA_PROF_END		6	/* gda_round_end() whole */

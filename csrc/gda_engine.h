@@ -409,9 +409,11 @@ static INLINE uint32_t gda_gcm_open(struct gda *g, LDS uint32_t *fr,
 				    uint32_t pw, uint32_t iv,
 				    const CONSTANT uint32_t *rk, uint32_t rounds,
 				    uint32_t salt, GLOBAL const uint8_t *hpow,
-				    uint32_t spi, uint32_t seq, uint32_t clen)
+				    uint32_t spi, uint32_t seq, uint32_t clen,
+				    GLOBAL uint32_t *dbg)
 {
 	LDS const uint32_t *t = gda_ipsec_ttab(g);
+	uint32_t t0 = gda_cyc();
 	uint32_t n = (clen + 15) / 16, m = n + 2, lane = lane_id();
 	uint32_t iv_lo = uniform32(gda_lds32u(fr, iv));
 	uint32_t iv_hi = uniform32(gda_lds32u(fr, iv + 4));
@@ -460,9 +462,11 @@ static INLINE uint32_t gda_gcm_open(struct gda *g, LDS uint32_t *fr,
 	for (i = 0; i < 4; i++)
 		fail |= (acc[i] ^ x[i]) !=
 			aes_bswap32(gda_lds32u(fr, 4 * pw + clen + 4 * i));
+	gda_prof(dbg, GDA_PROF_POLY, t0);
 	/* A packet the tag fails is dropped: nothing to decrypt. */
 	if (uniform32(fail))
 		return 1;
+	t0 = gda_cyc();
 
 	/* Payload block j, counter j + 1. */
 #pragma clang loop unroll(disable)
@@ -477,6 +481,7 @@ static INLINE uint32_t gda_gcm_open(struct gda *g, LDS uint32_t *fr,
 		}
 	}
 	__builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
+	gda_prof(dbg, GDA_PROF_DECRYPT, t0);
 	return 0;
 }
 
@@ -572,7 +577,11 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 	hpow = (GLOBAL const uint8_t *)sc->hpow;
 	seq = uniform32(gda_lds32u(fr, fo + ESP_SPI + 4));
 	fail = gda_gcm_open(g, fr, (fo + ESP_DATA) / 4, fo + ESP_IV, rk, rounds,
-			    salt, hpow, spi, seq, clen);
+			    salt, hpow, spi, seq, clen, dbg);
+#ifdef KNOD_IPSEC_PROF
+	if (!lane)
+		add((gptr)&dbg[GDA_PROF_PKTS], 1);
+#endif
 	return KNOD_PERSIST_PASS_IPSEC | slot << KNOD_PERSIST_PASS_IPSEC_SA_SHIFT |
 	       (fail ? KNOD_PERSIST_PASS_IPSEC_FAIL :
 		uniform32(gda_ipsec_inner_csum(fr, fo + ESP_DATA, clen)) ?
