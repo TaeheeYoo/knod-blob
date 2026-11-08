@@ -179,9 +179,8 @@ AES_INLINE uint32_t gcm_rev32(uint32_t x)
  * of products is reduced once: gcm_mul_add() adds @x * @h unreduced to @z,
  * eight words low first, and gcm_reduce() takes the sum to a block.
  *
- * As in BearSSL's ghash_ctmul32, each 32x32 product is two halves of 32 bits:
- * the low one of the reversed operands, the high one the low one of the
- * operands as they are, reversed and shifted down one.  Karatsuba's sums are
+ * Each 32x32 product is the reversed operands' whole carry-less product, its
+ * two 32-bit halves (gcm_bmul64()).  Karatsuba's sums are
  * linear too, so each product goes straight into the words it ends up in,
  * two landings on one word cancelling.  Written out: a table of them is one a
  * compiler may leave in .rodata, which the blob does not carry.
@@ -192,16 +191,46 @@ AES_INLINE uint32_t gcm_rev32(uint32_t x)
 	(z)[(k) + 1] ^= (hi);					\
 } while (0)
 
-/* @a * @b carry-less, in two halves.  Each product is added in and its halves
- * pinned before the next starts, which keeps the registers down.
+/* The whole 63-bit carry-less product of @x and @y, as gcm_bmul32() makes the
+ * low half: a column sums eight terms at most, which a nibble holds with no
+ * carry into the next kept bit.  A 32x32 multiply to 64 bits is one
+ * instruction, v_mad_u64_u32, where the two halves took two.
+ */
+AES_INLINE uint64_t gcm_bmul64(uint32_t x, uint32_t y)
+{
+	uint32_t x0 = x & 0x11111111, x1 = x & 0x22222222;
+	uint32_t x2 = x & 0x44444444, x3 = x & 0x88888888;
+	uint32_t y0 = y & 0x11111111, y1 = y & 0x22222222;
+	uint32_t y2 = y & 0x44444444, y3 = y & 0x88888888;
+	uint64_t z0, z1, z2, z3;
+
+	z0 = (uint64_t)x0 * y0 ^ (uint64_t)x1 * y3 ^ (uint64_t)x2 * y2 ^
+	     (uint64_t)x3 * y1;
+	z1 = (uint64_t)x0 * y1 ^ (uint64_t)x1 * y0 ^ (uint64_t)x2 * y3 ^
+	     (uint64_t)x3 * y2;
+	z2 = (uint64_t)x0 * y2 ^ (uint64_t)x1 * y1 ^ (uint64_t)x2 * y0 ^
+	     (uint64_t)x3 * y3;
+	z3 = (uint64_t)x0 * y3 ^ (uint64_t)x1 * y2 ^ (uint64_t)x2 * y1 ^
+	     (uint64_t)x3 * y0;
+	return (z0 & 0x1111111111111111ull) | (z1 & 0x2222222222222222ull) |
+	       (z2 & 0x4444444444444444ull) | (z3 & 0x8888888888888888ull);
+}
+
+/* @a * @b carry-less, in two halves: the product of the reversed operands,
+ * whose low half is the low one and whose high half the high one.  Each
+ * product is added in and its halves pinned before the next starts, which
+ * keeps the registers down.
  */
 AES_INLINE void gcm_clmul32(uint32_t a, uint32_t b, uint32_t *lo,
 			    uint32_t *hi)
 {
+	uint64_t p;
+
 	GCM_HERE(a);
 	GCM_HERE(b);
-	*lo = gcm_bmul32(gcm_rev32(a), gcm_rev32(b));
-	*hi = gcm_rev32(gcm_bmul32(a, b)) >> 1;
+	p = gcm_bmul64(gcm_rev32(a), gcm_rev32(b));
+	*lo = (uint32_t)p;
+	*hi = (uint32_t)(p >> 32);
 }
 
 AES_INLINE void gcm_mul_add(uint32_t z[8], const uint32_t x[4],
