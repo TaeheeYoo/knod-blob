@@ -460,6 +460,9 @@ static INLINE uint32_t gda_gcm_open(struct gda *g, LDS uint32_t *fr,
 	for (i = 0; i < 4; i++)
 		fail |= (acc[i] ^ x[i]) !=
 			aes_bswap32(gda_lds32u(fr, 4 * pw + clen + 4 * i));
+	/* A packet the tag fails is dropped: nothing to decrypt. */
+	if (uniform32(fail))
+		return 1;
 
 	/* Payload block j, counter j + 1. */
 #pragma clang loop unroll(disable)
@@ -474,7 +477,7 @@ static INLINE uint32_t gda_gcm_open(struct gda *g, LDS uint32_t *fr,
 		}
 	}
 	__builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
-	return uniform32(fail);
+	return 0;
 }
 
 /*
