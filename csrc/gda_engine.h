@@ -563,8 +563,8 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 						       clen)) ?
 			KNOD_PERSIST_PASS_IPSEC_CSUM : 0);
 	}
-	/* GHASH's powers of H: the SA's table has 256. */
-	if (m > 256)
+	/* GHASH's powers of H: the SA's table has so many. */
+	if (m > KNOD_PERSIST_IPSEC_HPOW)
 		return 0;
 	hpow = (GLOBAL const uint8_t *)sc->hpow;
 	seq = uniform32(gda_lds32u(fr, fo + ESP_SPI + 4));
@@ -725,8 +725,8 @@ static INLINE int gda_htx_seal(struct gda *g, GLOBAL uint8_t *dst,
 	seq = uniform32(gda_lds32u(fr, fo + ESP_SPI + 4));
 	if (!!rounds != !!gcm)
 		return 0;
-	/* GHASH's powers of H: the SA's table has 256. */
-	if (gcm && (clen + 15) / 16 + 2 > 256)
+	/* GHASH's powers of H: the SA's table has so many. */
+	if (gcm && (clen + 15) / 16 + 2 > KNOD_PERSIST_IPSEC_HPOW)
 		return 0;
 	if (gcm) {
 		gda_gcm_seal(g, fr, (fo + ESP_DATA) / 4, fo + ESP_IV, rk,
