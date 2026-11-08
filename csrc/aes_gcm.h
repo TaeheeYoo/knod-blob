@@ -8,7 +8,8 @@
  * the kernel's aes_expandkey() lays them out in crypto_aes_ctx.key_enc:
  * 4 * (rounds + 1) words.  The tables are aes_enc_tab rotated left by 0, 8,
  * 16 and 24 bits, T0 to T3 back to back; the last round's S-box is byte 1 of
- * T0, as lib/crypto/aes.c takes it.
+ * T0, as lib/crypto/aes.c takes it.  With AES_TAB_STRIDE there is T0 alone,
+ * entry i at word i * AES_TAB_STRIDE, the others its rotations.
  *
  * GHASH keeps a 128-bit value as four 32-bit words, w[0] the most significant
  * of the big-endian block: the block's bytes read as big-endian words.  The
@@ -37,6 +38,13 @@
 
 #define AES_TABLE_WORDS	(4 * 256)
 
+/* Entry @v of table @n. */
+#ifdef AES_TAB_STRIDE
+#define AES_T(n, v)	aes_rol32(t[(v) * AES_TAB_STRIDE], 8 * (n))
+#else
+#define AES_T(n, v)	t[256 * (n) + (v)]
+#endif
+
 static inline uint32_t aes_rol32(uint32_t v, unsigned int n)
 {
 	return n ? v << n | v >> (32 - n) : v;
@@ -53,8 +61,6 @@ AES_INLINE void aes_encrypt_block(const AES_TAB uint32_t *t,
 				  unsigned int rounds, uint32_t out[4],
 				  const uint32_t in[4])
 {
-	const AES_TAB uint32_t *t0 = t, *t1 = t + 256, *t2 = t + 512,
-			       *t3 = t + 768;
 	uint32_t w0 = in[0] ^ rk[0], w1 = in[1] ^ rk[1];
 	uint32_t w2 = in[2] ^ rk[2], w3 = in[3] ^ rk[3];
 	uint32_t x0, x1, x2, x3;
@@ -62,21 +68,21 @@ AES_INLINE void aes_encrypt_block(const AES_TAB uint32_t *t,
 
 	rk += 4;
 	for (r = 1; r < rounds; r++, rk += 4) {
-		x0 = rk[0] ^ t0[w0 & 0xff] ^ t1[w1 >> 8 & 0xff] ^
-		     t2[w2 >> 16 & 0xff] ^ t3[w3 >> 24];
-		x1 = rk[1] ^ t0[w1 & 0xff] ^ t1[w2 >> 8 & 0xff] ^
-		     t2[w3 >> 16 & 0xff] ^ t3[w0 >> 24];
-		x2 = rk[2] ^ t0[w2 & 0xff] ^ t1[w3 >> 8 & 0xff] ^
-		     t2[w0 >> 16 & 0xff] ^ t3[w1 >> 24];
-		x3 = rk[3] ^ t0[w3 & 0xff] ^ t1[w0 >> 8 & 0xff] ^
-		     t2[w1 >> 16 & 0xff] ^ t3[w2 >> 24];
+		x0 = rk[0] ^ AES_T(0, w0 & 0xff) ^ AES_T(1, w1 >> 8 & 0xff) ^
+		     AES_T(2, w2 >> 16 & 0xff) ^ AES_T(3, w3 >> 24);
+		x1 = rk[1] ^ AES_T(0, w1 & 0xff) ^ AES_T(1, w2 >> 8 & 0xff) ^
+		     AES_T(2, w3 >> 16 & 0xff) ^ AES_T(3, w0 >> 24);
+		x2 = rk[2] ^ AES_T(0, w2 & 0xff) ^ AES_T(1, w3 >> 8 & 0xff) ^
+		     AES_T(2, w0 >> 16 & 0xff) ^ AES_T(3, w1 >> 24);
+		x3 = rk[3] ^ AES_T(0, w3 & 0xff) ^ AES_T(1, w0 >> 8 & 0xff) ^
+		     AES_T(2, w1 >> 16 & 0xff) ^ AES_T(3, w2 >> 24);
 		w0 = x0;
 		w1 = x1;
 		w2 = x2;
 		w3 = x3;
 	}
 
-#define AES_SB(v)	(t0[(v) & 0xff] >> 8 & 0xff)
+#define AES_SB(v)	(AES_T(0, (v) & 0xff) >> 8 & 0xff)
 	out[0] = rk[0] ^ AES_SB(w0) ^ AES_SB(w1 >> 8) << 8 ^
 		 AES_SB(w2 >> 16) << 16 ^ AES_SB(w3 >> 24) << 24;
 	out[1] = rk[1] ^ AES_SB(w1) ^ AES_SB(w2 >> 8) << 8 ^
