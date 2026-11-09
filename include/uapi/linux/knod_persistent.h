@@ -6,8 +6,15 @@
  * The control block, and each queue's entry in it, which the host fills and
  * the engine in knod-blob's csrc/gda.c runs from.
  */
-#define KNOD_PERSIST_VERSION 0x4b50001c
+#define KNOD_PERSIST_VERSION 0x4b50001d
 #define KNOD_PERSIST_MAX_QUEUES 32
+/* An IPsec engine's crypto pool: workgroups past the queues' that take
+ * the queues' rounds' sealing and opening, up to so many, each with the
+ * control entry gda[KNOD_PERSIST_MAX_QUEUES + i].
+ */
+#define KNOD_PERSIST_GDA_POOL_MAX 64
+/* A round's crypto jobs a queue's table holds: four waves' packets. */
+#define KNOD_PERSIST_GDA_JOBS 256
 /* What a shader that appends PASS entries the host waits on interrupts with;
  * the low 23 bits are all an interrupt carries on every generation.
  */
@@ -259,6 +266,35 @@ struct knod_persistent_gda {
 	__u32 htx_pool_mask;
 	__u32 htx_pc;
 	__u32 htx_cc;
+	/* With a crypto pool: the queue's job table, a struct
+	 * knod_persistent_gda_jobs in VRAM, zero-filled to start.
+	 */
+	__u64 jobs;
+};
+
+/*
+ * A round's crypto jobs, which the queue's waves and the pool's take one at
+ * a time.  The queue writes the jobs and done = 0, then state = its next
+ * generation << 32 | jobs << 16, taken 0; a wave takes job taken by moving
+ * taken on with a compare-and-swap of the whole word, so one that read last
+ * round's word takes nothing of this one's.  A job done, its result and
+ * meta written, done goes up; the round ends when done reaches jobs.
+ */
+struct knod_persistent_gda_job {
+	__u64 src;		/* the 16 bytes the packet starts in */
+	__u64 dst;		/* ...and where they go, decrypted */
+	__u32 offlen;		/* off | len << 16, off past src */
+	__u32 copy;		/* bytes from src to dst, a multiple of 16 */
+	__u32 meta;		/* the result: KNOD_PERSIST_PASS_IPSEC* bits */
+	__u32 open;		/* zero: copy it as it is */
+};
+
+struct knod_persistent_gda_jobs {
+	__u64 state;
+	__u8 pad0[56];
+	__u32 done;
+	__u8 pad1[60];
+	struct knod_persistent_gda_job job[KNOD_PERSIST_GDA_JOBS];
 };
 
 /* An inbound ESP SA, rfc4106(gcm(aes)), at the slot its SPI hashes to or
@@ -302,13 +338,19 @@ struct knod_persistent_control {
 	__u64 ipsec_sa;
 	__u64 ipsec_ttab;
 	__u32 ipsec_sa_mask;
-	__u8 reserved[12];
+	/* The queues, workgroups 0 to gda_queues - 1, and the crypto pool,
+	 * gda_pool workgroups past them.
+	 */
+	__u32 gda_queues;
+	__u32 gda_pool;
+	__u8 reserved[4];
 	/* Where each queue's NIC TX doorbell is in the GPU's address space.
 	 * Written once when a shader lifetime starts, zero when the NIC
 	 * publishes none.
 	 */
 	__u64 tx_db[KNOD_PERSIST_MAX_QUEUES];
-	struct knod_persistent_gda gda[KNOD_PERSIST_MAX_QUEUES];
+	struct knod_persistent_gda gda[KNOD_PERSIST_MAX_QUEUES +
+				       KNOD_PERSIST_GDA_POOL_MAX];
 };
 #endif
 #endif
