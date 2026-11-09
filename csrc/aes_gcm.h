@@ -9,8 +9,7 @@
  * 4 * (rounds + 1) words.  The tables are aes_enc_tab rotated left by 0, 8,
  * 16 and 24 bits, T0 to T3 back to back; the last round's S-box is byte 1 of
  * T0, as lib/crypto/aes.c takes it.  With AES_TAB_STRIDE the four tables'
- * entry i is at word i * AES_TAB_STRIDE; with AES_TAB_T0 too there is T0
- * alone, the others its rotations.
+ * entry i is at word i * AES_TAB_STRIDE.
  *
  * GHASH keeps a 128-bit value as four 32-bit words, w[0] the most significant
  * of the big-endian block: the block's bytes read as big-endian words.  The
@@ -54,16 +53,7 @@
 #define AES_IDX(x)	(x)
 #endif
 
-#ifdef AES_TAB_T0
-#define AES_T(n, v)	aes_rol32(t[AES_IDX(v) * AES_TAB_STRIDE], 8 * (n))
-#else
 #define AES_T(n, v)	t[(256 * (n) + AES_IDX(v)) * AES_TAB_STRIDE]
-#endif
-
-static inline uint32_t aes_rol32(uint32_t v, unsigned int n)
-{
-	return n ? v << n | v >> (32 - n) : v;
-}
 
 static inline uint32_t aes_bswap32(uint32_t v)
 {

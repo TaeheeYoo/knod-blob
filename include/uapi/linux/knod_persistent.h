@@ -31,8 +31,7 @@
  * waves' meeting place, in KNOD_PERSIST_GDA_IPSEC_TTAB_COPIES copies a word
  * apart, a lane reading its own so that lanes meet in an LDS bank less; then
  * for each of up to four waves the frame it is on, read in one go and
- * shifted so its ESP payload starts on a word; then the round's PASS
- * packets, which the waves share out.  KNOD_PERSIST_GDA_IPSEC_TTAB_BYTES is
+ * shifted so its ESP payload starts on a word.  KNOD_PERSIST_GDA_IPSEC_TTAB_BYTES is
  * the tables the kernel gives the engine, T0 to T3.
  */
 #define KNOD_PERSIST_GDA_IPSEC_TTAB_BYTES 4096
@@ -44,11 +43,9 @@
  * blocks less two, a 9978-byte MTU's.
  */
 #define KNOD_PERSIST_IPSEC_HPOW 640
-#define KNOD_PERSIST_GDA_IPSEC_WORK_BYTES 3088
 #define KNOD_PERSIST_GDA_IPSEC_LDS_BYTES \
 	(KNOD_PERSIST_GDA_LDS_BYTES + KNOD_PERSIST_GDA_IPSEC_TTAB_LDS_BYTES + \
-	 4 * KNOD_PERSIST_GDA_IPSEC_FRAME_BYTES + \
-	 KNOD_PERSIST_GDA_IPSEC_WORK_BYTES)
+	 4 * KNOD_PERSIST_GDA_IPSEC_FRAME_BYTES)
 #define KNOD_PERSIST_GDA_WAVES_MAX 4
 #define KNOD_PERSIST_GDA_PASS_ENTRIES 32768
 /* regress_dbg[]: an RQ bound older than the one before it. */

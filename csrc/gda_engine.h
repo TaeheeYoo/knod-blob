@@ -159,26 +159,8 @@ static INLINE void gda_post_rq(struct gda *g)
 }
 
 #ifdef GDA_IPSEC
-/* The T-tables' copies the engine makes and reads: LDS has room for
- * KNOD_PERSIST_GDA_IPSEC_TTAB_COPIES of the four; -DGDA_TTAB_COPIES=n to
- * measure others against, and -DGDA_TTAB_T0 for four times as many of T0
- * alone, the others its rotations.
- */
-#ifdef GDA_TTAB_T0
-#define AES_TAB_T0
-#define GDA_TTAB_WORDS	256
-#else
-#define GDA_TTAB_WORDS	1024
-#endif
-#ifndef GDA_TTAB_COPIES
-#define GDA_TTAB_COPIES	KNOD_PERSIST_GDA_IPSEC_TTAB_COPIES
-#endif
-_Static_assert(4 * GDA_TTAB_WORDS * GDA_TTAB_COPIES <=
-	       KNOD_PERSIST_GDA_IPSEC_TTAB_LDS_BYTES &&
-	       !(GDA_TTAB_COPIES & (GDA_TTAB_COPIES - 1)),
-	       "the T-tables' copies: a power of two LDS has room for");
 #define AES_TAB		LDS
-#define AES_TAB_STRIDE	GDA_TTAB_COPIES
+#define AES_TAB_STRIDE	KNOD_PERSIST_GDA_IPSEC_TTAB_COPIES
 #define AES_RK		CONSTANT
 #define AES_INLINE	static INLINE
 #include "aes_gcm.h"
@@ -202,7 +184,8 @@ static INLINE LDS uint32_t *gda_ipsec_ttab(struct gda *g)
 /* The lane's copy of them. */
 static INLINE LDS const uint32_t *gda_aes_tab(struct gda *g)
 {
-	return gda_ipsec_ttab(g) + (lane_id() & (GDA_TTAB_COPIES - 1));
+	return gda_ipsec_ttab(g) +
+	       (lane_id() & (KNOD_PERSIST_GDA_IPSEC_TTAB_COPIES - 1));
 }
 
 /* Every wave's share of the tables' copies into LDS, once for the shader. */
@@ -216,8 +199,9 @@ static INLINE void gda_ipsec_load(struct gda *g, ctl_t ctl)
 	SET64(g, IPSEC_SA, get64(&ctl->ipsec_sa));
 	SET(g, IPSEC_SA_MASK, get32(&ctl->ipsec_sa_mask));
 	for (i = 64 * g->wave + lane_id();
-	     i < GDA_TTAB_WORDS * GDA_TTAB_COPIES; i += 64 * GL(g, WAVES))
-		t[i] = src[i / GDA_TTAB_COPIES];
+	     i < KNOD_PERSIST_GDA_IPSEC_TTAB_LDS_BYTES / 4;
+	     i += 64 * GL(g, WAVES))
+		t[i] = src[i / KNOD_PERSIST_GDA_IPSEC_TTAB_COPIES];
 }
 
 /* Four bytes of a packet at any offset, as a little-endian word: gfx10 drops
@@ -259,25 +243,6 @@ static INLINE LDS uint32_t *gda_ipsec_frame(struct gda *g)
 		(uniform32(GL(g, LDS)) + KNOD_PERSIST_GDA_LDS_BYTES +
 		 KNOD_PERSIST_GDA_IPSEC_TTAB_LDS_BYTES +
 		 KNOD_PERSIST_GDA_IPSEC_FRAME_BYTES * g->wave);
-}
-
-/* The round's PASS packets, which the waves take one at a time. */
-struct gda_ipsec_work {
-	uint32_t next;		/* the next one to take */
-	uint32_t pad[3];
-	uint32_t page[256];	/* by slot from the round's first */
-	uint32_t offlen[256];	/* off | len << 16 */
-	uint32_t meta[256];	/* KNOD_PERSIST_PASS_IPSEC* bits */
-};
-_Static_assert(sizeof(struct gda_ipsec_work) <=
-	       KNOD_PERSIST_GDA_IPSEC_WORK_BYTES, "the IPsec work area");
-
-static INLINE LDS struct gda_ipsec_work *gda_ipsec_work(struct gda *g)
-{
-	return (LDS struct gda_ipsec_work *)(uintptr_t)
-		(uniform32(GL(g, LDS)) + KNOD_PERSIST_GDA_LDS_BYTES +
-		 KNOD_PERSIST_GDA_IPSEC_TTAB_LDS_BYTES +
-		 4 * KNOD_PERSIST_GDA_IPSEC_FRAME_BYTES);
 }
 
 static INLINE uint32_t gda_lds_be16(LDS const uint32_t *fr, uint32_t b)
@@ -1591,49 +1556,17 @@ static INLINE void gda_ipsec_where(struct gda *g, uint32_t k, uint32_t page,
 	*open = off + len + 32 <= 1u << GL(g, PAGE_SHIFT);
 }
 
-/* The round's @ptotal PASS packets, the queue's waves alone taking them. */
-static INLINE void gda_ipsec_own(struct gda *g, struct gda_sa_cache *sc,
-				 LDS struct gda_ipsec_work *w, int ok,
-				 uint32_t k, uint32_t page, uint32_t off,
-				 uint32_t len, uint32_t ppc, uint32_t ptotal)
-{
-	uint32_t kk, pg, ol, copy, open;
-	GLOBAL uint8_t *src, *dst;
-
-	if (ok) {
-		w->page[k] = page;
-		w->offlen[k] = off | len << 16;
-	}
-	barrier();
-	for (;;) {
-		kk = 0;
-		if (!lane_id())
-			kk = __atomic_fetch_add(&w->next, 1, __ATOMIC_RELAXED);
-		kk = __builtin_amdgcn_readfirstlane(kk);
-		if (kk >= ptotal)
-			break;
-		pg = uniform32(w->page[kk]);
-		ol = uniform32(w->offlen[kk]);
-		gda_ipsec_where(g, kk, pg, ol & 0xffff, ol >> 16, ppc, &src,
-				&dst, &copy, &open);
-		ol = gda_ipsec_job(g, sc, src, dst, (ol & 0xffff) & 15,
-				   ol >> 16, copy, open);
-		if (!lane_id())
-			w->meta[kk] = ol;
-	}
-	barrier();
-}
-
 /*
- * ...and with the crypto pool: the jobs in the queue's table @jt, which the
- * pool's workgroups take as the queue's waves do, then the round waits for
- * the last of them.
+ * The round's @ptotal PASS packets, the lanes @ok with one, number @k: jobs
+ * in the queue's table @jt, which the crypto pool's workgroups take as the
+ * queue's waves do - there may be none - then the round waits for the last
+ * of them.  The lane's packet's KNOD_PERSIST_PASS_IPSEC* bits.
  */
-static INLINE void gda_ipsec_pool(struct gda *g, struct gda_sa_cache *sc,
-				  jobs_t jt, LDS struct gda_ipsec_work *w,
-				  int ok, uint32_t k, uint32_t page,
-				  uint32_t off, uint32_t len, uint32_t ppc,
-				  uint32_t ptotal)
+static INLINE uint32_t gda_ipsec_pool(struct gda *g, struct gda_sa_cache *sc,
+				      jobs_t jt, int ok, uint32_t k,
+				      uint32_t page, uint32_t off,
+				      uint32_t len, uint32_t ppc,
+				      uint32_t ptotal)
 {
 	GLOBAL struct knod_persistent_gda_job *jb = &jt->job[k];
 	GLOBAL uint64_t *st = (GLOBAL uint64_t *)&jt->state;
@@ -1670,9 +1603,7 @@ static INLINE void gda_ipsec_pool(struct gda *g, struct gda_sa_cache *sc,
 		while (load((gptr)&jt->done) < ptotal)
 			__builtin_amdgcn_s_sleep(1);
 	__builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent");
-	if (ok)
-		w->meta[k] = get32(&jb->meta);
-	barrier();
+	return ok ? get32(&jb->meta) : 0;
 }
 
 v4u GDA_FN(gda_ipsec)(ctl_t ctl, uint32_t queue, uint32_t wave, uint32_t s,
@@ -1684,14 +1615,12 @@ v4u GDA_FN(gda_ipsec)(ctl_t ctl, uint32_t queue, uint32_t wave, uint32_t s,
 	uint64_t live = (uint64_t)uniform32(hi) << 32 | uniform32(lo);
 	struct gda_sa_cache sc = { .slot = ~0u };
 	uint32_t t0 = gda_cyc(), ppc, pcc, room, pbase = 0, ptotal = 0, k, i;
-	LDS struct gda_ipsec_work *w;
+	uint32_t meta = 0;
 	uint64_t pass;
-	jobs_t jt;
 	int ok;
 
 	ctl = (ctl_t)uniform64((uint64_t)ctl);
 	gda_load(&g, ctl, uniform32(queue), uniform32(wave));
-	w = gda_ipsec_work(&g);
 	pass = ballot(((live >> lane_id()) & 1) && verdict == XDP_PASS);
 
 	/* The PASS slots, as gda_round_end() would have them. */
@@ -1707,7 +1636,6 @@ v4u GDA_FN(gda_ipsec)(ctl_t ctl, uint32_t queue, uint32_t wave, uint32_t s,
 		if (!lane_id()) {
 			g.meet->pass_pc = ppc;
 			g.meet->pass_room = GL(&g, PASS_MASK) + 1 - (ppc - pcc);
-			w->next = 0;
 		}
 	}
 	barrier();
@@ -1724,19 +1652,17 @@ v4u GDA_FN(gda_ipsec)(ctl_t ctl, uint32_t queue, uint32_t wave, uint32_t s,
 		ptotal = room;
 	k = pbase + rank(pass);
 	ok = ((pass >> lane_id()) & 1) && k < room;
-	jt = (jobs_t)uniform64(get64(&g.entry->jobs));
-	if (jt && ptotal)
-		gda_ipsec_pool(&g, &sc, jt, w, ok, k, page, off, len, ppc,
-			       ptotal);
-	else
-		gda_ipsec_own(&g, &sc, w, ok, k, page, off, len, ppc, ptotal);
+	if (ptotal)
+		meta = gda_ipsec_pool(&g, &sc,
+				      (jobs_t)uniform64(get64(&g.entry->jobs)),
+				      ok, k, page, off, len, ppc, ptotal);
 
 	if (ok)
 		put64((GLOBAL uint64_t *)GL64(&g, PASS_RING) +
 		      ((ppc + k) & GL(&g, PASS_MASK)),
 		      (uint64_t)(off | len << 16) << 32 |
 		      nic_rx_csum(&g, GL(&g, CI) + 64 * g.wave + lane_id()) |
-		      w->meta[k]);
+		      meta);
 	stores_out();
 	gda_prof(g.entry->regress_dbg, GDA_PROF_IPSEC, t0);
 	return (v4u){ 0, 0, 0, 0 };
