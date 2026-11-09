@@ -66,7 +66,7 @@
 #define KNOD_PERSIST_SYNC_HITS		0
 #define KNOD_PERSIST_SYNC_ENTRIES	1	/* s2's low, the CQE's high */
 #define KNOD_PERSIST_SYNC_KIND		2	/* mlx5 op_own, bnxt's type */
-#define KNOD_PERSIST_BYTES 16384
+#define KNOD_PERSIST_BYTES 32768
 /* The NIC formats a queue's rings can be in: a vendor's, of a generation of
  * its hardware, as each generation can change them.  An engine is built for
  * each, and the kernel runs the one of the NIC's.  Zero is none.
