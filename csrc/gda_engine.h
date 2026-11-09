@@ -335,8 +335,8 @@ struct gda_sa_cache {
 	uint32_t key[8];			/* ChaCha20's */
 };
 
-/* Whether every lane's sum of words, folded, is a good checksum. */
-static INLINE uint32_t gda_wave_csum_ok(uint64_t sum)
+/* Every lane's sum of words added up and folded to sixteen bits. */
+static INLINE uint32_t gda_wave_fold(uint64_t sum)
 {
 	uint64_t all = 0;
 	uint32_t i;
@@ -348,7 +348,13 @@ static INLINE uint32_t gda_wave_csum_ok(uint64_t sum)
 				(uint32_t)(sum >> 32), i) << 32);
 	while (all >> 16)
 		all = (all & 0xffff) + (all >> 16);
-	return all == 0xffff;
+	return all;
+}
+
+/* Whether every lane's sum of words, folded, is a good checksum. */
+static INLINE uint32_t gda_wave_csum_ok(uint64_t sum)
+{
+	return gda_wave_fold(sum) == 0xffff;
 }
 
 /*
@@ -702,14 +708,161 @@ static INLINE void gda_gcm_seal(struct gda *g, LDS uint32_t *fr, uint32_t pw,
 	__builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
 }
 
+static INLINE uint32_t gda_lds8(LDS const uint32_t *fr, uint32_t b)
+{
+	return gda_lds32u(fr, b) & 0xff;
+}
+
+static INLINE void gda_lds_put8(LDS uint32_t *fr, uint32_t b, uint32_t v)
+{
+	((LDS uint8_t *)fr)[b] = v;
+}
+
+static INLINE void gda_lds_put_be16(LDS uint32_t *fr, uint32_t b, uint32_t v)
+{
+	gda_lds_put8(fr, b, v >> 8);
+	gda_lds_put8(fr, b + 1, v);
+}
+
+static INLINE uint32_t gda_lds_be32(LDS const uint32_t *fr, uint32_t b)
+{
+	return bswap32(gda_lds32u(fr, b));
+}
+
+static INLINE void gda_lds_put_be32(LDS uint32_t *fr, uint32_t b, uint32_t v)
+{
+	gda_lds_put_be16(fr, b, v >> 16);
+	gda_lds_put_be16(fr, b + 2, v);
+}
+
+/* The checksum of the IPv4 header at byte @b, by one lane. */
+static INLINE void gda_lds_ip_csum(LDS uint32_t *fr, uint32_t b)
+{
+	uint32_t ihl = 4 * (gda_lds8(fr, b) & 15), i, v;
+	uint64_t sum = 0;
+
+	gda_lds_put_be16(fr, b + 10, 0);
+	for (i = 0; i < ihl; i += 4)
+		sum += gda_lds32u(fr, b + i);
+	while (sum >> 16)
+		sum = (sum & 0xffff) + (sum >> 16);
+	v = ~sum & 0xffff;
+	gda_lds_put8(fr, b + 10, v);
+	gda_lds_put8(fr, b + 11, v >> 8);
+}
+
+/*
+ * What a NIC does to a host frame before it seals it, by entry @e and its
+ * second word @x, in the wave's copy @fr of it, @fo bytes in, @len bytes
+ * long with the trailer and the ICV: a GSO segment's headers made its own
+ * and its trailer written; the inner TCP or UDP checksum filled in.
+ * Whether the frame is one it can do that to.
+ */
+static INLINE uint32_t gda_htx_prep(LDS uint32_t *fr, uint32_t fo,
+				    uint32_t len, uint64_t e, uint64_t x)
+{
+	uint32_t next = KNOD_PERSIST_HTX_NEXT(x), l4 = KNOD_PERSIST_HTX_L4(x);
+	uint32_t seg = KNOD_PERSIST_HTX_SEG(x), pad = KNOD_PERSIST_HTX_PAD(x);
+	uint32_t lane = lane_id(), ip, proto, clen, end, n, i, b, w, c, v;
+	uint32_t gso = (e & KNOD_PERSIST_HTX_GSO) != 0;
+	uint64_t sum = 0;
+
+	if (len < ESP_DATA + 2 + ESP_ICV)
+		return 0;
+	clen = len - ESP_DATA - ESP_ICV;
+	if (!gso)
+		pad = gda_lds8(fr, fo + ESP_DATA + clen - 2);
+	if (pad + 2 > clen)
+		return 0;
+	/* The plaintext's end: the trailer's start. */
+	end = ESP_DATA + clen - 2 - pad;
+	ip = next == 4 ? ESP_DATA : 14;
+	if (l4 < ip + 20 || l4 + 8 > end)
+		return 0;
+	proto = next == 4 ? gda_lds8(fr, fo + ip + 9) : next;
+
+	if (gso && !lane) {
+		uint32_t lo, hi, f;
+
+		for (i = 0; i < pad; i++)
+			gda_lds_put8(fr, fo + end + i, i + 1);
+		gda_lds_put8(fr, fo + end + pad, pad);
+		gda_lds_put8(fr, fo + end + pad + 1, next);
+		gda_lds_put_be16(fr, fo + 16, len - 14);
+		gda_lds_put_be16(fr, fo + 18, gda_lds_be16(fr, fo + 18) + seg);
+		gda_lds_ip_csum(fr, fo + 14);
+		gda_lds_put_be32(fr, fo + ESP_SPI + 4,
+				 gda_lds_be32(fr, fo + ESP_SPI + 4) + seg);
+		/* The IV is the 64-bit sequence. */
+		hi = gda_lds_be32(fr, fo + ESP_IV);
+		lo = gda_lds_be32(fr, fo + ESP_IV + 4);
+		hi += lo + seg < lo;
+		gda_lds_put_be32(fr, fo + ESP_IV, hi);
+		gda_lds_put_be32(fr, fo + ESP_IV + 4, lo + seg);
+		if (next == 4) {
+			gda_lds_put_be16(fr, fo + ip + 2, end - ip);
+			gda_lds_put_be16(fr, fo + ip + 4,
+					 gda_lds_be16(fr, fo + ip + 4) + seg);
+			gda_lds_ip_csum(fr, fo + ip);
+		}
+		if (proto == 6) {
+			gda_lds_put_be32(fr, fo + l4 + 4,
+					 gda_lds_be32(fr, fo + l4 + 4) +
+					 seg * KNOD_PERSIST_HTX_MSS(x));
+			/* FIN and PSH on the last segment only, CWR on the
+			 * first.
+			 */
+			f = gda_lds8(fr, fo + l4 + 13);
+			if (!(e & KNOD_PERSIST_HTX_LAST))
+				f &= ~0x09u;
+			if (seg)
+				f &= ~0x80u;
+			gda_lds_put8(fr, fo + l4 + 13, f);
+		}
+	}
+	__builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
+
+	if (!(e & KNOD_PERSIST_HTX_CSUM) || (proto != 6 && proto != 17))
+		return 1;
+	c = l4 + (proto == 6 ? 16 : 6);
+	if (!lane)
+		gda_lds_put_be16(fr, fo + c, 0);
+	__builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
+	/* As gda_ipsec_inner_csum() checks it: words in memory order, the
+	 * pseudo-header's too.
+	 */
+	n = end - l4;
+	for (i = lane; 4 * i < n; i += 64) {
+		b = 4 * i;
+		w = gda_lds32u(fr, fo + l4 + b);
+		if (b + 4 > n)
+			w &= (1u << (8 * (n - b))) - 1;
+		sum += w;
+	}
+	if (!lane)
+		sum += (uint64_t)gda_lds32u(fr, fo + ip + 12) +
+		       gda_lds32u(fr, fo + ip + 16) +
+		       (proto << 8 | (n & 0xff) << 24 | (n >> 8) << 16);
+	v = ~gda_wave_fold(sum) & 0xffff;
+	if (proto == 17 && !v)
+		v = 0xffff;
+	if (!lane) {
+		gda_lds_put8(fr, fo + c, v);
+		gda_lds_put8(fr, fo + c + 1, v >> 8);
+	}
+	__builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
+	return 1;
+}
+
 /*
  * A host frame of @len bytes at @src, ESP for SA @slot, sealed on its way to
- * @dst with AES-GCM if @gcm, else ChaCha20-Poly1305: whether it was.  One the
+ * @dst with AES-GCM if @gcm, else ChaCha20-Poly1305: whether it was.  Entry
+ * @e and its second word @x say what is to be done to it first.  One the
  * engine cannot seal is not sent at all.
  */
 static INLINE int gda_htx_seal(struct gda *g, GLOBAL uint8_t *dst,
 			       GLOBAL const uint8_t *src, uint32_t len,
-			       uint32_t slot, int gcm)
+			       uint32_t slot, int gcm, uint64_t e, uint64_t x)
 {
 	GLOBAL const struct knod_persistent_ipsec_sa *sa;
 	LDS uint32_t *fr = gda_ipsec_frame(g);
@@ -725,6 +878,9 @@ static INLINE int gda_htx_seal(struct gda *g, GLOBAL uint8_t *dst,
 	if (!uniform32(get32(&sa->active)))
 		return 0;
 	gda_ipsec_fetch(fr, src, ESP_DATA & 3, fo + len + 4, lane_id());
+	if ((e & (KNOD_PERSIST_HTX_CSUM | KNOD_PERSIST_HTX_GSO)) &&
+	    !gda_htx_prep(fr, fo, len, e, x))
+		return 0;
 	spi = uniform32(gda_lds32u(fr, fo + ESP_SPI));
 	tot = uniform32(gda_lds_be16(fr, fo + 16));
 	if (spi != uniform32(get32(&sa->spi)) ||
@@ -772,17 +928,23 @@ static INLINE void gda_htx_take(struct gda *g, struct gda_htx *h,
 	h->pmask = get32(&g->entry->htx_pool_mask);
 	h->htx = (GLOBAL uint8_t *)GL64(g, HTX);
 	h->ring = h->htx + ((uint64_t)(h->mask + 1) << GL(g, PAGE_SHIFT));
-	h->ctl = h->ring + 8 * (h->mask + 1);
+	h->ctl = h->ring + KNOD_PERSIST_HTX_ENTRY * (h->mask + 1);
 	h->cc = get32(&g->entry->htx_cc);
 	h->n = get32(&g->entry->htx_pc) - h->cc;
 	h->n = h->n < room ? h->n : room;
 	h->n = h->n < 64 ? h->n : 64;
 }
 
-/* Frame @l's ring entry. */
+/* Frame @l's ring entry, and its second word. */
 static INLINE uint64_t gda_htx_entry(struct gda_htx *h, uint32_t l)
 {
-	return get64(h->ring + 8 * ((h->cc + l) & h->mask));
+	return get64(h->ring + KNOD_PERSIST_HTX_ENTRY * ((h->cc + l) & h->mask));
+}
+
+static INLINE uint64_t gda_htx_entry2(struct gda_htx *h, uint32_t l)
+{
+	return get64(h->ring + KNOD_PERSIST_HTX_ENTRY * ((h->cc + l) & h->mask) +
+		     8);
 }
 
 /* Frame @l's entry, where it is and where it goes. */
@@ -1590,7 +1752,8 @@ static INLINE uint32_t gda_htx_work(struct gda *g, int gcm)
 			ok = (e & KNOD_PERSIST_HTX_INPLACE) &&
 			     KNOD_PERSIST_HTX_ESP_OFF(e) == ESP_SPI &&
 			     gda_htx_seal(g, dst, dst, KNOD_PERSIST_HTX_LEN(e),
-					  KNOD_PERSIST_HTX_SA(e), gcm);
+					  KNOD_PERSIST_HTX_SA(e), gcm, e,
+					  uniform64(gda_htx_entry2(&h, k)));
 		else
 			ok = (e & KNOD_PERSIST_HTX_INPLACE) != 0;
 		(void)src;
