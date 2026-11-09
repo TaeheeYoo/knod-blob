@@ -159,7 +159,26 @@ static INLINE void gda_post_rq(struct gda *g)
 }
 
 #ifdef GDA_IPSEC
+/* The T-tables' copies the engine makes and reads: LDS has room for
+ * KNOD_PERSIST_GDA_IPSEC_TTAB_COPIES of the four; -DGDA_TTAB_COPIES=n to
+ * measure others against, and -DGDA_TTAB_T0 for four times as many of T0
+ * alone, the others its rotations.
+ */
+#ifdef GDA_TTAB_T0
+#define AES_TAB_T0
+#define GDA_TTAB_WORDS	256
+#else
+#define GDA_TTAB_WORDS	1024
+#endif
+#ifndef GDA_TTAB_COPIES
+#define GDA_TTAB_COPIES	KNOD_PERSIST_GDA_IPSEC_TTAB_COPIES
+#endif
+_Static_assert(4 * GDA_TTAB_WORDS * GDA_TTAB_COPIES <=
+	       KNOD_PERSIST_GDA_IPSEC_TTAB_LDS_BYTES &&
+	       !(GDA_TTAB_COPIES & (GDA_TTAB_COPIES - 1)),
+	       "the T-tables' copies: a power of two LDS has room for");
 #define AES_TAB		LDS
+#define AES_TAB_STRIDE	GDA_TTAB_COPIES
 #define AES_RK		CONSTANT
 #define AES_INLINE	static INLINE
 #include "aes_gcm.h"
@@ -173,14 +192,20 @@ static INLINE void gda_post_rq(struct gda *g)
 #define ESP_DATA	50
 #define ESP_ICV		16
 
-/* The AES T-tables in LDS, past where the waves meet. */
+/* The AES T-tables' copies in LDS, past where the waves meet. */
 static INLINE LDS uint32_t *gda_ipsec_ttab(struct gda *g)
 {
 	return (LDS uint32_t *)(uintptr_t)
 		(uniform32(GL(g, LDS)) + KNOD_PERSIST_GDA_LDS_BYTES);
 }
 
-/* Every wave's share of the T-tables into LDS, once for the shader. */
+/* The lane's copy of them. */
+static INLINE LDS const uint32_t *gda_aes_tab(struct gda *g)
+{
+	return gda_ipsec_ttab(g) + (lane_id() & (GDA_TTAB_COPIES - 1));
+}
+
+/* Every wave's share of the tables' copies into LDS, once for the shader. */
 static INLINE void gda_ipsec_load(struct gda *g, ctl_t ctl)
 {
 	GLOBAL const uint32_t *src =
@@ -191,8 +216,8 @@ static INLINE void gda_ipsec_load(struct gda *g, ctl_t ctl)
 	SET64(g, IPSEC_SA, get64(&ctl->ipsec_sa));
 	SET(g, IPSEC_SA_MASK, get32(&ctl->ipsec_sa_mask));
 	for (i = 64 * g->wave + lane_id();
-	     i < KNOD_PERSIST_GDA_IPSEC_TTAB_BYTES / 4; i += 64 * GL(g, WAVES))
-		t[i] = src[i];
+	     i < GDA_TTAB_WORDS * GDA_TTAB_COPIES; i += 64 * GL(g, WAVES))
+		t[i] = src[i / GDA_TTAB_COPIES];
 }
 
 /* Four bytes of a packet at any offset, as a little-endian word: gfx10 drops
@@ -232,8 +257,7 @@ static INLINE LDS uint32_t *gda_ipsec_frame(struct gda *g)
 {
 	return (LDS uint32_t *)(uintptr_t)
 		(uniform32(GL(g, LDS)) + KNOD_PERSIST_GDA_LDS_BYTES +
-		 KNOD_PERSIST_GDA_IPSEC_TTAB_BYTES +
-		 4 * KNOD_PERSIST_GDA_IPSEC_BUF_BYTES +
+		 KNOD_PERSIST_GDA_IPSEC_TTAB_LDS_BYTES +
 		 KNOD_PERSIST_GDA_IPSEC_FRAME_BYTES * g->wave);
 }
 
@@ -252,8 +276,7 @@ static INLINE LDS struct gda_ipsec_work *gda_ipsec_work(struct gda *g)
 {
 	return (LDS struct gda_ipsec_work *)(uintptr_t)
 		(uniform32(GL(g, LDS)) + KNOD_PERSIST_GDA_LDS_BYTES +
-		 KNOD_PERSIST_GDA_IPSEC_TTAB_BYTES +
-		 4 * KNOD_PERSIST_GDA_IPSEC_BUF_BYTES +
+		 KNOD_PERSIST_GDA_IPSEC_TTAB_LDS_BYTES +
 		 4 * KNOD_PERSIST_GDA_IPSEC_FRAME_BYTES);
 }
 
@@ -405,6 +428,36 @@ static INLINE uint32_t gda_ipsec_inner_csum(LDS const uint32_t *fr,
 }
 
 /*
+ * The counter blocks over the @clen bytes of payload in @fr at word @pw,
+ * block j with counter j + 1: a lane two blocks at a time, 64 apart.
+ */
+static INLINE void gda_gcm_ctr(LDS uint32_t *fr, uint32_t pw,
+			       LDS const uint32_t *t,
+			       const CONSTANT uint32_t *rk, uint32_t rounds,
+			       uint32_t salt, uint32_t iv_lo, uint32_t iv_hi,
+			       uint32_t clen)
+{
+	uint32_t n = (clen + 15) / 16, x[8], k[8], j, h, b, i;
+
+#pragma clang loop unroll(disable)
+	for (j = 1 + lane_id(); j <= n; j += 128) {
+		gcm_counter(x, salt, iv_lo, iv_hi, j + 1);
+		gcm_counter(x + 4, salt, iv_lo, iv_hi, j + 65);
+		aes_encrypt_block2(t, rk, rounds, k, x);
+		for (h = 0; h < 2; h++)
+			for (i = 0; i < 4; i++) {
+				b = 16 * (j + 64 * h - 1) + 4 * i;
+				if (b < clen)
+					fr[pw + b / 4] ^= b + 4 <= clen ?
+						k[4 * h + i] :
+						k[4 * h + i] &
+						((1u << (8 * (clen - b))) - 1);
+			}
+	}
+	__builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
+}
+
+/*
  * AES-GCM opening the payload in @fr at word @pw, as gda_gcm_seal() seals
  * it: GHASH over the ciphertext, a lane every 64th block, the AAD - SPI and
  * sequence - and the lengths, the lanes' sums added up and the tag checked
@@ -418,7 +471,7 @@ static INLINE uint32_t gda_gcm_open(struct gda *g, LDS uint32_t *fr,
 				    uint32_t spi, uint32_t seq, uint32_t clen,
 				    GLOBAL uint32_t *dbg)
 {
-	LDS const uint32_t *t = gda_ipsec_ttab(g);
+	LDS const uint32_t *t = gda_aes_tab(g);
 	uint32_t t0 = gda_cyc();
 	uint32_t n = (clen + 15) / 16, m = n + 2, lane = lane_id();
 	uint32_t iv_lo = uniform32(gda_lds32u(fr, iv));
@@ -474,19 +527,7 @@ static INLINE uint32_t gda_gcm_open(struct gda *g, LDS uint32_t *fr,
 		return 1;
 	t0 = gda_cyc();
 
-	/* Payload block j, counter j + 1. */
-#pragma clang loop unroll(disable)
-	for (j = 1 + lane; j <= n; j += 64) {
-		gcm_counter(x, salt, iv_lo, iv_hi, j + 1);
-		aes_encrypt_block(t, rk, rounds, k, x);
-		for (i = 0; i < 4; i++) {
-			b = 16 * (j - 1) + 4 * i;
-			if (b < clen)
-				fr[pw + b / 4] ^= b + 4 <= clen ? k[i] :
-					k[i] & ((1u << (8 * (clen - b))) - 1);
-		}
-	}
-	__builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
+	gda_gcm_ctr(fr, pw, t, rk, rounds, salt, iv_lo, iv_hi, clen);
 	gda_prof(dbg, GDA_PROF_DECRYPT, t0);
 	return 0;
 }
@@ -640,26 +681,14 @@ static INLINE void gda_gcm_seal(struct gda *g, LDS uint32_t *fr, uint32_t pw,
 				GLOBAL const uint8_t *hpow, uint32_t spi,
 				uint32_t seq, uint32_t clen)
 {
-	LDS const uint32_t *t = gda_ipsec_ttab(g);
+	LDS const uint32_t *t = gda_aes_tab(g);
 	uint32_t n = (clen + 15) / 16, m = n + 2, lane = lane_id();
 	uint32_t iv_lo = uniform32(gda_lds32u(fr, iv));
 	uint32_t iv_hi = uniform32(gda_lds32u(fr, iv + 4));
 	uint32_t z[8] = { 0 }, acc[4], x[4], k[4], j, b, i, w;
 
 	GCM_HERE(lane);
-	/* Payload block j, counter j + 1. */
-#pragma clang loop unroll(disable)
-	for (j = 1 + lane; j <= n; j += 64) {
-		gcm_counter(x, salt, iv_lo, iv_hi, j + 1);
-		aes_encrypt_block(t, rk, rounds, k, x);
-		for (i = 0; i < 4; i++) {
-			b = 16 * (j - 1) + 4 * i;
-			if (b < clen)
-				fr[pw + b / 4] ^= b + 4 <= clen ? k[i] :
-					k[i] & ((1u << (8 * (clen - b))) - 1);
-		}
-	}
-	__builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
+	gda_gcm_ctr(fr, pw, t, rk, rounds, salt, iv_lo, iv_hi, clen);
 
 #pragma clang loop unroll(disable)
 	for (j = 1 + lane; j <= n; j += 64) {
