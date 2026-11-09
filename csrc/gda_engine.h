@@ -658,96 +658,6 @@ static INLINE uint32_t gda_job_take(jobs_t jt, uint32_t *k)
 	return __builtin_amdgcn_readfirstlane(got);
 }
 
-/* Job @k of table @jt done by this wave: its result out, then counted. */
-static INLINE void gda_job_run(struct gda *g, struct gda_sa_cache *sc,
-			       jobs_t jt, uint32_t k)
-{
-	GLOBAL struct knod_persistent_gda_job *jb = &jt->job[k];
-	uint32_t ol = uniform32(get32(&jb->offlen)), b;
-
-	b = gda_ipsec_job(g, sc, (GLOBAL uint8_t *)uniform64(get64(&jb->src)),
-			  (GLOBAL uint8_t *)uniform64(get64(&jb->dst)),
-			  ol & 0xffff, ol >> 16, uniform32(get32(&jb->copy)),
-			  uniform32(get32(&jb->open)));
-	if (!lane_id())
-		store((gptr)&jb->meta, b);
-	stores_out();
-	if (!lane_id())
-		add((gptr)&jt->done, 1);
-}
-
-/*
- * The crypto pool's workgroup @j: a wave at a time, jobs from whichever
- * queue has some, from the queue after the last one's on, until the shader
- * stops.  Wave 0 parks the workgroup with the queues, between jobs.
- */
-static INLINE __attribute__((noreturn)) void gda_pool_run(ctl_t ctl,
-							   uint32_t j,
-							   uint32_t wave)
-{
-	entry_t e = &ctl->gda[KNOD_PERSIST_MAX_QUEUES + j];
-	uint32_t nq = get32(&ctl->gda_queues), waves = get32(&ctl->gda_waves);
-	struct gda_sa_cache sc = { .slot = ~0u };
-	struct gda g = { .s = 0 };
-	uint32_t q = j, i, k, any, cmd, pause;
-	jobs_t jt;
-
-	if (!get32(&e->live) || wave >= waves)
-		__builtin_amdgcn_endpgm();
-	g.ctl = ctl;
-	g.entry = e;
-	g.queue = KNOD_PERSIST_MAX_QUEUES + j;
-	g.wave = wave;
-	SET(&g, LDS, get32(&ctl->gda_lds));
-	SET(&g, WAVES, waves);
-	g.meet = (LDS struct gda_meet *)(uintptr_t)GL(&g, LDS);
-	gda_ipsec_load(&g, ctl);
-	barrier();
-
-	for (;;) {
-		any = 0;
-		for (i = 0; i < nq; i++) {
-			q = q + 1 < nq ? q + 1 : 0;
-			jt = (jobs_t)uniform64(get64(&ctl->gda[q].jobs));
-			if (jt && gda_job_take(jt, &k)) {
-				gda_job_run(&g, &sc, jt, k);
-				any = 1;
-				break;
-			}
-		}
-
-		/* Between jobs, every wave's: stop or park with the queues. */
-		barrier();
-		if (!wave && !lane_id()) {
-			cmd = get32(&ctl->version) != KNOD_PERSIST_VERSION ||
-			      get32(&ctl->stop);
-			pause = get32(&ctl->pause);
-			if (!cmd && pause) {
-				put32(&e->pause_ack, pause);
-				do {
-					__builtin_amdgcn_s_sleep(8);
-					cmd = get32(&ctl->stop);
-				} while (!cmd && get32(&ctl->pause));
-				cmd = cmd ? 1 : 2;
-			}
-			g.meet->cmd = cmd;
-		}
-		barrier();
-		cmd = uniform32(g.meet->cmd);
-		if (cmd == 1) {
-			stores_out();
-			__builtin_amdgcn_endpgm();
-		}
-		/* Parked: SAs may have come and gone, keys and all. */
-		if (cmd == 2)
-			sc.slot = ~0u;
-		/* Nothing anywhere: a microsecond or so, against a round's
-		 * tens of them, before the queues are read again.
-		 */
-		if (!any)
-			__builtin_amdgcn_s_sleep(32);
-	}
-}
 #endif
 
 /*
@@ -1114,7 +1024,7 @@ static INLINE uint32_t gda_htx_room(struct gda *g)
 }
 
 #ifdef GDA_IPSEC
-/* Whether frame entry @e is ESP of an AES-GCM SA, for gda_host_gcm(). */
+/* Whether frame entry @e is ESP of an AES-GCM SA. */
 static INLINE int gda_htx_is_gcm(struct gda *g, uint64_t e)
 {
 	GLOBAL const struct knod_persistent_ipsec_sa *sa;
@@ -1124,6 +1034,128 @@ static INLINE int gda_htx_is_gcm(struct gda *g, uint64_t e)
 	sa = (GLOBAL const struct knod_persistent_ipsec_sa *)
 	     GL64(g, IPSEC_SA) + KNOD_PERSIST_HTX_SA(e);
 	return uniform32(get32(&sa->rounds)) != 0;
+}
+
+/* Job @k of table @jt done by this wave, its result @b: out, then counted. */
+static INLINE void gda_job_done(jobs_t jt, uint32_t k, uint32_t b)
+{
+	if (!lane_id())
+		store((gptr)&jt->job[k].meta, b);
+	stores_out();
+	if (!lane_id())
+		add((gptr)&jt->done, 1);
+}
+
+/* PASS packet job @k: opened, or copied as it is. */
+static INLINE void gda_job_open(struct gda *g, struct gda_sa_cache *sc,
+				jobs_t jt, uint32_t k)
+{
+	GLOBAL struct knod_persistent_gda_job *jb = &jt->job[k];
+	uint32_t ol = uniform32(get32(&jb->offlen));
+
+	gda_job_done(jt, k, gda_ipsec_job(g, sc,
+		(GLOBAL uint8_t *)uniform64(get64(&jb->src)),
+		(GLOBAL uint8_t *)uniform64(get64(&jb->dst)),
+		ol & 0xffff, ol >> 16, uniform32(get32(&jb->copy)),
+		uniform32(get32(&jb->kind)) == KNOD_PERSIST_GDA_JOB_OPEN));
+}
+
+/* Host frame job @k: sealed where it is, if it is a frame the engine can. */
+static INLINE void gda_job_seal(struct gda *g, jobs_t jt, uint32_t k)
+{
+	GLOBAL struct knod_persistent_gda_job *jb = &jt->job[k];
+	uint64_t e = uniform64((uint64_t)get32(&jb->copy) << 32 |
+			       get32(&jb->offlen));
+	GLOBAL uint8_t *fr = (GLOBAL uint8_t *)uniform64(get64(&jb->src));
+
+	gda_job_done(jt, k, (e & KNOD_PERSIST_HTX_INPLACE) &&
+		     KNOD_PERSIST_HTX_ESP_OFF(e) == ESP_SPI &&
+		     gda_htx_seal(g, fr, fr, KNOD_PERSIST_HTX_LEN(e),
+				  KNOD_PERSIST_HTX_SA(e), gda_htx_is_gcm(g, e),
+				  e, uniform64(get64(&jb->dst))));
+}
+
+/* Job @k, whichever kind. */
+static INLINE void gda_job_run(struct gda *g, struct gda_sa_cache *sc,
+			       jobs_t jt, uint32_t k)
+{
+	if (uniform32(get32(&jt->job[k].kind)) == KNOD_PERSIST_GDA_JOB_SEAL)
+		gda_job_seal(g, jt, k);
+	else
+		gda_job_open(g, sc, jt, k);
+}
+
+/*
+ * The crypto pool's workgroup @j: a wave at a time, jobs from whichever
+ * queue has some, from the queue after the last one's on, until the shader
+ * stops.  Wave 0 parks the workgroup with the queues, between jobs.
+ */
+static INLINE __attribute__((noreturn)) void gda_pool_run(ctl_t ctl,
+							   uint32_t j,
+							   uint32_t wave)
+{
+	entry_t e = &ctl->gda[KNOD_PERSIST_MAX_QUEUES + j];
+	uint32_t nq = get32(&ctl->gda_queues), waves = get32(&ctl->gda_waves);
+	struct gda_sa_cache sc = { .slot = ~0u };
+	struct gda g = { .s = 0 };
+	uint32_t q = j, i, k, any, cmd, pause;
+	jobs_t jt;
+
+	if (!get32(&e->live) || wave >= waves)
+		__builtin_amdgcn_endpgm();
+	g.ctl = ctl;
+	g.entry = e;
+	g.queue = KNOD_PERSIST_MAX_QUEUES + j;
+	g.wave = wave;
+	SET(&g, LDS, get32(&ctl->gda_lds));
+	SET(&g, WAVES, waves);
+	g.meet = (LDS struct gda_meet *)(uintptr_t)GL(&g, LDS);
+	gda_ipsec_load(&g, ctl);
+	barrier();
+
+	for (;;) {
+		any = 0;
+		for (i = 0; i < nq; i++) {
+			q = q + 1 < nq ? q + 1 : 0;
+			jt = (jobs_t)uniform64(get64(&ctl->gda[q].jobs));
+			if (jt && gda_job_take(jt, &k)) {
+				gda_job_run(&g, &sc, jt, k);
+				any = 1;
+				break;
+			}
+		}
+
+		/* Between jobs, every wave's: stop or park with the queues. */
+		barrier();
+		if (!wave && !lane_id()) {
+			cmd = get32(&ctl->version) != KNOD_PERSIST_VERSION ||
+			      get32(&ctl->stop);
+			pause = get32(&ctl->pause);
+			if (!cmd && pause) {
+				put32(&e->pause_ack, pause);
+				do {
+					__builtin_amdgcn_s_sleep(8);
+					cmd = get32(&ctl->stop);
+				} while (!cmd && get32(&ctl->pause));
+				cmd = cmd ? 1 : 2;
+			}
+			g.meet->cmd = cmd;
+		}
+		barrier();
+		cmd = uniform32(g.meet->cmd);
+		if (cmd == 1) {
+			stores_out();
+			__builtin_amdgcn_endpgm();
+		}
+		/* Parked: SAs may have come and gone, keys and all. */
+		if (cmd == 2)
+			sc.slot = ~0u;
+		/* Nothing anywhere: a microsecond or so, against a round's
+		 * tens of them, before the queues are read again.
+		 */
+		if (!any)
+			__builtin_amdgcn_s_sleep(32);
+	}
 }
 #endif
 
@@ -1581,7 +1613,8 @@ static INLINE uint32_t gda_ipsec_pool(struct gda *g, struct gda_sa_cache *sc,
 		put64(&jb->dst, (uint64_t)dst);
 		put32(&jb->offlen, (off & 15) | len << 16);
 		put32(&jb->copy, copy);
-		put32(&jb->open, open);
+		put32(&jb->kind, open ? KNOD_PERSIST_GDA_JOB_OPEN :
+					KNOD_PERSIST_GDA_JOB_COPY);
 	}
 	stores_out();
 	barrier();
@@ -1597,7 +1630,7 @@ static INLINE uint32_t gda_ipsec_pool(struct gda *g, struct gda_sa_cache *sc,
 	}
 	barrier();
 	while (gda_job_take(jt, &kk))
-		gda_job_run(g, sc, jt, kk);
+		gda_job_open(g, sc, jt, kk);
 	/* The pool's last ones. */
 	if (!lane_id())
 		while (load((gptr)&jt->done) < ptotal)
@@ -1818,8 +1851,7 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 			gda_htx_take(&g, &h, gda_htx_room(&g) - x.given);
 		if (!lane_id()) {
 			g.meet->htx_n = h.n;
-			g.meet->htx_next[0] = 0;
-			g.meet->htx_next[1] = 0;
+			g.meet->htx_next = 0;
 			g.meet->htx_ok[0] = 0;
 			g.meet->htx_ok[1] = 0;
 		}
@@ -1891,19 +1923,104 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 	return (v4u){ g.s, g.packets, g.packets >> 32, 0 };
 }
 
+#ifdef GDA_IPSEC
 /*
- * Every wave: the round's host frames, AES-GCM ESP if @gcm or the rest, one
- * at a time, whichever wave is free: copied to their pool pages, ESP sealed
- * on the way.  Whether each may go, in LDS.  How many frames there are.
+ * After gda_round_end(): the round's host frames to go, ESP sealed in its
+ * pool page as jobs in the queue's table - every wave's, and the crypto
+ * pool's - and the rest as they are.  Wave 0 puts the jobs out and finds,
+ * once they are done, which frames may go, in LDS for gda_host_tx().
  */
-static INLINE uint32_t gda_htx_work(struct gda *g, int gcm)
+v4u GDA_FN(gda_host_seal)(ctl_t ctl, uint32_t queue, uint32_t wave,
+			  uint32_t s, uint32_t pk_lo, uint32_t pk_hi)
+{
+	struct gda g = { .s = s, .packets = (uint64_t)pk_hi << 32 | pk_lo };
+	uint32_t n, lane = lane_id(), j = 0, total = 0, k;
+	GLOBAL struct knod_persistent_gda_job *jb;
+	uint64_t e = 0, x = 0, esp = 0, go = 0;
+	GLOBAL uint64_t *st;
+	struct gda_htx h;
+	GLOBAL uint8_t *fr;
+	jobs_t jt;
+
+	ctl = (ctl_t)uniform64((uint64_t)ctl);
+	gda_load(&g, ctl, uniform32(queue), uniform32(wave));
+	n = uniform32(g.meet->htx_n);
+	if (!n)
+		goto out;
+	jt = (jobs_t)uniform64(get64(&g.entry->jobs));
+	st = (GLOBAL uint64_t *)&jt->state;
+	gda_htx_take(&g, &h, n);
+	if (!g.wave) {
+		if (lane < n) {
+			e = gda_htx_entry(&h, lane);
+			x = gda_htx_entry2(&h, lane);
+		}
+		esp = ballot(lane < n && (e & KNOD_PERSIST_HTX_ESP));
+		go = ballot(lane < n && !(e & KNOD_PERSIST_HTX_ESP) &&
+			    (e & KNOD_PERSIST_HTX_INPLACE));
+		j = rank(esp);
+		total = __builtin_popcountll(esp);
+		if ((esp >> lane) & 1) {
+			jb = &jt->job[j];
+			fr = (GLOBAL uint8_t *)GL64(&g, RX_BASE) +
+			     ((uint64_t)(h.pool + ((h.cc + lane) & h.pmask)) <<
+			      GL(&g, PAGE_SHIFT));
+			put64(&jb->src, (uint64_t)fr);
+			put64(&jb->dst, x);
+			put32(&jb->offlen, (uint32_t)e);
+			put32(&jb->copy, e >> 32);
+			put32(&jb->kind, KNOD_PERSIST_GDA_JOB_SEAL);
+		}
+		stores_out();
+		/* The jobs, then done, out before the word that hands them
+		 * out.
+		 */
+		if (total && !lane) {
+			store((gptr)&jt->done, 0);
+			stores_out();
+			__scoped_atomic_store_n(st,
+				((__scoped_atomic_load_n(st, __ATOMIC_RELAXED,
+						__MEMORY_SCOPE_DEVICE) >> 32) +
+				 1) << 32 | (uint64_t)total << 16,
+				__ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
+		}
+		if (!lane)
+			g.meet->htx_next = total;
+	}
+	barrier();
+	if (!uniform32(g.meet->htx_next))
+		goto ok;
+	while (gda_job_take(jt, &k))
+		gda_job_seal(&g, jt, k);
+	if (g.wave)
+		goto out;
+	/* The pool's last ones. */
+	if (!lane)
+		while (load((gptr)&jt->done) < total)
+			__builtin_amdgcn_s_sleep(1);
+	__builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent");
+	go |= ballot(((esp >> lane) & 1) && get32(&jt->job[j].meta));
+ok:
+	if (!g.wave && !lane) {
+		g.meet->htx_ok[0] = go;
+		g.meet->htx_ok[1] = go >> 32;
+	}
+out:
+	return (v4u){ g.s, g.packets, g.packets >> 32, 0 };
+}
+#else
+/*
+ * The round's host frames, one at a time, whichever wave is free: copied to
+ * their pool pages unless the kernel's SDMA put them there.  Whether each
+ * may go, in LDS.  How many frames there are.
+ */
+static INLINE uint32_t gda_htx_work(struct gda *g)
 {
 	uint32_t n = uniform32(g->meet->htx_n), k;
 	GLOBAL const uint8_t *src;
 	struct gda_htx h;
 	GLOBAL uint8_t *dst;
 	uint64_t e;
-	int ok;
 
 	if (!n)
 		return 0;
@@ -1911,75 +2028,29 @@ static INLINE uint32_t gda_htx_work(struct gda *g, int gcm)
 	for (;;) {
 		k = 0;
 		if (!lane_id())
-			k = __atomic_fetch_add(&g->meet->htx_next[gcm], 1,
+			k = __atomic_fetch_add(&g->meet->htx_next, 1,
 					       __ATOMIC_RELAXED);
 		k = __builtin_amdgcn_readfirstlane(k);
 		if (k >= n)
 			break;
 		e = gda_htx_frame(g, &h, k, &src, &dst);
-		/* The kernel's SDMA puts a frame in its pool page: ESP is
-		 * sealed there, the rest goes as it is.  An engine without
-		 * IPsec still copies one from its slot.
-		 */
-		ok = 1;
-#ifdef GDA_IPSEC
-		if (gda_htx_is_gcm(g, e) != gcm)
+		/* An engine without IPsec sends no ESP. */
+		if (e & KNOD_PERSIST_HTX_ESP)
 			continue;
-		if (e & KNOD_PERSIST_HTX_ESP)
-			ok = (e & KNOD_PERSIST_HTX_INPLACE) &&
-			     KNOD_PERSIST_HTX_ESP_OFF(e) == ESP_SPI &&
-			     gda_htx_seal(g, dst, dst, KNOD_PERSIST_HTX_LEN(e),
-					  KNOD_PERSIST_HTX_SA(e), gcm, e,
-					  uniform64(gda_htx_entry2(&h, k)));
-		else
-			ok = (e & KNOD_PERSIST_HTX_INPLACE) != 0;
-		(void)src;
-#else
-		if (e & KNOD_PERSIST_HTX_ESP)
-			ok = 0;
-		else if (!(e & KNOD_PERSIST_HTX_INPLACE))
+		if (!(e & KNOD_PERSIST_HTX_INPLACE))
 			gda_copy(dst, src, (KNOD_PERSIST_HTX_LEN(e) + 15) & ~15u);
-#endif
-		if (ok && !lane_id())
+		if (!lane_id())
 			__atomic_fetch_or(&g->meet->htx_ok[k / 32], 1u << (k & 31),
 					  __ATOMIC_RELAXED);
 	}
 	stores_out();
 	return n;
 }
-
-#ifdef GDA_IPSEC
-/*
- * After gda_round_end(): the host frames of AES-GCM SAs sealed, in a call of
- * their own for the registers it takes.
- */
-v4u GDA_FN(gda_host_gcm)(ctl_t ctl, uint32_t queue, uint32_t wave,
-			 uint32_t s, uint32_t pk_lo, uint32_t pk_hi)
-{
-	struct gda g = { .s = s, .packets = (uint64_t)pk_hi << 32 | pk_lo };
-
-	ctl = (ctl_t)uniform64((uint64_t)ctl);
-	gda_load(&g, ctl, uniform32(queue), uniform32(wave));
-	gda_htx_work(&g, 1);
-	return (v4u){ g.s, g.packets, g.packets >> 32, 0 };
-}
-
-/* ...and then the rest, ChaCha20-Poly1305 and plain, likewise. */
-v4u GDA_FN(gda_host_chacha)(ctl_t ctl, uint32_t queue, uint32_t wave,
-			    uint32_t s, uint32_t pk_lo, uint32_t pk_hi)
-{
-	struct gda g = { .s = s, .packets = (uint64_t)pk_hi << 32 | pk_lo };
-
-	ctl = (ctl_t)uniform64((uint64_t)ctl);
-	gda_load(&g, ctl, uniform32(queue), uniform32(wave));
-	gda_htx_work(&g, 0);
-	return (v4u){ g.s, g.packets, g.packets >> 32, 0 };
-}
 #endif
 
 /*
- * After gda_round_end() - or an IPsec engine's gda_host_gcm() and
- * gda_host_chacha() - the rest of the host's frames, then wave 0 posts every
+ * After gda_round_end() - or an IPsec engine's gda_host_seal() - the rest of
+ * the host's frames, then wave 0 posts every
  * one that may go.  They hold no RQ entry, so their
  * WQEs say where the CQ stands.  A frame that could not be sealed is
  * skipped, its slot freed all the same.
@@ -1997,7 +2068,7 @@ v4u GDA_FN(gda_host_tx)(ctl_t ctl, uint32_t queue, uint32_t wave,
 #ifdef GDA_IPSEC
 	n = uniform32(g.meet->htx_n);
 #else
-	n = gda_htx_work(&g, 0);
+	n = gda_htx_work(&g);
 #endif
 	if (!n)
 		goto out;
