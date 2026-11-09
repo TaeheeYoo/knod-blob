@@ -1119,6 +1119,13 @@ static INLINE __attribute__((noreturn)) void gda_pool_run(ctl_t ctl,
 			q = q + 1 < nq ? q + 1 : 0;
 			jt = (jobs_t)uniform64(get64(&ctl->gda[q].jobs));
 			if (jt && gda_job_take(jt, &k)) {
+				/* Round keys come through the scalar cache,
+				 * and an SA comes in with no park: its keys
+				 * where an old SA's were would read as the
+				 * old ones.  As a queue's round, a job starts
+				 * with the cache cleared.
+				 */
+				__builtin_amdgcn_s_dcache_inv();
 				gda_job_run(&g, &sc, jt, k);
 				any = 1;
 				break;
