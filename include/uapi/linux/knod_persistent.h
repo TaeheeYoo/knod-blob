@@ -20,18 +20,18 @@
  * two bits for each of a round's packets besides.
  */
 #define KNOD_PERSIST_GDA_ORDER_LDS_BYTES 704
-/* ...and what KNOD_BLOB_GDA_ENGINE_IPSEC's need: the AES T-table, past the
+/* ...and what KNOD_BLOB_GDA_ENGINE_IPSEC's need: the AES T-tables, past the
  * waves' meeting place, in KNOD_PERSIST_GDA_IPSEC_TTAB_COPIES copies a word
  * apart, a lane reading its own so that lanes meet in an LDS bank less; then
  * for each of up to four waves the frame it is on, read in one go and
  * shifted so its ESP payload starts on a word; then the round's PASS
  * packets, which the waves share out.  KNOD_PERSIST_GDA_IPSEC_TTAB_BYTES is
- * the tables the kernel gives the engine, T0 to T3; LDS has only T0.
+ * the tables the kernel gives the engine, T0 to T3.
  */
 #define KNOD_PERSIST_GDA_IPSEC_TTAB_BYTES 4096
-#define KNOD_PERSIST_GDA_IPSEC_TTAB_COPIES 16
+#define KNOD_PERSIST_GDA_IPSEC_TTAB_COPIES 4
 #define KNOD_PERSIST_GDA_IPSEC_TTAB_LDS_BYTES \
-	(1024 * KNOD_PERSIST_GDA_IPSEC_TTAB_COPIES)
+	(KNOD_PERSIST_GDA_IPSEC_TTAB_BYTES * KNOD_PERSIST_GDA_IPSEC_TTAB_COPIES)
 #define KNOD_PERSIST_GDA_IPSEC_FRAME_BYTES 10112	/* a 9978-byte MTU's */
 /* Powers of H an AES-GCM SA's table has: GHASH over a packet of so many
  * blocks less two, a 9978-byte MTU's.

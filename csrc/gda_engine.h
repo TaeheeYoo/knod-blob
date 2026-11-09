@@ -159,16 +159,24 @@ static INLINE void gda_post_rq(struct gda *g)
 }
 
 #ifdef GDA_IPSEC
-/* The T-table's copies the engine makes and reads: LDS has room for
- * KNOD_PERSIST_GDA_IPSEC_TTAB_COPIES; fewer, -DGDA_TTAB_COPIES=n, to
- * measure them against.
+/* The T-tables' copies the engine makes and reads: LDS has room for
+ * KNOD_PERSIST_GDA_IPSEC_TTAB_COPIES of the four; -DGDA_TTAB_COPIES=n to
+ * measure others against, and -DGDA_TTAB_T0 for four times as many of T0
+ * alone, the others its rotations.
  */
+#ifdef GDA_TTAB_T0
+#define AES_TAB_T0
+#define GDA_TTAB_WORDS	256
+#else
+#define GDA_TTAB_WORDS	1024
+#endif
 #ifndef GDA_TTAB_COPIES
 #define GDA_TTAB_COPIES	KNOD_PERSIST_GDA_IPSEC_TTAB_COPIES
 #endif
-_Static_assert(GDA_TTAB_COPIES <= KNOD_PERSIST_GDA_IPSEC_TTAB_COPIES &&
+_Static_assert(4 * GDA_TTAB_WORDS * GDA_TTAB_COPIES <=
+	       KNOD_PERSIST_GDA_IPSEC_TTAB_LDS_BYTES &&
 	       !(GDA_TTAB_COPIES & (GDA_TTAB_COPIES - 1)),
-	       "the T-table's copies: a power of two LDS has room for");
+	       "the T-tables' copies: a power of two LDS has room for");
 #define AES_TAB		LDS
 #define AES_TAB_STRIDE	GDA_TTAB_COPIES
 #define AES_RK		CONSTANT
@@ -184,20 +192,20 @@ _Static_assert(GDA_TTAB_COPIES <= KNOD_PERSIST_GDA_IPSEC_TTAB_COPIES &&
 #define ESP_DATA	50
 #define ESP_ICV		16
 
-/* The AES T-table's copies in LDS, past where the waves meet. */
+/* The AES T-tables' copies in LDS, past where the waves meet. */
 static INLINE LDS uint32_t *gda_ipsec_ttab(struct gda *g)
 {
 	return (LDS uint32_t *)(uintptr_t)
 		(uniform32(GL(g, LDS)) + KNOD_PERSIST_GDA_LDS_BYTES);
 }
 
-/* The lane's copy of it. */
+/* The lane's copy of them. */
 static INLINE LDS const uint32_t *gda_aes_tab(struct gda *g)
 {
 	return gda_ipsec_ttab(g) + (lane_id() & (GDA_TTAB_COPIES - 1));
 }
 
-/* Every wave's share of T0's copies into LDS, once for the shader. */
+/* Every wave's share of the tables' copies into LDS, once for the shader. */
 static INLINE void gda_ipsec_load(struct gda *g, ctl_t ctl)
 {
 	GLOBAL const uint32_t *src =
@@ -208,7 +216,7 @@ static INLINE void gda_ipsec_load(struct gda *g, ctl_t ctl)
 	SET64(g, IPSEC_SA, get64(&ctl->ipsec_sa));
 	SET(g, IPSEC_SA_MASK, get32(&ctl->ipsec_sa_mask));
 	for (i = 64 * g->wave + lane_id();
-	     i < 256 * GDA_TTAB_COPIES; i += 64 * GL(g, WAVES))
+	     i < GDA_TTAB_WORDS * GDA_TTAB_COPIES; i += 64 * GL(g, WAVES))
 		t[i] = src[i / GDA_TTAB_COPIES];
 }
 
