@@ -428,6 +428,36 @@ static INLINE uint32_t gda_ipsec_inner_csum(LDS const uint32_t *fr,
 }
 
 /*
+ * The counter blocks over the @clen bytes of payload in @fr at word @pw,
+ * block j with counter j + 1: a lane two blocks at a time, 64 apart.
+ */
+static INLINE void gda_gcm_ctr(LDS uint32_t *fr, uint32_t pw,
+			       LDS const uint32_t *t,
+			       const CONSTANT uint32_t *rk, uint32_t rounds,
+			       uint32_t salt, uint32_t iv_lo, uint32_t iv_hi,
+			       uint32_t clen)
+{
+	uint32_t n = (clen + 15) / 16, x[8], k[8], j, h, b, i;
+
+#pragma clang loop unroll(disable)
+	for (j = 1 + lane_id(); j <= n; j += 128) {
+		gcm_counter(x, salt, iv_lo, iv_hi, j + 1);
+		gcm_counter(x + 4, salt, iv_lo, iv_hi, j + 65);
+		aes_encrypt_block2(t, rk, rounds, k, x);
+		for (h = 0; h < 2; h++)
+			for (i = 0; i < 4; i++) {
+				b = 16 * (j + 64 * h - 1) + 4 * i;
+				if (b < clen)
+					fr[pw + b / 4] ^= b + 4 <= clen ?
+						k[4 * h + i] :
+						k[4 * h + i] &
+						((1u << (8 * (clen - b))) - 1);
+			}
+	}
+	__builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
+}
+
+/*
  * AES-GCM opening the payload in @fr at word @pw, as gda_gcm_seal() seals
  * it: GHASH over the ciphertext, a lane every 64th block, the AAD - SPI and
  * sequence - and the lengths, the lanes' sums added up and the tag checked
@@ -497,19 +527,7 @@ static INLINE uint32_t gda_gcm_open(struct gda *g, LDS uint32_t *fr,
 		return 1;
 	t0 = gda_cyc();
 
-	/* Payload block j, counter j + 1. */
-#pragma clang loop unroll(disable)
-	for (j = 1 + lane; j <= n; j += 64) {
-		gcm_counter(x, salt, iv_lo, iv_hi, j + 1);
-		aes_encrypt_block(t, rk, rounds, k, x);
-		for (i = 0; i < 4; i++) {
-			b = 16 * (j - 1) + 4 * i;
-			if (b < clen)
-				fr[pw + b / 4] ^= b + 4 <= clen ? k[i] :
-					k[i] & ((1u << (8 * (clen - b))) - 1);
-		}
-	}
-	__builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
+	gda_gcm_ctr(fr, pw, t, rk, rounds, salt, iv_lo, iv_hi, clen);
 	gda_prof(dbg, GDA_PROF_DECRYPT, t0);
 	return 0;
 }
@@ -670,19 +688,7 @@ static INLINE void gda_gcm_seal(struct gda *g, LDS uint32_t *fr, uint32_t pw,
 	uint32_t z[8] = { 0 }, acc[4], x[4], k[4], j, b, i, w;
 
 	GCM_HERE(lane);
-	/* Payload block j, counter j + 1. */
-#pragma clang loop unroll(disable)
-	for (j = 1 + lane; j <= n; j += 64) {
-		gcm_counter(x, salt, iv_lo, iv_hi, j + 1);
-		aes_encrypt_block(t, rk, rounds, k, x);
-		for (i = 0; i < 4; i++) {
-			b = 16 * (j - 1) + 4 * i;
-			if (b < clen)
-				fr[pw + b / 4] ^= b + 4 <= clen ? k[i] :
-					k[i] & ((1u << (8 * (clen - b))) - 1);
-		}
-	}
-	__builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
+	gda_gcm_ctr(fr, pw, t, rk, rounds, salt, iv_lo, iv_hi, clen);
 
 #pragma clang loop unroll(disable)
 	for (j = 1 + lane; j <= n; j += 64) {

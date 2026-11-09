@@ -70,43 +70,81 @@ static inline uint32_t aes_bswap32(uint32_t v)
 	return v >> 24 | (v >> 8 & 0xff00) | (v << 8 & 0xff0000) | v << 24;
 }
 
+/* An AES round of state @w into @x, round keys @k. */
+#define AES_ROUND(x, w, k) do {						\
+	(x)[0] = (k)[0] ^ AES_T(0, (w)[0] & 0xff) ^			\
+		 AES_T(1, (w)[1] >> 8 & 0xff) ^				\
+		 AES_T(2, (w)[2] >> 16 & 0xff) ^ AES_T(3, (w)[3] >> 24);	\
+	(x)[1] = (k)[1] ^ AES_T(0, (w)[1] & 0xff) ^			\
+		 AES_T(1, (w)[2] >> 8 & 0xff) ^				\
+		 AES_T(2, (w)[3] >> 16 & 0xff) ^ AES_T(3, (w)[0] >> 24);	\
+	(x)[2] = (k)[2] ^ AES_T(0, (w)[2] & 0xff) ^			\
+		 AES_T(1, (w)[3] >> 8 & 0xff) ^				\
+		 AES_T(2, (w)[0] >> 16 & 0xff) ^ AES_T(3, (w)[1] >> 24);	\
+	(x)[3] = (k)[3] ^ AES_T(0, (w)[3] & 0xff) ^			\
+		 AES_T(1, (w)[0] >> 8 & 0xff) ^				\
+		 AES_T(2, (w)[1] >> 16 & 0xff) ^ AES_T(3, (w)[2] >> 24);	\
+} while (0)
+
+/* The last round, S-box alone. */
+#define AES_LAST(o, w, k) do {						\
+	(o)[0] = (k)[0] ^ AES_SB((w)[0]) ^ AES_SB((w)[1] >> 8) << 8 ^	\
+		 AES_SB((w)[2] >> 16) << 16 ^ AES_SB((w)[3] >> 24) << 24;	\
+	(o)[1] = (k)[1] ^ AES_SB((w)[1]) ^ AES_SB((w)[2] >> 8) << 8 ^	\
+		 AES_SB((w)[3] >> 16) << 16 ^ AES_SB((w)[0] >> 24) << 24;	\
+	(o)[2] = (k)[2] ^ AES_SB((w)[2]) ^ AES_SB((w)[3] >> 8) << 8 ^	\
+		 AES_SB((w)[0] >> 16) << 16 ^ AES_SB((w)[1] >> 24) << 24;	\
+	(o)[3] = (k)[3] ^ AES_SB((w)[3]) ^ AES_SB((w)[0] >> 8) << 8 ^	\
+		 AES_SB((w)[1] >> 16) << 16 ^ AES_SB((w)[2] >> 24) << 24;	\
+} while (0)
+#define AES_SB(v)	(AES_T(0, (v) & 0xff) >> 8 & 0xff)
+
 /* One AES block: @in to @out, four little-endian words each. */
 AES_INLINE void aes_encrypt_block(const AES_TAB uint32_t *t,
 				  const AES_RK uint32_t *rk,
 				  unsigned int rounds, uint32_t out[4],
 				  const uint32_t in[4])
 {
-	uint32_t w0 = in[0] ^ rk[0], w1 = in[1] ^ rk[1];
-	uint32_t w2 = in[2] ^ rk[2], w3 = in[3] ^ rk[3];
-	uint32_t x0, x1, x2, x3;
-	unsigned int r;
+	uint32_t w[4], x[4];
+	unsigned int r, i;
 
-	rk += 4;
-	for (r = 1; r < rounds; r++, rk += 4) {
-		x0 = rk[0] ^ AES_T(0, w0 & 0xff) ^ AES_T(1, w1 >> 8 & 0xff) ^
-		     AES_T(2, w2 >> 16 & 0xff) ^ AES_T(3, w3 >> 24);
-		x1 = rk[1] ^ AES_T(0, w1 & 0xff) ^ AES_T(1, w2 >> 8 & 0xff) ^
-		     AES_T(2, w3 >> 16 & 0xff) ^ AES_T(3, w0 >> 24);
-		x2 = rk[2] ^ AES_T(0, w2 & 0xff) ^ AES_T(1, w3 >> 8 & 0xff) ^
-		     AES_T(2, w0 >> 16 & 0xff) ^ AES_T(3, w1 >> 24);
-		x3 = rk[3] ^ AES_T(0, w3 & 0xff) ^ AES_T(1, w0 >> 8 & 0xff) ^
-		     AES_T(2, w1 >> 16 & 0xff) ^ AES_T(3, w2 >> 24);
-		w0 = x0;
-		w1 = x1;
-		w2 = x2;
-		w3 = x3;
+	for (i = 0; i < 4; i++)
+		w[i] = in[i] ^ rk[i];
+	for (r = 1; r < rounds; r++) {
+		AES_ROUND(x, w, rk + 4 * r);
+		for (i = 0; i < 4; i++)
+			w[i] = x[i];
 	}
+	AES_LAST(out, w, rk + 4 * rounds);
+}
 
-#define AES_SB(v)	(AES_T(0, (v) & 0xff) >> 8 & 0xff)
-	out[0] = rk[0] ^ AES_SB(w0) ^ AES_SB(w1 >> 8) << 8 ^
-		 AES_SB(w2 >> 16) << 16 ^ AES_SB(w3 >> 24) << 24;
-	out[1] = rk[1] ^ AES_SB(w1) ^ AES_SB(w2 >> 8) << 8 ^
-		 AES_SB(w3 >> 16) << 16 ^ AES_SB(w0 >> 24) << 24;
-	out[2] = rk[2] ^ AES_SB(w2) ^ AES_SB(w3 >> 8) << 8 ^
-		 AES_SB(w0 >> 16) << 16 ^ AES_SB(w1 >> 24) << 24;
-	out[3] = rk[3] ^ AES_SB(w3) ^ AES_SB(w0 >> 8) << 8 ^
-		 AES_SB(w1 >> 16) << 16 ^ AES_SB(w2 >> 24) << 24;
-#undef AES_SB
+/*
+ * Two AES blocks at once, @in to @out, eight words each: each round's
+ * lookups for both go out before either's are waited for, so a block's
+ * wait on LDS is the other's work.
+ */
+AES_INLINE void aes_encrypt_block2(const AES_TAB uint32_t *t,
+				   const AES_RK uint32_t *rk,
+				   unsigned int rounds, uint32_t out[8],
+				   const uint32_t in[8])
+{
+	uint32_t w[8], x[8], k[4];
+	unsigned int r, i;
+
+	for (i = 0; i < 8; i++)
+		w[i] = in[i] ^ rk[i & 3];
+	for (r = 1; r < rounds; r++) {
+		for (i = 0; i < 4; i++)
+			k[i] = rk[4 * r + i];
+		AES_ROUND(x, w, k);
+		AES_ROUND(x + 4, w + 4, k);
+		for (i = 0; i < 8; i++)
+			w[i] = x[i];
+	}
+	for (i = 0; i < 4; i++)
+		k[i] = rk[4 * rounds + i];
+	AES_LAST(out, w, k);
+	AES_LAST(out + 4, w + 4, k);
 }
 
 /*
