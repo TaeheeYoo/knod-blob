@@ -763,14 +763,19 @@ static INLINE __attribute__((noreturn)) void gda_pool_run(ctl_t ctl,
 					__builtin_amdgcn_s_sleep(8);
 					cmd = get32(&ctl->stop);
 				} while (!cmd && get32(&ctl->pause));
+				cmd = cmd ? 1 : 2;
 			}
 			g.meet->cmd = cmd;
 		}
 		barrier();
-		if (uniform32(g.meet->cmd)) {
+		cmd = uniform32(g.meet->cmd);
+		if (cmd == 1) {
 			stores_out();
 			__builtin_amdgcn_endpgm();
 		}
+		/* Parked: SAs may have come and gone, keys and all. */
+		if (cmd == 2)
+			sc.slot = ~0u;
 		/* Nothing anywhere: a microsecond or so, against a round's
 		 * tens of them, before the queues are read again.
 		 */
