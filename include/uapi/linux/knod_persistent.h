@@ -312,8 +312,8 @@ struct knod_persistent_gda_job {
 #define KNOD_PERSIST_JOBS_PROF_WAIT	2
 #define KNOD_PERSIST_JOBS_PROF_ROUNDS	3
 /* ...and a crypto pool workgroup's waves, in its entry's regress_dbg past
- * what gda_prof() keeps: looking for jobs, running them, and meeting
- * between them; and the times round.
+ * what gda_prof() keeps: looking for jobs, running them, and reading the
+ * host's words between them; and the times round.
  */
 #define KNOD_PERSIST_POOL_PROF_LOOK	4
 #define KNOD_PERSIST_POOL_PROF_RUN	5
