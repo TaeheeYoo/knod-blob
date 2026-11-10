@@ -323,6 +323,33 @@ struct gda_sa_cache {
 	uint32_t key[8];			/* ChaCha20's */
 };
 
+/*
+ * SA @sa's keys copied where the engine reads them, cached, unless a wave
+ * has: see struct knod_persistent_ipsec_sa.  A wave that copies clears
+ * its scalar cache after, which round keys come through and which its own
+ * stores do not reach.
+ */
+static INLINE void gda_sa_ready(GLOBAL const struct knod_persistent_ipsec_sa *sa)
+{
+	GLOBAL const v4u *src;
+	GLOBAL v4u *dst;
+	uint32_t n, i;
+
+	if (uniform32(__scoped_atomic_load_n(&sa->ready, __ATOMIC_ACQUIRE,
+					     __MEMORY_SCOPE_DEVICE)))
+		return;
+	src = (GLOBAL const v4u *)uniform64(get64(&sa->src));
+	dst = (GLOBAL v4u *)uniform64(get64(&sa->rk));
+	n = uniform32(get32(&sa->bytes)) / 16;
+	for (i = lane_id(); i < n; i += 64)
+		dst[i] = src[i];
+	if (!lane_id())
+		__scoped_atomic_store_n((GLOBAL uint32_t *)&sa->ready, 1,
+					__ATOMIC_RELEASE,
+					__MEMORY_SCOPE_DEVICE);
+	__builtin_amdgcn_s_dcache_inv();
+}
+
 /* Every lane's sum of words added up and folded to sixteen bits. */
 static INLINE uint32_t gda_wave_fold(uint64_t sum)
 {
@@ -550,6 +577,7 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 			return 0;
 		sa = (GLOBAL const struct knod_persistent_ipsec_sa *)
 		     GL64(g, IPSEC_SA) + slot;
+		gda_sa_ready(sa);
 		sc->spi = spi;
 		sc->slot = slot;
 		sc->rounds = uniform32(get32(&sa->rounds));
@@ -945,6 +973,7 @@ static INLINE int gda_htx_seal(struct gda *g, GLOBAL uint8_t *dst,
 	     GL64(g, IPSEC_SA) + slot;
 	if (!uniform32(get32(&sa->active)))
 		return 0;
+	gda_sa_ready(sa);
 	gda_ipsec_fetch(fr, src, ESP_DATA & 3, fo + len + 4, lane_id());
 	if ((e & (KNOD_PERSIST_HTX_CSUM | KNOD_PERSIST_HTX_GSO)) &&
 	    !gda_htx_prep(fr, fo, len, e, x))

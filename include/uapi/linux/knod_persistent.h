@@ -329,9 +329,18 @@ struct knod_persistent_gda_jobs {
 	struct knod_persistent_gda_job job[KNOD_PERSIST_GDA_JOBS];
 };
 
-/* An inbound ESP SA, rfc4106(gcm(aes)), at the slot its SPI hashes to or
- * one probed past it.  The host fills it with active clear and sets active
- * last; the engine skips an inactive one.
+/* An ESP SA, at the slot its SPI hashes to or one probed past it.  The
+ * host fills it with active clear and sets active last; the engine skips an
+ * inactive one.
+ *
+ * The keys the host writes are at src, uncached - the host writes them
+ * through the BAR, which the GPU's L2 does not see - and read from there
+ * for every packet they held up the rest of memory.  The engine reads a
+ * copy of them at rk instead, cached, which it makes itself: the first wave
+ * to find ready clear copies bytes from src to rk and sets it.  Waves that
+ * copy at once write the same.  What the GPU writes its L2 has, so the copy
+ * is never an old SA's that was where it is.  An SA's keys never change in
+ * place - a rekey is a new SA - or a copy started before could land after.
  */
 struct knod_persistent_ipsec_sa {
 	__u32 spi;		/* the packet's four bytes, read little-endian */
@@ -342,6 +351,9 @@ struct knod_persistent_ipsec_sa {
 				 * ChaCha20's key, eight words as they come
 				 */
 	__u64 hpow;		/* H^1 .. H^KNOD_PERSIST_IPSEC_HPOW, big endian */
+	__u64 src;		/* the keys as the host wrote them */
+	__u32 bytes;		/* ...from src to rk, a multiple of 16 */
+	__u32 ready;		/* nonzero: rk holds them */
 };
 
 struct knod_persistent_control {
