@@ -1,2 +1,4 @@
 build/
 __pycache__/
+# Editors' swap files
+.*.sw[a-p]

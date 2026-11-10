@@ -86,6 +86,7 @@ _Static_assert(GL_COUNT <= 64, "a lane each");
 /* The meeting place in LDS. */
 struct gda_meet {
 	uint32_t cmd;		/* nonzero: stop */
+	uint32_t parked;	/* a crypto pool workgroup's waves parked */
 	uint32_t pass_pc;	/* PASS entries appended before this round */
 	uint32_t pass_room;	/* ...and the slots free for this one */
 	uint32_t sq_pc;
