@@ -1109,6 +1109,7 @@ static INLINE void gda_pool_park(struct gda *g, entry_t e, uint32_t pause,
 				 uint32_t waves)
 {
 	ctl_t ctl = g->ctl;
+	uint32_t cmd;
 
 	if (!lane_id())
 		__atomic_fetch_add(&g->meet->parked, 1, __ATOMIC_RELAXED);
@@ -1120,10 +1121,19 @@ static INLINE void gda_pool_park(struct gda *g, entry_t e, uint32_t pause,
 		if (!lane_id())
 			put32(&e->pause_ack, pause);
 	}
-	while (uniform32(get32(&ctl->pause)) == pause) {
-		if (uniform32(get32(&ctl->stop)))
-			__builtin_amdgcn_endpgm();
+	/* Wave 0 watches the host's words, the others its word in LDS. */
+	for (;;) {
 		__builtin_amdgcn_s_sleep(8);
+		if (!g->wave && !lane_id())
+			__atomic_store_n(&g->meet->cmd,
+					 get32(&ctl->stop) ? ~0u :
+					 get32(&ctl->pause), __ATOMIC_RELAXED);
+		cmd = uniform32(__atomic_load_n(&g->meet->cmd,
+						 __ATOMIC_RELAXED));
+		if (cmd == ~0u)
+			__builtin_amdgcn_endpgm();
+		if (cmd != pause)
+			break;
 	}
 	if (!lane_id())
 		__atomic_fetch_sub(&g->meet->parked, 1, __ATOMIC_RELAXED);
@@ -1142,7 +1152,7 @@ static INLINE __attribute__((noreturn)) void gda_pool_run(ctl_t ctl,
 	uint32_t nq = get32(&ctl->gda_queues), waves = get32(&ctl->gda_waves);
 	struct gda_sa_cache sc = { .slot = ~0u };
 	struct gda g = { .s = 0 };
-	uint32_t lane = lane_id(), q, r, k, any, pause, t0;
+	uint32_t lane = lane_id(), q, r, k, any, pause, cmd, t0, seen = 0;
 	uint64_t mine = 0, st, avail;
 	jobs_t jt;
 
@@ -1156,8 +1166,10 @@ static INLINE __attribute__((noreturn)) void gda_pool_run(ctl_t ctl,
 	SET(&g, WAVES, waves);
 	g.meet = (LDS struct gda_meet *)(uintptr_t)GL(&g, LDS);
 	gda_ipsec_load(&g, ctl);
-	if (!wave && !lane)
+	if (!wave && !lane) {
 		g.meet->parked = 0;
+		g.meet->cmd = 0;
+	}
 	/* Lane q keeps queue q's job table: read once, not a queue at a
 	 * time for every job.
 	 */
@@ -1170,14 +1182,29 @@ static INLINE __attribute__((noreturn)) void gda_pool_run(ctl_t ctl,
 	barrier();
 
 	for (;;) {
-		/* The host's words first: stop, or park. */
+		/* The host's words first, stop or park: wave 0 reads them,
+		 * ten microseconds apart at most, for the others in LDS.  The
+		 * control block is uncached, and a pool's every wave reading
+		 * it in a loop held up everything else in that memory.
+		 */
 		t0 = gda_cyc();
-		if (uniform32(get32(&ctl->version)) != KNOD_PERSIST_VERSION ||
-		    uniform32(get32(&ctl->stop))) {
+		if (!wave && t0 - seen >= 1000) {
+			seen = t0;
+			cmd = uniform32(get32(&ctl->stop)) ||
+			      uniform32(get32(&ctl->version)) !=
+			      KNOD_PERSIST_VERSION ? ~0u :
+			      uniform32(get32(&ctl->pause));
+			if (!lane)
+				__atomic_store_n(&g.meet->cmd, cmd,
+						 __ATOMIC_RELAXED);
+		}
+		cmd = uniform32(__atomic_load_n(&g.meet->cmd,
+						 __ATOMIC_RELAXED));
+		if (cmd == ~0u) {
 			stores_out();
 			__builtin_amdgcn_endpgm();
 		}
-		pause = uniform32(get32(&ctl->pause));
+		pause = cmd;
 		if (pause) {
 			gda_pool_park(&g, e, pause, waves);
 			/* SAs may have come and gone, keys and all. */
@@ -1225,11 +1252,11 @@ static INLINE __attribute__((noreturn)) void gda_pool_run(ctl_t ctl,
 				any = 1;
 			}
 		}
-		/* Nothing anywhere: a microsecond or so, against a round's
+		/* Nothing anywhere: a few microseconds, against a round's
 		 * tens of them, before the queues are read again.
 		 */
 		if (!any) {
-			__builtin_amdgcn_s_sleep(32);
+			__builtin_amdgcn_s_sleep(127);
 			gda_prof(e->regress_dbg, KNOD_PERSIST_POOL_PROF_LOOK,
 				 t0);
 		}
@@ -1716,7 +1743,7 @@ static INLINE uint32_t gda_ipsec_pool(struct gda *g, struct gda_sa_cache *sc,
 	/* The pool's last ones. */
 	if (!lane_id())
 		while (load((gptr)&jt->done) < ptotal)
-			__builtin_amdgcn_s_sleep(1);
+			__builtin_amdgcn_s_sleep(4);
 	__builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent");
 	if (!g->wave) {
 		gda_jobs_prof(jt, KNOD_PERSIST_JOBS_PROF_WAIT, &t0);
@@ -2086,7 +2113,7 @@ v4u GDA_FN(gda_host_seal)(ctl_t ctl, uint32_t queue, uint32_t wave,
 	/* The pool's last ones. */
 	if (!lane)
 		while (load((gptr)&jt->done) < total)
-			__builtin_amdgcn_s_sleep(1);
+			__builtin_amdgcn_s_sleep(4);
 	__builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent");
 	go |= ballot(((esp >> lane) & 1) && get32(&jt->job[j].meta));
 ok:
