@@ -1098,7 +1098,8 @@ static INLINE __attribute__((noreturn)) void gda_pool_run(ctl_t ctl,
 	uint32_t nq = get32(&ctl->gda_queues), waves = get32(&ctl->gda_waves);
 	struct gda_sa_cache sc = { .slot = ~0u };
 	struct gda g = { .s = 0 };
-	uint32_t q = j, i, k, any, cmd, pause;
+	uint32_t lane = lane_id(), q, r, k, any, cmd, pause;
+	uint64_t mine = 0, st, avail;
 	jobs_t jt;
 
 	if (!get32(&e->live) || wave >= waves)
@@ -1111,14 +1112,36 @@ static INLINE __attribute__((noreturn)) void gda_pool_run(ctl_t ctl,
 	SET(&g, WAVES, waves);
 	g.meet = (LDS struct gda_meet *)(uintptr_t)GL(&g, LDS);
 	gda_ipsec_load(&g, ctl);
+	/* Lane q keeps queue q's job table: read once, not a queue at a
+	 * time for every job.
+	 */
+	if (lane < nq)
+		mine = get64(&ctl->gda[lane].jobs);
+	/* Where in the queues this wave looks first, so the pool's waves
+	 * spread over them rather than all try the same.
+	 */
+	r = (4 * j + wave) & 63;
 	barrier();
 
 	for (;;) {
+		/* Every queue's round at once, a lane each: one load, not
+		 * one a queue.
+		 */
+		st = 0;
+		if (mine)
+			st = __scoped_atomic_load_n(
+				(GLOBAL uint64_t *)&((jobs_t)mine)->state,
+				__ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
+		avail = ballot(mine && (st >> 16 & 0xffff) > (st & 0xffff));
 		any = 0;
-		for (i = 0; i < nq; i++) {
-			q = q + 1 < nq ? q + 1 : 0;
-			jt = (jobs_t)uniform64(get64(&ctl->gda[q].jobs));
-			if (jt && gda_job_take(jt, &k)) {
+		if (avail) {
+			avail = r ? avail >> r | avail << (64 - r) : avail;
+			q = (__builtin_ctzll(avail) + r) & 63;
+			jt = (jobs_t)((uint64_t)__builtin_amdgcn_readlane(
+					      (uint32_t)(mine >> 32), q) << 32 |
+				      (uint32_t)__builtin_amdgcn_readlane(
+					      (uint32_t)mine, q));
+			if (gda_job_take(jt, &k)) {
 				/* Round keys come through the scalar cache,
 				 * and an SA comes in with no park: its keys
 				 * where an old SA's were would read as the
@@ -1128,7 +1151,6 @@ static INLINE __attribute__((noreturn)) void gda_pool_run(ctl_t ctl,
 				__builtin_amdgcn_s_dcache_inv();
 				gda_job_run(&g, &sc, jt, k);
 				any = 1;
-				break;
 			}
 		}
 
