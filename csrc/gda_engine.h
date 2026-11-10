@@ -632,6 +632,24 @@ static INLINE uint32_t gda_ipsec_job(struct gda *g, struct gda_sa_cache *sc,
 
 typedef GLOBAL struct knod_persistent_gda_jobs *jobs_t;
 
+/* KNOD_IPSEC_PROF: the ticks since *@t0 into a queue's round counter @i,
+ * and *@t0 on to now.
+ */
+static INLINE void gda_jobs_prof(jobs_t jt, int i, uint32_t *t0)
+{
+#ifdef KNOD_IPSEC_PROF
+	uint32_t now = gda_cyc();
+
+	if (!lane_id())
+		add((gptr)&jt->prof[i], now - *t0);
+	*t0 = now;
+#else
+	(void)jt;
+	(void)i;
+	(void)t0;
+#endif
+}
+
 /* One of a round's jobs from table @jt, its number in *@k: whether there
  * was one left.  What the queue wrote of it is there to read after.
  */
@@ -1098,7 +1116,7 @@ static INLINE __attribute__((noreturn)) void gda_pool_run(ctl_t ctl,
 	uint32_t nq = get32(&ctl->gda_queues), waves = get32(&ctl->gda_waves);
 	struct gda_sa_cache sc = { .slot = ~0u };
 	struct gda g = { .s = 0 };
-	uint32_t lane = lane_id(), q, r, k, any, cmd, pause;
+	uint32_t lane = lane_id(), q, r, k, any, cmd, pause, t0;
 	uint64_t mine = 0, st, avail;
 	jobs_t jt;
 
@@ -1124,6 +1142,7 @@ static INLINE __attribute__((noreturn)) void gda_pool_run(ctl_t ctl,
 	barrier();
 
 	for (;;) {
+		t0 = gda_cyc();
 		/* Every queue's round at once, a lane each: one load, not
 		 * one a queue.
 		 */
@@ -1142,6 +1161,9 @@ static INLINE __attribute__((noreturn)) void gda_pool_run(ctl_t ctl,
 				      (uint32_t)__builtin_amdgcn_readlane(
 					      (uint32_t)mine, q));
 			if (gda_job_take(jt, &k)) {
+				gda_prof(e->regress_dbg,
+					 KNOD_PERSIST_POOL_PROF_LOOK, t0);
+				t0 = gda_cyc();
 				/* Round keys come through the scalar cache,
 				 * and an SA comes in with no park: its keys
 				 * where an old SA's were would read as the
@@ -1150,9 +1172,15 @@ static INLINE __attribute__((noreturn)) void gda_pool_run(ctl_t ctl,
 				 */
 				__builtin_amdgcn_s_dcache_inv();
 				gda_job_run(&g, &sc, jt, k);
+				gda_prof(e->regress_dbg,
+					 KNOD_PERSIST_POOL_PROF_RUN, t0);
 				any = 1;
 			}
 		}
+		if (!any)
+			gda_prof(e->regress_dbg, KNOD_PERSIST_POOL_PROF_LOOK,
+				 t0);
+		t0 = gda_cyc();
 
 		/* Between jobs, every wave's: stop or park with the queues. */
 		barrier();
@@ -1179,6 +1207,11 @@ static INLINE __attribute__((noreturn)) void gda_pool_run(ctl_t ctl,
 		/* Parked: SAs may have come and gone, keys and all. */
 		if (cmd == 2)
 			sc.slot = ~0u;
+		gda_prof(e->regress_dbg, KNOD_PERSIST_POOL_PROF_MEET, t0);
+#ifdef KNOD_IPSEC_PROF
+		if (!lane)
+			add((gptr)&e->regress_dbg[KNOD_PERSIST_POOL_PROF_LOOPS], 1);
+#endif
 		/* Nothing anywhere: a microsecond or so, against a round's
 		 * tens of them, before the queues are read again.
 		 */
@@ -1631,7 +1664,7 @@ static INLINE uint32_t gda_ipsec_pool(struct gda *g, struct gda_sa_cache *sc,
 {
 	GLOBAL struct knod_persistent_gda_job *jb = &jt->job[k];
 	GLOBAL uint64_t *st = (GLOBAL uint64_t *)&jt->state;
-	uint32_t copy, open, kk;
+	uint32_t copy, open, kk, t0 = gda_cyc();
 	GLOBAL uint8_t *src, *dst;
 	uint64_t gen;
 
@@ -1658,13 +1691,24 @@ static INLINE uint32_t gda_ipsec_pool(struct gda *g, struct gda_sa_cache *sc,
 					__MEMORY_SCOPE_DEVICE);
 	}
 	barrier();
+	if (!g->wave)
+		gda_jobs_prof(jt, KNOD_PERSIST_JOBS_PROF_PUT, &t0);
 	while (gda_job_take(jt, &kk))
 		gda_job_open(g, sc, jt, kk);
+	if (!g->wave)
+		gda_jobs_prof(jt, KNOD_PERSIST_JOBS_PROF_TAKE, &t0);
 	/* The pool's last ones. */
 	if (!lane_id())
 		while (load((gptr)&jt->done) < ptotal)
 			__builtin_amdgcn_s_sleep(1);
 	__builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent");
+	if (!g->wave) {
+		gda_jobs_prof(jt, KNOD_PERSIST_JOBS_PROF_WAIT, &t0);
+#ifdef KNOD_IPSEC_PROF
+		if (!lane_id())
+			add((gptr)&jt->prof[KNOD_PERSIST_JOBS_PROF_ROUNDS], 1);
+#endif
+	}
 	return ok ? get32(&jb->meta) : 0;
 }
 
