@@ -350,6 +350,38 @@ static INLINE void gda_sa_ready(GLOBAL const struct knod_persistent_ipsec_sa *sa
 	__builtin_amdgcn_s_dcache_inv();
 }
 
+/*
+ * SA @slot into @sc unless it is there already, its keys' copy made:
+ * whether it is an SA.  The table is uncached, as the keys the host writes
+ * are, so a wave reads it only when its SA changes: an SA goes only while
+ * the waves are parked, and a cache does not outlive a park.
+ */
+static INLINE int gda_sa_cached(struct gda *g, struct gda_sa_cache *sc,
+				uint32_t slot)
+{
+	GLOBAL const struct knod_persistent_ipsec_sa *sa =
+		(GLOBAL const struct knod_persistent_ipsec_sa *)
+		GL64(g, IPSEC_SA) + slot;
+	uint32_t i;
+
+	if (sc->slot == slot)
+		return 1;
+	if (!uniform32(get32(&sa->active)))
+		return 0;
+	gda_sa_ready(sa);
+	sc->spi = uniform32(get32(&sa->spi));
+	sc->rounds = uniform32(get32(&sa->rounds));
+	sc->salt = uniform32(get32(&sa->salt));
+	sc->rk = uniform64(get64(&sa->rk));
+	sc->hpow = uniform64(get64(&sa->hpow));
+	if (!sc->rounds)
+		for (i = 0; i < 8; i++)
+			sc->key[i] = uniform32(
+				((const CONSTANT uint32_t *)sc->rk)[i]);
+	sc->slot = slot;
+	return 1;
+}
+
 /* Every lane's sum of words added up and folded to sixteen bits. */
 static INLINE uint32_t gda_wave_fold(uint64_t sum)
 {
@@ -538,10 +570,9 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 				    uint32_t off, uint32_t len,
 				    struct gda_sa_cache *sc, uint32_t *in_lds)
 {
-	GLOBAL const struct knod_persistent_ipsec_sa *sa;
 	const CONSTANT uint32_t *rk;
 	GLOBAL const uint8_t *hpow;
-	uint32_t tot, clen, n, m, rounds, salt, spi, seq, i, fail;
+	uint32_t tot, clen, n, m, rounds, salt, spi, seq, fail;
 	uint32_t lane = lane_id();
 	LDS uint32_t *fr = gda_ipsec_frame(g);
 	uint32_t sh = (off + ESP_DATA) & 3, fo = off + 4 - sh;
@@ -575,19 +606,9 @@ static INLINE uint32_t gda_ipsec_rx(struct gda *g, GLOBAL uint8_t *src,
 		slot = (int)uniform32(gda_ipsec_sa(g, spi));
 		if (slot < 0)
 			return 0;
-		sa = (GLOBAL const struct knod_persistent_ipsec_sa *)
-		     GL64(g, IPSEC_SA) + slot;
-		gda_sa_ready(sa);
-		sc->spi = spi;
-		sc->slot = slot;
-		sc->rounds = uniform32(get32(&sa->rounds));
-		sc->salt = uniform32(get32(&sa->salt));
-		sc->rk = uniform64(get64(&sa->rk));
-		sc->hpow = uniform64(get64(&sa->hpow));
-		if (!sc->rounds)
-			for (i = 0; i < 8; i++)
-				sc->key[i] = uniform32(
-					((const CONSTANT uint32_t *)sc->rk)[i]);
+		sc->slot = ~0u;
+		if (!gda_sa_cached(g, sc, slot))
+			return 0;
 	}
 	slot = sc->slot;
 	rounds = sc->rounds;
@@ -956,37 +977,33 @@ static INLINE uint32_t gda_htx_prep(LDS uint32_t *fr, uint32_t fo,
  * @e and its second word @x say what is to be done to it first.  One the
  * engine cannot seal is not sent at all.
  */
-static INLINE int gda_htx_seal(struct gda *g, GLOBAL uint8_t *dst,
-			       GLOBAL const uint8_t *src, uint32_t len,
-			       uint32_t slot, int gcm, uint64_t e, uint64_t x)
+static INLINE int gda_htx_seal(struct gda *g, struct gda_sa_cache *sc,
+			       GLOBAL uint8_t *dst, GLOBAL const uint8_t *src,
+			       uint32_t len, uint32_t slot, int gcm, uint64_t e,
+			       uint64_t x)
 {
-	GLOBAL const struct knod_persistent_ipsec_sa *sa;
 	LDS uint32_t *fr = gda_ipsec_frame(g);
-	uint32_t fo = 4 - (ESP_DATA & 3), key[8], tot, clen, spi, seq, i;
+	uint32_t fo = 4 - (ESP_DATA & 3), tot, clen, spi, seq;
 	uint32_t rounds, salt;
 	const CONSTANT uint32_t *rk;
 
 	if (len < ESP_DATA + ESP_ICV ||
 	    fo + len + 4 + 16 > KNOD_PERSIST_GDA_IPSEC_FRAME_BYTES)
 		return 0;
-	sa = (GLOBAL const struct knod_persistent_ipsec_sa *)
-	     GL64(g, IPSEC_SA) + slot;
-	if (!uniform32(get32(&sa->active)))
+	if (!gda_sa_cached(g, sc, slot))
 		return 0;
-	gda_sa_ready(sa);
 	gda_ipsec_fetch(fr, src, ESP_DATA & 3, fo + len + 4, lane_id());
 	if ((e & (KNOD_PERSIST_HTX_CSUM | KNOD_PERSIST_HTX_GSO)) &&
 	    !gda_htx_prep(fr, fo, len, e, x))
 		return 0;
 	spi = uniform32(gda_lds32u(fr, fo + ESP_SPI));
 	tot = uniform32(gda_lds_be16(fr, fo + 16));
-	if (spi != uniform32(get32(&sa->spi)) ||
-	    tot < ESP_DATA - 14 + ESP_ICV || 14 + tot > len)
+	if (spi != sc->spi || tot < ESP_DATA - 14 + ESP_ICV || 14 + tot > len)
 		return 0;
 	clen = 14 + tot - ESP_DATA - ESP_ICV;
-	rk = (const CONSTANT uint32_t *)uniform64(get64(&sa->rk));
-	rounds = uniform32(get32(&sa->rounds));
-	salt = uniform32(get32(&sa->salt));
+	rk = (const CONSTANT uint32_t *)sc->rk;
+	rounds = sc->rounds;
+	salt = sc->salt;
 	seq = uniform32(gda_lds32u(fr, fo + ESP_SPI + 4));
 	if (!!rounds != !!gcm)
 		return 0;
@@ -995,13 +1012,10 @@ static INLINE int gda_htx_seal(struct gda *g, GLOBAL uint8_t *dst,
 		return 0;
 	if (gcm) {
 		gda_gcm_seal(g, fr, (fo + ESP_DATA) / 4, fo + ESP_IV, rk,
-			     rounds, salt,
-			     (GLOBAL const uint8_t *)uniform64(get64(&sa->hpow)),
+			     rounds, salt, (GLOBAL const uint8_t *)sc->hpow,
 			     spi, seq, clen);
 	} else {
-		for (i = 0; i < 8; i++)
-			key[i] = uniform32(rk[i]);
-		gda_chacha_rx(fr, (fo + ESP_DATA) / 4, fo + ESP_IV, key, salt,
+		gda_chacha_rx(fr, (fo + ESP_DATA) / 4, fo + ESP_IV, sc->key, salt,
 			      spi, seq, clen, lane_id(),
 			      g->entry->regress_dbg, 1);
 	}
@@ -1105,7 +1119,8 @@ static INLINE void gda_job_open(struct gda *g, struct gda_sa_cache *sc,
 }
 
 /* Host frame job @k: sealed where it is, if it is a frame the engine can. */
-static INLINE void gda_job_seal(struct gda *g, jobs_t jt, uint32_t k)
+static INLINE void gda_job_seal(struct gda *g, struct gda_sa_cache *sc,
+				jobs_t jt, uint32_t k)
 {
 	GLOBAL struct knod_persistent_gda_job *jb = &jt->job[k];
 	uint64_t e = uniform64((uint64_t)get32(&jb->copy) << 32 |
@@ -1114,7 +1129,7 @@ static INLINE void gda_job_seal(struct gda *g, jobs_t jt, uint32_t k)
 
 	gda_job_done(jt, k, (e & KNOD_PERSIST_HTX_INPLACE) &&
 		     KNOD_PERSIST_HTX_ESP_OFF(e) == ESP_SPI &&
-		     gda_htx_seal(g, fr, fr, KNOD_PERSIST_HTX_LEN(e),
+		     gda_htx_seal(g, sc, fr, fr, KNOD_PERSIST_HTX_LEN(e),
 				  KNOD_PERSIST_HTX_SA(e), gda_htx_is_gcm(g, e),
 				  e, uniform64(get64(&jb->dst))));
 }
@@ -1124,7 +1139,7 @@ static INLINE void gda_job_run(struct gda *g, struct gda_sa_cache *sc,
 			       jobs_t jt, uint32_t k)
 {
 	if (uniform32(get32(&jt->job[k].kind)) == KNOD_PERSIST_GDA_JOB_SEAL)
-		gda_job_seal(g, jt, k);
+		gda_job_seal(g, sc, jt, k);
 	else
 		gda_job_open(g, sc, jt, k);
 }
@@ -2080,6 +2095,7 @@ v4u GDA_FN(gda_host_seal)(ctl_t ctl, uint32_t queue, uint32_t wave,
 {
 	struct gda g = { .s = s, .packets = (uint64_t)pk_hi << 32 | pk_lo };
 	uint32_t n, lane = lane_id(), j = 0, total = 0, k;
+	struct gda_sa_cache sc = { .slot = ~0u };
 	GLOBAL struct knod_persistent_gda_job *jb;
 	uint64_t e = 0, x = 0, esp = 0, go = 0;
 	GLOBAL uint64_t *st;
@@ -2136,7 +2152,7 @@ v4u GDA_FN(gda_host_seal)(ctl_t ctl, uint32_t queue, uint32_t wave,
 	if (!uniform32(g.meet->htx_next))
 		goto ok;
 	while (gda_job_take(jt, &k))
-		gda_job_seal(&g, jt, k);
+		gda_job_seal(&g, &sc, jt, k);
 	if (g.wave)
 		goto out;
 	/* The pool's last ones. */
