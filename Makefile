@@ -13,7 +13,8 @@ ASM_CPP		?= clang -x assembler-with-cpp -E
 FEATURES	:= core
 # The core's: what a queue comes up with, and the GDA engine's receive kernel,
 # which runs the NIC's rings with no feature's code in them.
-SRC_core	:= src/gda_rx.S src/gda_engine.S src/gda_engine_crypto.S
+SRC_core	:= src/gda_rx.S src/gda_engine.S src/gda_engine_crypto.S \
+		   src/gda_engine_pool.S
 SRC_bpf-persistent := $(filter-out $(SRC_core),$(wildcard src/*.S))
 # The routines a program calls are every C function but the engines' own,
 # which src/gda_engine*.S put inside themselves.
