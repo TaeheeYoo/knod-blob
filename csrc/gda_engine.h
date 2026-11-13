@@ -1718,11 +1718,10 @@ static INLINE void gda_ipsec_where(struct gda *g, uint32_t k, uint32_t page,
 
 /*
  * The round's @ptotal PASS packets, the lanes @ok with one, number @k: jobs
- * in the queue's table @jt, which the crypto pool's workgroups take as the
- * queue's waves do - there may be none - then the round waits for the last
- * of them.  The lane's packet's KNOD_PERSIST_PASS_IPSEC* bits.
+ * in the queue's table @jt for the crypto pool to take, then the round waits
+ * for the last of them.  The lane's packet's KNOD_PERSIST_PASS_IPSEC* bits.
  */
-static INLINE uint32_t gda_ipsec_pool(struct gda *g, struct gda_sa_cache *sc,
+static INLINE uint32_t gda_ipsec_pool(struct gda *g,
 				      jobs_t jt, int ok, uint32_t k,
 				      uint32_t page, uint32_t off,
 				      uint32_t len, uint32_t ppc,
@@ -1787,7 +1786,6 @@ v4u GDA_FN(gda_ipsec)(ctl_t ctl, uint32_t queue, uint32_t wave, uint32_t s,
 {
 	struct gda g = { .s = s, .packets = (uint64_t)pk_hi << 32 | pk_lo };
 	uint64_t live = (uint64_t)uniform32(hi) << 32 | uniform32(lo);
-	struct gda_sa_cache sc = { .slot = ~0u };
 	uint32_t t0 = gda_cyc(), ppc, pcc, room, pbase = 0, ptotal = 0, k, i;
 	uint32_t meta = 0;
 	uint64_t pass;
@@ -1828,7 +1826,7 @@ v4u GDA_FN(gda_ipsec)(ctl_t ctl, uint32_t queue, uint32_t wave, uint32_t s,
 	k = pbase + rank(pass);
 	ok = ((pass >> lane_id()) & 1) && k < room;
 	if (ptotal)
-		meta = gda_ipsec_pool(&g, &sc,
+		meta = gda_ipsec_pool(&g,
 				      (jobs_t)uniform64(get64(&g.entry->jobs)),
 				      ok, k, page, off, len, ppc, ptotal);
 
