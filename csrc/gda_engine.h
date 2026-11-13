@@ -188,8 +188,10 @@ static INLINE LDS const uint32_t *gda_aes_tab(struct gda *g)
 	       (lane_id() & (KNOD_PERSIST_GDA_IPSEC_TTAB_COPIES - 1));
 }
 
-/* Every wave's share of the tables' copies into LDS, once for the shader. */
-static INLINE void gda_ipsec_load(struct gda *g, ctl_t ctl)
+/* The SA table, and with @ttab every wave's share of the tables' copies into
+ * LDS, once for the shader: the crypto pool's, which alone encrypts.
+ */
+static INLINE void gda_ipsec_load(struct gda *g, ctl_t ctl, int ttab)
 {
 	GLOBAL const uint32_t *src =
 		(GLOBAL const uint32_t *)get64(&ctl->ipsec_ttab);
@@ -198,6 +200,8 @@ static INLINE void gda_ipsec_load(struct gda *g, ctl_t ctl)
 
 	SET64(g, IPSEC_SA, get64(&ctl->ipsec_sa));
 	SET(g, IPSEC_SA_MASK, get32(&ctl->ipsec_sa_mask));
+	if (!ttab)
+		return;
 	for (i = 64 * g->wave + lane_id();
 	     i < KNOD_PERSIST_GDA_IPSEC_TTAB_LDS_BYTES / 4;
 	     i += 64 * GL(g, WAVES))
@@ -1173,7 +1177,7 @@ static INLINE __attribute__((noreturn)) void gda_pool_run(ctl_t ctl,
 	SET(&g, LDS, 0);
 	SET(&g, WAVES, waves);
 	g.meet = (LDS struct gda_meet *)(uintptr_t)GL(&g, LDS);
-	gda_ipsec_load(&g, ctl);
+	gda_ipsec_load(&g, ctl, 1);
 	if (!wave && !lane) {
 		g.meet->parked = 0;
 		g.meet->cmd = 0;
@@ -1358,7 +1362,7 @@ v4u GDA_FN(gda_init)(ctl_t ctl, uint32_t queue, uint32_t wave)
 	SET(&g, LAST_BOUND, fresh ? 0 : get32(&e->rq_bound));
 	gda_load(&g, ctl, queue, wave);
 #ifdef GDA_IPSEC
-	gda_ipsec_load(&g, ctl);
+	gda_ipsec_load(&g, ctl, 0);
 #endif
 
 	/* LDS starts undefined: no stop until wave 0 says so.  Every wave has
@@ -1726,7 +1730,7 @@ static INLINE uint32_t gda_ipsec_pool(struct gda *g, struct gda_sa_cache *sc,
 {
 	GLOBAL struct knod_persistent_gda_job *jb = &jt->job[k];
 	GLOBAL uint64_t *st = (GLOBAL uint64_t *)&jt->state;
-	uint32_t copy, open, kk, t0 = gda_cyc();
+	uint32_t copy, open, t0 = gda_cyc();
 	GLOBAL uint8_t *src, *dst;
 	uint64_t gen;
 
@@ -1755,13 +1759,6 @@ static INLINE uint32_t gda_ipsec_pool(struct gda *g, struct gda_sa_cache *sc,
 	barrier();
 	if (!g->wave)
 		gda_jobs_prof(jt, KNOD_PERSIST_JOBS_PROF_PUT, &t0);
-	/* The queue's waves take jobs too, rather than wait idle: its own,
-	 * there at once, in the CU that just read their headers.
-	 */
-	while (gda_job_take(jt, &kk))
-		gda_job_open(g, sc, jt, kk);
-	if (!g->wave)
-		gda_jobs_prof(jt, KNOD_PERSIST_JOBS_PROF_TAKE, &t0);
 	/* The pool's last ones. */
 	if (!lane_id())
 		while (load((gptr)&jt->done) < ptotal)
@@ -2063,7 +2060,7 @@ v4u GDA_FN(gda_host_seal)(ctl_t ctl, uint32_t queue, uint32_t wave,
 			  uint32_t s, uint32_t pk_lo, uint32_t pk_hi)
 {
 	struct gda g = { .s = s, .packets = (uint64_t)pk_hi << 32 | pk_lo };
-	uint32_t n, lane = lane_id(), j = 0, total = 0, k;
+	uint32_t n, lane = lane_id(), j = 0, total = 0;
 	GLOBAL struct knod_persistent_gda_job *jb;
 	uint64_t e = 0, x = 0, esp = 0, go = 0;
 	GLOBAL uint64_t *st;
@@ -2119,8 +2116,6 @@ v4u GDA_FN(gda_host_seal)(ctl_t ctl, uint32_t queue, uint32_t wave,
 	barrier();
 	if (!uniform32(g.meet->htx_next))
 		goto ok;
-	while (gda_job_take(jt, &k))
-		gda_job_seal(&g, jt, k);
 	if (g.wave)
 		goto out;
 	/* The pool's last ones. */
