@@ -1347,8 +1347,10 @@ v4u GDA_FN(gda_init)(ctl_t ctl, uint32_t queue, uint32_t wave)
 	/* LDS starts undefined: no stop until wave 0 says so.  Every wave has
 	 * read the entry before wave 0 writes it.
 	 */
-	if (!wave && !lane_id())
+	if (!wave && !lane_id()) {
 		g.meet->cmd = 0;
+		g.meet->planned = 0;
+	}
 	barrier();
 
 	/* Posted for this build of the rings already: pick up where the last
@@ -1755,6 +1757,12 @@ static INLINE uint32_t gda_ipsec_pool(struct gda *g, struct gda_sa_cache *sc,
 	return ok ? get32(&jb->meta) : 0;
 }
 
+/*
+ * Between the program and gda_round_end(): the round's PASS packets, ESP or
+ * not, to their PASS slots as jobs - decrypted or copied - the slots worked
+ * out here and left in LDS for gda_round_end(), which writes the entries.
+ * Each lane's meta for it: KNOD_PERSIST_PASS_IPSEC* and GDA_PASS_STAGED.
+ */
 v4u GDA_FN(gda_ipsec)(ctl_t ctl, uint32_t queue, uint32_t wave, uint32_t s,
 		      uint32_t pk_lo, uint32_t pk_hi, uint32_t verdict,
 		      uint32_t page, uint32_t off, uint32_t len, uint32_t lo,
@@ -1785,6 +1793,7 @@ v4u GDA_FN(gda_ipsec)(ctl_t ctl, uint32_t queue, uint32_t wave, uint32_t s,
 		if (!lane_id()) {
 			g.meet->pass_pc = ppc;
 			g.meet->pass_room = GL(&g, PASS_MASK) + 1 - (ppc - pcc);
+			g.meet->planned = 1;
 		}
 	}
 	barrier();
@@ -1806,15 +1815,8 @@ v4u GDA_FN(gda_ipsec)(ctl_t ctl, uint32_t queue, uint32_t wave, uint32_t s,
 				      (jobs_t)uniform64(get64(&g.entry->jobs)),
 				      ok, k, page, off, len, ppc, ptotal);
 
-	if (ok)
-		put64((GLOBAL uint64_t *)GL64(&g, PASS_RING) +
-		      ((ppc + k) & GL(&g, PASS_MASK)),
-		      (uint64_t)(off | len << 16) << 32 |
-		      nic_rx_csum(&g, GL(&g, CI) + 64 * g.wave + lane_id()) |
-		      meta);
-	stores_out();
 	gda_prof(g.entry->regress_dbg, GDA_PROF_IPSEC, t0);
-	return (v4u){ 0, 0, 0, 0 };
+	return (v4u){ ok ? meta | GDA_PASS_STAGED : 0, 0, 0, 0 };
 }
 #endif
 
@@ -1828,21 +1830,14 @@ v4u GDA_FN(gda_ipsec)(ctl_t ctl, uint32_t queue, uint32_t wave, uint32_t s,
 v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 			  uint32_t s, uint32_t pk_lo, uint32_t pk_hi, uint32_t verdict,
 		      uint32_t page, uint32_t off, uint32_t len, uint32_t lo,
-		      uint32_t hi
-#ifdef GDA_IPSEC
-		      , uint32_t ipsec
-#endif
-		      )
+		      uint32_t hi, uint32_t meta)
 {
 	struct gda g = { .s = s, .packets = (uint64_t)pk_hi << 32 | pk_lo };
 	uint64_t live = (uint64_t)uniform32(hi) << 32 | uniform32(lo);
 	uint32_t pc, cc, left, ppc, pbase = 0, ptotal = 0, i, p, n, pos;
-	uint32_t room, pcc, slot, meta = 0;
+	uint32_t room, pcc, slot, planned;
 #ifdef GDA_IPSEC
 	uint32_t t0 = gda_cyc();
-#endif
-#ifdef GDA_IPSEC
-	meta = ipsec;
 #endif
 	int in = (live >> lane_id()) & 1;
 	uint64_t tx, pass, copy;
@@ -1851,6 +1846,10 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 	ctl = (ctl_t)uniform64((uint64_t)ctl);
 	gda_load(&g, ctl, uniform32(queue), uniform32(wave));
 	n = GL(&g, N);
+	/* A stage before this one may have worked out the PASS slots, and put
+	 * its packets in theirs: the same slots, so not again.
+	 */
+	planned = uniform32(g.meet->planned);
 
 	/* What this wave sends and hands to the host, for the others to see.
 	 * With no SQ an XDP_TX drops.  Wave 0 takes what the NIC has sent since
@@ -1860,9 +1859,8 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 	pass = ballot(in && verdict == XDP_PASS);
 	if (!lane_id()) {
 		g.meet->k[g.wave] = __builtin_popcountll(tx);
-#ifndef GDA_IPSEC
-		g.meet->p[g.wave] = __builtin_popcountll(pass);
-#endif
+		if (!planned)
+			g.meet->p[g.wave] = __builtin_popcountll(pass);
 	}
 	if (!g.wave) {
 		pc = GL(&g, SQ_PC);
@@ -1872,28 +1870,27 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 		/* A dead SQ has room for none: the waves see it full. */
 		if (GL(&g, TX_DEAD))
 			cc = pc - GL(&g, SQ_MASK) - 1;
-#ifndef GDA_IPSEC
 		/* The PASS slots free: what the host had finished with when
 		 * last looked, and a look past the ring for more only when
-		 * that might not do for a whole round.  gda_ipsec() has done
-		 * so for an IPsec engine.
+		 * that might not do for a whole round.
 		 */
 		ppc = GL(&g, PASS_PC);
 		pcc = GL(&g, PASS_CC);
-		if (GL(&g, PASS_MASK) + 1 - (ppc - pcc) < 64 * GL(&g, WAVES)) {
+		if (!planned &&
+		    GL(&g, PASS_MASK) + 1 - (ppc - pcc) < 64 * GL(&g, WAVES)) {
 			pcc = get32((GLOBAL uint8_t *)GL64(&g, PASS_RING) +
 				    8 * (GL(&g, PASS_MASK) + 1) +
 				    KNOD_PERSIST_PASS_CC);
 			SET(&g, PASS_CC, pcc);
 		}
-#endif
 		if (!lane_id()) {
 			g.meet->sq_pc = pc;
 			g.meet->sq_cc = cc;
-#ifndef GDA_IPSEC
-			g.meet->pass_pc = ppc;
-			g.meet->pass_room = GL(&g, PASS_MASK) + 1 - (ppc - pcc);
-#endif
+			if (!planned) {
+				g.meet->pass_pc = ppc;
+				g.meet->pass_room = GL(&g, PASS_MASK) + 1 -
+						    (ppc - pcc);
+			}
 		}
 	}
 	barrier();
@@ -1930,11 +1927,12 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 	 * the RX page, one at a time with the whole wave on each: a lane per
 	 * sixteen bytes, so each access is the packet's next kilobyte in one
 	 * piece rather than sixty-four pieces of sixty-four packets.  Then
-	 * each lane's entry.  The RX pages are free once this round ends.
+	 * each lane's entry.  The RX pages are free once this round ends.  A
+	 * packet a stage put in its slot already is not copied.
 	 */
-#ifndef GDA_IPSEC
 	slot = (ppc + pbase + rank(pass)) & GL(&g, PASS_MASK);
-	copy = ballot(((pass >> lane_id()) & 1) && pbase + rank(pass) < room);
+	copy = ballot(((pass >> lane_id()) & 1) && pbase + rank(pass) < room &&
+		      !(meta & GDA_PASS_STAGED));
 	while (copy) {
 		uint32_t l = __builtin_ctzll(copy), from, to;
 		GLOBAL uint8_t *src, *dst;
@@ -1954,8 +1952,7 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 	if (((pass >> lane_id()) & 1) && pbase + rank(pass) < room)
 		put64((GLOBAL uint64_t *)GL64(&g, PASS_RING) + slot,
 		      (uint64_t)(off | len << 16) << 32 | nic_rx_csum(&g, pos) |
-		      meta);
-#endif
+		      (meta & ~GDA_PASS_STAGED));
 
 	/* The host's frames for after the round, as many as the SQ has room
 	 * for past the round's own.
@@ -2021,15 +2018,11 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 		g.packets += n;
 		SET64(&g, ROUNDS, GL64(&g, ROUNDS) + 1);
 		gda_save(&g);
+		/* Every wave read it at the top, before two barriers. */
+		if (planned && !lane_id())
+			g.meet->planned = 0;
 	}
 #ifdef GDA_IPSEC
-	/* gda_ipsec() took the PASS packets. */
-	(void)pass;
-	(void)copy;
-	(void)pbase;
-	(void)pcc;
-	(void)slot;
-	(void)meta;
 	gda_prof(g.entry->regress_dbg, GDA_PROF_END, t0);
 #ifdef KNOD_IPSEC_PROF
 	if (!lane_id())

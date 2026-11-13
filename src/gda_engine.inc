@@ -225,6 +225,9 @@
 	v_mov_b32 v13, v0
 .endif
 	ROUND_END_ARGS
+.if !\ipsec
+	v_mov_b32 v13, 0
+.endif
 	ENGINE_CALL gda_round_end_\nic
 	s_mov_b64 exec, -1
 	v_mov_b32 v4, v0
