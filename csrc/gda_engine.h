@@ -1104,6 +1104,11 @@ static INLINE void gda_job_run(struct gda *g, struct gda_sa_cache *sc,
 		gda_job_open(g, sc, jt, k);
 }
 
+/* How long after it last saw jobs a pool wave keeps looking without
+ * sleeping, in the 100 MHz steady counter's ticks: a few rounds' time.
+ */
+#define GDA_POOL_BUSY_TICKS	10000
+
 /*
  * A pool wave's part in a park, pause value @pause: counted in, and wave 0
  * acks once every wave is - none holds a job then - and out once the host
@@ -1158,6 +1163,7 @@ static INLINE __attribute__((noreturn)) void gda_pool_run(ctl_t ctl,
 	struct gda_sa_cache sc = { .slot = ~0u };
 	struct gda g = { .s = 0 };
 	uint32_t lane = lane_id(), q, r, k, any, pause, cmd, t0, seen = 0;
+	uint32_t busy = 0;
 	uint64_t mine = 0, st, avail;
 	jobs_t jt;
 
@@ -1235,6 +1241,7 @@ static INLINE __attribute__((noreturn)) void gda_pool_run(ctl_t ctl,
 		avail = ballot(mine && (st >> 16 & 0xffff) > (st & 0xffff));
 		any = 0;
 		if (avail) {
+			busy = t0;
 			avail = r ? avail >> r | avail << (64 - r) : avail;
 			q = (__builtin_ctzll(avail) + r) & 63;
 			jt = (jobs_t)((uint64_t)__builtin_amdgcn_readlane(
@@ -1258,11 +1265,15 @@ static INLINE __attribute__((noreturn)) void gda_pool_run(ctl_t ctl,
 				any = 1;
 			}
 		}
-		/* Nothing anywhere: a few microseconds, against a round's
-		 * tens of them, before the queues are read again.
+		/* Nothing for this wave.  With jobs about lately - a queue's
+		 * next round is a round's time away - it looks again at once;
+		 * long without, it sleeps a few microseconds between looks.
 		 */
 		if (!any) {
-			__builtin_amdgcn_s_sleep(127);
+			if (t0 - busy < GDA_POOL_BUSY_TICKS)
+				__builtin_amdgcn_s_sleep(2);
+			else
+				__builtin_amdgcn_s_sleep(127);
 			gda_prof(e->regress_dbg, KNOD_PERSIST_POOL_PROF_LOOK,
 				 t0);
 		}
