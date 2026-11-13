@@ -84,6 +84,11 @@ enum {
 _Static_assert(GL_COUNT <= 64, "a lane each");
 
 /* The meeting place in LDS. */
+/* A PASS packet's meta from a stage before gda_round_end(): its bytes are
+ * in its PASS slot already, the rest of it the entry's.
+ */
+#define GDA_PASS_STAGED	(1u << 31)
+
 struct gda_meet {
 	uint32_t cmd;		/* nonzero: stop */
 	uint32_t parked;	/* a crypto pool workgroup's waves parked */
@@ -95,6 +100,7 @@ struct gda_meet {
 	uint32_t htx_n;		/* host frames to go this round, */
 	uint32_t htx_next;	/* ...the next to take, or the IPsec jobs, */
 	uint32_t htx_ok[2];	/* ...and a bit each for those that may go */
+	uint32_t planned;	/* the round's PASS slots worked out already */
 	uint32_t n[KNOD_PERSIST_GDA_WAVES_MAX];	/* each wave's run of CQEs */
 	uint32_t k[KNOD_PERSIST_GDA_WAVES_MAX];	/* ...its XDP_TX count */
 	uint32_t p[KNOD_PERSIST_GDA_WAVES_MAX];	/* ...its XDP_PASS count */
