@@ -1,40 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * ChaCha20-Poly1305 (rfc7539esp) on a wave's copy of a payload in LDS, a
- * lane per 64-byte block: what the GDA IPsec engine and knod_crypto's
+ * lane per 64-byte block: what the GDA crypto pool and knod_crypto's
  * kernel both seal and open with.
  */
 #ifndef KNOD_CHACHA_LDS_H
 #define KNOD_CHACHA_LDS_H
 
 #include "chacha_poly.h"
-
-/*
- * Where an IPsec engine's time goes, built with -DKNOD_IPSEC_PROF: into its
- * queue's regress_dbg, ticks of the GPU's 100 MHz clock, summed by lane 0 of
- * each wave.  /srv/share/bin/ipsec_prof.sh reads them.
- */
-#define GDA_PROF_PKTS		0
-#define GDA_PROF_FETCH		1
-#define GDA_PROF_POLY		2	/* Poly1305, or GHASH and the tag */
-#define GDA_PROF_DECRYPT	3	/* ChaCha20, or AES-CTR */
-#define GDA_PROF_IPSEC		4	/* gda_ipsec() whole */
-#define GDA_PROF_END_CALLS	5
-#define GDA_PROF_END		6	/* gda_round_end() whole */
-#define GDA_PROF_BEGIN		7	/* gda_round_begin(), idle too */
-
-static INLINE uint32_t gda_cyc(void)
-{
-	return (uint32_t)__builtin_readsteadycounter();
-}
-
-static INLINE void gda_prof(GLOBAL uint32_t *dbg, int i, uint32_t from)
-{
-#ifdef KNOD_IPSEC_PROF
-	if (!lane_id())
-		add((gptr)&dbg[i], gda_cyc() - from);
-#endif
-}
 
 /* Four bytes from byte @b of an LDS copy, wherever they start. */
 static INLINE uint32_t gda_lds32u(LDS const uint32_t *fr, uint32_t b)

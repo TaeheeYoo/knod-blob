@@ -76,7 +76,7 @@ enum {
 	GL_CQ_TOLD = GL_KEY + KNOD_PERSIST_DB_KEYS,	/* bnxt's: CI the NIC has */
 	GL_TX_CQ_TOLD,		/* bnxt's: TX_CI the NIC has */
 	GL_RQ_TOLD,		/* bnxt's: the RQ bound the NIC has */
-	GL_IPSEC_SA,		/* the IPsec engine's: its SA table */
+	GL_IPSEC_SA,		/* the crypto pool's: its SA table */
 	GL_IPSEC_SA_MASK = GL_IPSEC_SA + 2,
 	GL_HTX,			/* host TX buffer: zero for none */
 	GL_COUNT,
@@ -104,6 +104,7 @@ struct gda_meet {
 	uint32_t n[KNOD_PERSIST_GDA_WAVES_MAX];	/* each wave's run of CQEs */
 	uint32_t k[KNOD_PERSIST_GDA_WAVES_MAX];	/* ...its XDP_TX count */
 	uint32_t p[KNOD_PERSIST_GDA_WAVES_MAX];	/* ...its XDP_PASS count */
+	uint32_t c[KNOD_PERSIST_GDA_WAVES_MAX];	/* ...its claimed count */
 	/* The ordered engine's alone, past what the other has. */
 	uint32_t count;		/* packets this round */
 	uint32_t top[KNOD_PERSIST_GDA_WAVES_MAX];	/* ...its highest parked rank */
@@ -111,6 +112,8 @@ struct gda_meet {
 	uint32_t act[KNOD_PERSIST_GDA_WAVES_MAX * 2];
 	uint16_t key[KNOD_PERSIST_GDA_WAVES_MAX * 64];	/* each packet's flow */
 };
+_Static_assert(offsetof(struct knod_persistent_control, gda_claim) ==
+	       KNOD_PERSIST_CTL_CLAIM_OFF, "where the engine reads the claim");
 _Static_assert(offsetof(struct gda_meet, count) <= KNOD_PERSIST_GDA_LDS_BYTES,
 	       "the meeting place");
 _Static_assert(sizeof(struct gda_meet) <= KNOD_PERSIST_GDA_ORDER_LDS_BYTES,
@@ -273,5 +276,42 @@ static inline uint32_t wave_max8(uint32_t v, uint64_t lanes)
 }
 
 typedef uint32_t v2u __attribute__((ext_vector_type(2)));
+
+/*
+ * Where the IPsec work's time goes, built with -DKNOD_IPSEC_PROF: into a
+ * queue's regress_dbg, ticks of the GPU's 100 MHz clock, summed by lane 0 of
+ * each wave.  /srv/share/bin/ipsec_prof.sh reads them.
+ */
+#define GDA_PROF_PKTS		0
+#define GDA_PROF_FETCH		1
+#define GDA_PROF_POLY		2	/* Poly1305, or GHASH and the tag */
+#define GDA_PROF_DECRYPT	3	/* ChaCha20, or AES-CTR */
+#define GDA_PROF_IPSEC		4	/* gda_claimed() whole */
+#define GDA_PROF_END_CALLS	5
+#define GDA_PROF_END		6	/* gda_round_end() whole */
+#define GDA_PROF_BEGIN		7	/* gda_round_begin(), idle too */
+
+static INLINE uint32_t gda_cyc(void)
+{
+	return (uint32_t)__builtin_readsteadycounter();
+}
+
+static INLINE void gda_prof(GLOBAL uint32_t *dbg, int i, uint32_t from)
+{
+#ifdef KNOD_IPSEC_PROF
+	if (!lane_id())
+		add((gptr)&dbg[i], gda_cyc() - from);
+#endif
+}
+
+/* The clock for gda_prof(), read only in a build that keeps the counts. */
+static INLINE uint32_t gda_prof_t0(void)
+{
+#ifdef KNOD_IPSEC_PROF
+	return gda_cyc();
+#else
+	return 0;
+#endif
+}
 
 #endif /* KNOD_BLOB_GDA_H */
