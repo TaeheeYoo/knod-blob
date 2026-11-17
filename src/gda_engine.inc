@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
 // The kernel every GDA shader starts in, around the engine in csrc/: gda_init()
-// once, then every round gda_round_begin(), the program, gda_round_end() and
-// gda_host_tx(), an IPsec engine's gda_host_seal() before that.
+// once, then every round gda_round_begin(), the program, a feature's claim
+// and gda_claimed() if the host put a claim in the control block,
+// gda_round_end(), gda_host_seal() and gda_host_tx().
 // The program goes right after it, and the call's offset to it is
 // <engine>_call's to patch.
 //
@@ -68,10 +69,8 @@
 .endm
 
 // @engine is the symbol, @nic the functions' suffix, @ordered 1 for an
-// ordered engine, @ipsec 1 for one that decrypts what passes: gda_ipsec()
-// between the program and gda_round_end(), on the same arguments, and what
-// it returns gda_round_end()'s next.
-.macro GDA_ENGINE engine, nic, ordered, ipsec=0
+// ordered engine.
+.macro GDA_ENGINE engine, nic, ordered
 	.text
 	.globl \engine
 	.p2align 2
@@ -80,6 +79,8 @@
 	s_icache_inv
 	s_waitcnt vmcnt(0) lgkmcnt(0)
 #endif
+	// The control block's claim as the host left it for this shader.
+	s_dcache_inv
 #if KNOD_ISA == 10
 	// FLAT_SCRATCH is the ring's base, out of the descriptor, plus this
 	// wave's slot in it.  Set once: it lasts as long as the wave.
@@ -219,27 +220,40 @@
 	s_mov_b64 s[INITIAL_EXEC:INITIAL_EXEC+1], vcc
 .endif
 
-.if \ipsec
-	ROUND_END_ARGS
-	ENGINE_CALL gda_ipsec_\nic
-	v_mov_b32 v13, v0
-.endif
-	ROUND_END_ARGS
-.if !\ipsec
+	// A feature's claim on each lane's packet, where the control block
+	// has one: v0 the verdict, v[1:2] where the packet starts, v3 its
+	// length, back the job for the pool, if any.  gda_claimed() puts
+	// those out and waits for them; v13 is each lane's meta for
+	// gda_round_end(), zero for a lane with none.
+	s_load_dwordx2 s[GT:GT+1], s[E_CTL:E_CTL+1], KNOD_PERSIST_CTL_CLAIM_OFF
+	s_mov_b64 exec, -1
 	v_mov_b32 v13, 0
-.endif
+	s_waitcnt lgkmcnt(0)
+	s_cmp_lg_u64 s[GT:GT+1], 0
+	s_cbranch_scc0 .Lgda_unclaimed_\engine
+	s_mov_b64 exec, s[INITIAL_EXEC:INITIAL_EXEC+1]
+	v_mov_b32 v0, v[BPF_R0]
+	v_mov_b32 v1, v[DATA]
+	v_mov_b32 v2, v[DATA+1]
+	V_SUB_U32 v3, v[DATA_END], v[DATA]
+	s_mov_b32 s32, KNOD_BLOB_CALL_STACK_OFF
+	s_swappc_b64 s[30:31], s[GT:GT+1]
+	v_mov_b32 v13, v0
+	ROUND_END_ARGS
+	ENGINE_CALL gda_claimed_\nic
+	v_mov_b32 v13, v0
+.Lgda_unclaimed_\engine:
+	ROUND_END_ARGS
 	ENGINE_CALL gda_round_end_\nic
 	s_mov_b64 exec, -1
 	v_mov_b32 v4, v0
 	v_mov_b32 v5, v1
 	v_mov_b32 v6, v2
-.if \ipsec
 	ENGINE_CALL gda_host_seal_\nic
 	s_mov_b64 exec, -1
 	v_mov_b32 v4, v0
 	v_mov_b32 v5, v1
 	v_mov_b32 v6, v2
-.endif
 	ENGINE_CALL gda_host_tx_\nic
 	v_mov_b32 v[GS], v0
 	v_mov_b32 v[GS+1], v1

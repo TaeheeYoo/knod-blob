@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * AES-GCM's per-block math for the IPsec engine: AES encryption by T-tables
+ * AES-GCM's per-block math for the crypto pool: AES encryption by T-tables
  * and the GHASH multiply, in plain C so the host can check it against a
  * reference.  How a wave splits a packet among its lanes is the engine's.
  *

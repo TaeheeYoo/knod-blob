@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/* KNOD_PERSIST_FMT_BNXT_P5's engine that decrypts the ESP packets it passes. */
+/* KNOD_PERSIST_FMT_BNXT_P5's crypto pool: its queues' IPsec jobs. */
 #include "gda.h"
 #define BNXT_GEN	5
 #include "nic_bnxt.h"

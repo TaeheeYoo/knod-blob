@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR MIT */
 /*
- * ChaCha20 and Poly1305 (RFC 8439) a block at a time, for an IPsec engine
+ * ChaCha20 and Poly1305 (RFC 8439) a block at a time, for the crypto pool
  * that decrypts rfc7539esp(chacha20,poly1305) by the wave: plain C, no
  * tables, the same on the GPU and on the host.
  *
