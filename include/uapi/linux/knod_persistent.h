@@ -72,6 +72,10 @@
 #define KNOD_PERSIST_FMT_MLX5_CX5 1	/* ConnectX-5 on, cyclic RQ: csrc/mlx5.h */
 #define KNOD_PERSIST_FMT_BNXT_P5 2	/* BCM5750x (Thor): csrc/bnxt.h */
 #define KNOD_PERSIST_FMT_BNXT_P7 3	/* BCM5760x (Thor2): csrc/bnxt.h */
+/* MLX5_CX5 with the RX CQ compressed: the enhanced layout, the RSS hash in
+ * each mini CQE.
+ */
+#define KNOD_PERSIST_FMT_MLX5_CQE_COMP 4
 /* db_key[]: what bnxt rings each of a queue's rings with, its index ORed in. */
 #define KNOD_PERSIST_DB_RQ 0
 #define KNOD_PERSIST_DB_RX_CQ 1
@@ -216,10 +220,7 @@ struct knod_persistent_gda {
 	__u32 tx_mkey_be;	/* already big endian */
 	__u32 tx_cq_log;
 	__u32 tx_gen;		/* as gen, for the SQ */
-	/* mlx5: the RX CQ's completions may come compressed, the enhanced
-	 * layout with the RSS hash in each mini CQE.
-	 */
-	__u32 cqe_comp;
+	__u32 pad1;
 	__u64 tx_packets;
 	__u64 tx_full;		/* XDP_TX dropped for want of SQ room */
 	/* The shader's: where the SQ and its CQ got to, and for which build. */

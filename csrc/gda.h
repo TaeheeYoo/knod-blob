@@ -80,9 +80,8 @@ enum {
 	GL_IPSEC_SA_MASK = GL_IPSEC_SA + 2,
 	GL_HTX,			/* host TX buffer: zero for none */
 	GL_COUNT,
-	/* mlx5's, where bnxt's are */
-	GL_CQE_COMP = GL_CQ_TOLD,	/* RX CQEs may come compressed */
-	GL_TITLE = GL_TX_CQ_TOLD,	/* the last full RX CQE's checksums */
+	/* mlx5's, where bnxt's is: the last full RX CQE's checksums */
+	GL_TITLE = GL_CQ_TOLD,
 };
 _Static_assert(GL_COUNT <= 64, "a lane each");
 

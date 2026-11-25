@@ -10,6 +10,11 @@
 #include "gda.h"
 #include "mlx5.h"
 
+/* KNOD_PERSIST_FMT_MLX5_CQE_COMP's: the RX CQ compressed. */
+#ifndef MLX5_CQE_COMP
+# define MLX5_CQE_COMP	0
+#endif
+
 /* op_own's place in a CQE's last dword, fm_ce_se's in a ctrl segment's
  * third, and a send WQE's size in the 16-byte units the NIC counts.
  */
@@ -53,7 +58,6 @@ static inline uint32_t wqe_counter(uint32_t tail)
 
 static INLINE void nic_load(struct gda *g, entry_t e)
 {
-	SET(g, CQE_COMP, get32(&e->cqe_comp));
 	SET(g, SQN, get32(&e->sqn));
 	SET(g, TX_MKEY, get32(&e->tx_mkey_be));
 }
@@ -148,7 +152,7 @@ static INLINE int nic_rx_poll(struct gda *g, uint32_t pos, struct nic_rx *rx)
 	rx->c = cqe_at(cq, pos, log);
 	rx->tail = cqe_tail(rx->c);
 	rx->d = 0;
-	if (!GL(g, CQE_COMP)) {
+	if (!MLX5_CQE_COMP) {
 		rx->full = cqe_ours(rx->tail, pos, log);
 		return rx->full;
 	}
@@ -187,7 +191,7 @@ static INLINE uint32_t nic_rx_polled(struct gda *g, uint32_t run,
 	uint32_t tail, d, t = 0;
 	uint64_t f;
 
-	if (!GL(g, CQE_COMP))
+	if (!MLX5_CQE_COMP)
 		return run;
 	if (run == 64 && g->wave == GL(g, WAVES) - 1) {
 		tail = __builtin_amdgcn_readlane(rx->tail, 63);
@@ -217,7 +221,7 @@ static INLINE uint64_t nic_rx_read(struct gda *g, struct nic_rx *rx,
 	GLOBAL struct knod_mlx5_mini_cqe8 *m;
 
 	*kind = rx->tail >> CQE_OP_OWN_SHIFT;
-	if (!rx->full) {
+	if (MLX5_CQE_COMP && !rx->full) {
 		m = (GLOBAL struct knod_mlx5_mini_cqe8 *)rx->c + rx->d;
 		*len = bswap32(get32(&m->byte_cnt));
 		if (ordered)
@@ -259,7 +263,7 @@ static INLINE uint32_t nic_rx_csum(struct gda *g, uint32_t pos)
 	int full;
 
 	own = cqe_csum(c);
-	if (!GL(g, CQE_COMP))
+	if (!MLX5_CQE_COMP)
 		return own;
 	full = cqe_full(cqe_tail(c), pos, log);
 	below = ballot(full) & lanes_below(lane_id());
@@ -278,7 +282,7 @@ static INLINE void nic_rx_retire(struct gda *g, uint32_t pos)
 {
 	uint32_t log = GL(g, CQ_LOG);
 
-	if (!GL(g, CQE_COMP))
+	if (!MLX5_CQE_COMP)
 		return;
 	if (64 * g->wave + lane_id() < GL(g, N))
 		put32(&cqe_at(g->ring + KNOD_PERSIST_RING_CQ_OFF, pos,

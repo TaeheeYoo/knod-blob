@@ -7,6 +7,7 @@
 #define MLX5_CX5	GDA_CAT(knod_gda_engine_f, KNOD_PERSIST_FMT_MLX5_CX5)
 #define BNXT_P5		GDA_CAT(knod_gda_engine_f, KNOD_PERSIST_FMT_BNXT_P5)
 #define BNXT_P7		GDA_CAT(knod_gda_engine_f, KNOD_PERSIST_FMT_BNXT_P7)
+#define MLX5_CQE_COMP	GDA_CAT(knod_gda_engine_f, KNOD_PERSIST_FMT_MLX5_CQE_COMP)
 
 	GDA_ENGINE MLX5_CX5, mlx5_cx5, 0
 	CFN_BODY_gda_init_mlx5_cx5
@@ -34,3 +35,12 @@
 	CFN_BODY_gda_host_seal_bnxt_p7
 	CFN_BODY_gda_host_tx_bnxt_p7
 	GDA_ENGINE_END BNXT_P7
+
+	GDA_ENGINE MLX5_CQE_COMP, mlx5_cqe_comp, 0
+	CFN_BODY_gda_init_mlx5_cqe_comp
+	CFN_BODY_gda_round_begin_mlx5_cqe_comp
+	CFN_BODY_gda_claimed_mlx5_cqe_comp
+	CFN_BODY_gda_round_end_mlx5_cqe_comp
+	CFN_BODY_gda_host_seal_mlx5_cqe_comp
+	CFN_BODY_gda_host_tx_mlx5_cqe_comp
+	GDA_ENGINE_END MLX5_CQE_COMP
