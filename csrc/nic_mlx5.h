@@ -141,11 +141,13 @@ struct nic_rx {
  * byte, and op_own.  On a compressed CQ an entry the NIC skipped is done when
  * the session before it covers it: one a lane below has, or for a wave's
  * first lanes one in the wave before.  A round starts with a whole entry.
+ * The session's entry is read again, not taken from its lane: in a wave64
+ * ds_bpermute stays in its half of the wave.
  */
 static INLINE int nic_rx_poll(struct gda *g, uint32_t pos, struct nic_rx *rx)
 {
 	GLOBAL uint8_t *cq = g->ring + KNOD_PERSIST_RING_CQ_OFF;
-	uint32_t log = GL(g, CQ_LOG), j, d, tail;
+	uint32_t log = GL(g, CQ_LOG), d, tail = 0;
 	uint64_t below;
 	int v;
 
@@ -159,21 +161,16 @@ static INLINE int nic_rx_poll(struct gda *g, uint32_t pos, struct nic_rx *rx)
 	rx->full = cqe_full(rx->tail, pos, log);
 	v = rx->full || (cqe_valid(rx->tail, pos, log) && cqe_session(rx->tail));
 	below = ballot(v) & lanes_below(lane_id());
-	j = below ? 63 - __builtin_clzll(below) : lane_id();
-	tail = bpermute(j, rx->tail);
 	if (v)
 		return 1;
-	d = lane_id() - j;
-	if (!below) {
-		for (d = lane_id() + 1; d < KNOD_MLX5_MINI_CQES_MAX; d++) {
-			tail = cqe_tail(cqe_at(cq, pos - d, log));
-			if (cqe_valid(tail, pos - d, log))
-				break;
-		}
-		if (d == KNOD_MLX5_MINI_CQES_MAX)
-			return 0;
+	d = below ? lane_id() - (63 - __builtin_clzll(below)) : lane_id() + 1;
+	for (; d < KNOD_MLX5_MINI_CQES_MAX; d++) {
+		tail = cqe_tail(cqe_at(cq, pos - d, log));
+		if (cqe_valid(tail, pos - d, log))
+			break;
 	}
-	if (!cqe_session(tail) || d >= cqe_minis(tail))
+	if (d >= KNOD_MLX5_MINI_CQES_MAX || !cqe_session(tail) ||
+	    d >= cqe_minis(tail))
 		return 0;
 	rx->c = cqe_at(cq, pos - d, log);
 	rx->tail = tail;
@@ -256,21 +253,22 @@ static INLINE uint32_t mlx5_title(struct gda *g, uint32_t w)
  */
 static INLINE uint32_t nic_rx_csum(struct gda *g, uint32_t pos)
 {
-	uint32_t log = GL(g, CQ_LOG), own, j;
-	GLOBAL struct knod_mlx5_cqe64 *c =
-		cqe_at(g->ring + KNOD_PERSIST_RING_CQ_OFF, pos, log);
+	GLOBAL uint8_t *cq = g->ring + KNOD_PERSIST_RING_CQ_OFF;
+	uint32_t log = GL(g, CQ_LOG);
+	GLOBAL struct knod_mlx5_cqe64 *c = cqe_at(cq, pos, log);
 	uint64_t below;
 	int full;
 
-	own = cqe_csum(c);
 	if (!MLX5_CQE_COMP)
-		return own;
+		return cqe_csum(c);
 	full = cqe_full(cqe_tail(c), pos, log);
 	below = ballot(full) & lanes_below(lane_id());
-	j = bpermute(below ? 63 - __builtin_clzll(below) : lane_id(), own);
 	if (full)
-		return own;
-	return below ? j : mlx5_title(g, g->wave) & 0xff;
+		return cqe_csum(c);
+	if (below)
+		return cqe_csum(cqe_at(cq, pos - lane_id() + 63 -
+				       __builtin_clzll(below), log));
+	return mlx5_title(g, g->wave) & 0xff;
 }
 
 /* Each wave's, the round's checksums read and before wave 0 hands its CQ

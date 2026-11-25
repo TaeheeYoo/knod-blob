@@ -206,12 +206,6 @@ static inline void barrier(void)
 /* Keep the compiler from moving memory accesses across it. */
 #define ORDER()		__asm__ volatile("" ::: "memory")
 
-/* Lane @l's @v, for each lane its own @l. */
-static inline uint32_t bpermute(uint32_t l, uint32_t v)
-{
-	return __builtin_amdgcn_ds_bpermute(l << 2, v);
-}
-
 static inline uint64_t lanes_below(uint32_t n)
 {
 	return n >= 64 ? ~0ull : (1ull << n) - 1;
