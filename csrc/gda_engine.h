@@ -40,7 +40,11 @@
  *			hands them back
  *   nic_rx_release()	wave 0: CQ and RQ entries back to the NIC
  *   nic_tx_reap()	what the NIC sent, off the TX CQ
- *   nic_tx_post()	one packet's send descriptor
+ *   nic_tx_fits()	the round's XDP_TX packets so many free SQ entries take
+ *   nic_tx_used()	...and the SQ entries they do take
+ *   nic_tx_round()	one of them out, and the RQ position it holds
+ *   nic_tx_close()	wave 0: the round's out, the doorbell
+ *   nic_tx_post()	one host frame's send descriptor
  *   nic_tx_ring()	wave 0: the SQ's doorbell
  */
 #ifndef GDA_FN
@@ -1877,21 +1881,16 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 			pbase += p;
 	}
 	left = GL(&g, SQ_MASK) + 1 - NIC_SQ_SPARE - (pc - cc);
-	x = gda_share(&g, left);
+	x = gda_share(&g, nic_tx_fits(&g, left));
 
-	/* Each WQE says which RQ position its packet came in on, so that
-	 * whatever WQE the NIC's completions stop at, the RQ is held from the
-	 * right place.  Only the round's last WQE asks for a completion.
+	/* Each WQE says which RQ position its first packet came in on, so
+	 * that whatever WQE the NIC's completions stop at, the RQ is held from
+	 * the right place.  Only the round's last WQE asks for a completion.
 	 */
 	pos = GL(&g, CI) + 64 * g.wave + lane_id();
-	if (x.mine && ((tx >> lane_id()) & 1) && rank(tx) < x.mine) {
-		uint32_t counter = pc + x.base + rank(tx);
-		int last = g.wave == x.last && rank(tx) == x.mine - 1;
-
-		nic_tx_post(&g, counter, page, off, len, last);
-		put32(g.ring + KNOD_PERSIST_RING_RQPOS_OFF +
-		      4 * (counter & GL(&g, SQ_MASK)), pos);
-	}
+	if (x.mine && ((tx >> lane_id()) & 1) && rank(tx) < x.mine)
+		nic_tx_round(&g, pc, x.given, x.base + rank(tx), page, off,
+			     len, pos);
 
 	/* The packets that pass and find a slot go to it, at their offset in
 	 * the RX page, one at a time with the whole wave on each: a lane per
@@ -1936,7 +1935,8 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 		struct gda_htx h = { 0 };
 
 		if (gda_htx_room(&g))
-			gda_htx_take(&g, &h, gda_htx_room(&g) - x.given);
+			gda_htx_take(&g, &h, gda_htx_room(&g) -
+				     nic_tx_used(&g, pc, x.given));
 		if (!lane_id()) {
 			g.meet->htx_n = h.n;
 			g.meet->htx_next = 0;
@@ -1977,10 +1977,9 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 		}
 		SET64(&g, TX_FULL, GL64(&g, TX_FULL) + x.asked - x.given);
 		SET64(&g, TX_PKTS, GL64(&g, TX_PKTS) + x.given);
-		pc += x.given;
-		if (pc != GL(&g, SQ_PC)) {
+		if (x.given) {
+			pc = nic_tx_close(&g, pc, x.given);
 			SET(&g, SQ_PC, pc);
-			nic_tx_ring(&g, pc);
 		}
 	}
 

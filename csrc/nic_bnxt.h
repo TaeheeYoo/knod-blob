@@ -274,4 +274,33 @@ static INLINE void nic_tx_ring(struct gda *g, uint32_t pc)
 			  bnxt_db_idx(pc, GL(g, SQ_MASK)));
 }
 
+/* A round's XDP_TX: a descriptor a packet. */
+static INLINE uint32_t nic_tx_fits(struct gda *g, uint32_t left)
+{
+	return left;
+}
+
+static INLINE uint32_t nic_tx_used(struct gda *g, uint32_t pc, uint32_t n)
+{
+	return n;
+}
+
+/* Packet @r of the round's @n, from @pc, and the RQ position it holds. */
+static INLINE void nic_tx_round(struct gda *g, uint32_t pc, uint32_t n,
+				uint32_t r, uint32_t page, uint32_t off,
+				uint32_t len, uint32_t pos)
+{
+	nic_tx_post(g, pc + r, page, off, len, r == n - 1);
+	put32(g->ring + KNOD_PERSIST_RING_RQPOS_OFF +
+	      4 * ((pc + r) & GL(g, SQ_MASK)), pos);
+}
+
+/* Wave 0's, the round's descriptors out: the doorbell, and the producer. */
+static INLINE uint32_t nic_tx_close(struct gda *g, uint32_t pc, uint32_t n)
+{
+	pc += n;
+	nic_tx_ring(g, pc);
+	return pc;
+}
+
 #endif /* KNOD_BLOB_NIC_BNXT_H */

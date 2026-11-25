@@ -306,10 +306,20 @@ static INLINE void nic_rx_release(struct gda *g, uint32_t ci, uint32_t bound)
 	      bswap32((bound + GL(g, RQ_SIZE)) & 0xffff));
 }
 
+/* The WQEBBs of the WQE at SQ counter @counter, as its ds says. */
+static INLINE uint32_t wqe_bbs(struct gda *g, uint32_t counter)
+{
+	GLOBAL struct knod_mlx5_wqe_ctrl_seg *ctrl =
+		(GLOBAL struct knod_mlx5_wqe_ctrl_seg *)GL64(g, SQ) +
+		((counter & GL(g, SQ_MASK)) << (KNOD_MLX5_WQEBB_SHIFT - 4));
+
+	return ((bswap32(get32(&ctrl->qpn_ds)) & 0x3f) + 3) / 4;
+}
+
 /*
  * Take what the NIC has sent off the TX CQ: SQ_CC and TX_CI move.  One CQE
  * per round that sent, on its last WQE, so the run of new ones ends on a
- * round boundary.  @pc is the producer.
+ * round boundary: past it, by its size.  @pc is the producer.
  */
 static INLINE void nic_tx_reap(struct gda *g, uint32_t pc)
 {
@@ -338,7 +348,8 @@ static INLINE void nic_tx_reap(struct gda *g, uint32_t pc)
 		/* Everything up to the last one's WQE is sent: widen it to the
 		 * free-running producer, never more than an SQ ahead.
 		 */
-		last = wqe_counter(__builtin_amdgcn_readlane(tail, n - 1)) + 1;
+		last = wqe_counter(__builtin_amdgcn_readlane(tail, n - 1));
+		last += wqe_bbs(g, last);
 		cc = pc - ((pc - last) & 0xffff);
 	}
 	SET(g, SQ_CC, cc);
@@ -390,6 +401,128 @@ static INLINE void nic_tx_ring(struct gda *g, uint32_t pc)
 		      (uint64_t)bswap32(GL(g, SQN) << 8 | SEND_DS) << 32 |
 		      bswap32(((pc - 1) & 0xffff) << 8 |
 			      KNOD_MLX5_OPCODE_SEND));
+}
+
+/*
+ * A round's XDP_TX goes in enhanced multi-packet send WQEs: up to
+ * MPW_PKTS packets a WQE, a data segment each after the control and
+ * Ethernet segments, MPW_BBS WQEBBs where a send WQE a packet took one.
+ * The NIC reads a quarter of the bytes for them.  The last WQE of the round
+ * is short, and the only one to ask for a completion.  A WQE does not wrap
+ * round the SQ: one that would starts at its start, NOPs before it.
+ */
+#define MPW_BBS		8
+#define MPW_PKTS	(MPW_BBS * 4 - 2)
+
+static inline uint32_t mpw_bbs(uint32_t pkts)
+{
+	return (pkts + 2 + 3) / 4;
+}
+
+/* Of a round of @n packets from SQ counter @pc: the NOPs before WQE @qc. */
+static INLINE uint32_t mpw_pad(struct gda *g, uint32_t pc, uint32_t n,
+			       uint32_t *qc)
+{
+	uint32_t end = GL(g, SQ_MASK) + 1 - (pc & GL(g, SQ_MASK));
+	uint32_t nq = (n + MPW_PKTS - 1) / MPW_PKTS, q = end / MPW_BBS, size;
+
+	*qc = q;
+	if (q >= nq || MPW_BBS * q == end)
+		return 0;
+	size = q == nq - 1 ? mpw_bbs(n - MPW_PKTS * q) : MPW_BBS;
+	return MPW_BBS * q + size > end ? end - MPW_BBS * q : 0;
+}
+
+/* WQE @q's counter and its packets. */
+static INLINE uint32_t mpw_wqe(struct gda *g, uint32_t pc, uint32_t n,
+			       uint32_t q, uint32_t *pkts)
+{
+	uint32_t qc, pad = mpw_pad(g, pc, n, &qc);
+
+	*pkts = q == (n - 1) / MPW_PKTS ? n - MPW_PKTS * q : MPW_PKTS;
+	return pc + MPW_BBS * q + (q >= qc ? pad : 0);
+}
+
+/* The packets @left free WQEBBs take, room for the NOPs kept. */
+static INLINE uint32_t nic_tx_fits(struct gda *g, uint32_t left)
+{
+	uint32_t l = left > MPW_BBS - 1 ? left - (MPW_BBS - 1) : 0;
+	uint32_t r = l % MPW_BBS;
+
+	return l / MPW_BBS * MPW_PKTS + (r ? 4 * r - 2 : 0);
+}
+
+/* The WQEBBs a round of @n packets from @pc takes. */
+static INLINE uint32_t nic_tx_used(struct gda *g, uint32_t pc, uint32_t n)
+{
+	uint32_t pkts, last;
+
+	if (!n)
+		return 0;
+	last = mpw_wqe(g, pc, n, (n - 1) / MPW_PKTS, &pkts);
+	return last + mpw_bbs(pkts) - pc;
+}
+
+/* Packet @r of the round's @n, from @pc: its data segment, and the first of
+ * a WQE its control and Ethernet segments and the RQ position the WQE holds
+ * from.
+ */
+static INLINE void nic_tx_round(struct gda *g, uint32_t pc, uint32_t n,
+				uint32_t r, uint32_t page, uint32_t off,
+				uint32_t len, uint32_t pos)
+{
+	uint32_t q = r / MPW_PKTS, s = r % MPW_PKTS, pkts, counter;
+	uint64_t addr = gda_page_dma(g, page) + off;
+	GLOBAL uint8_t *wqe;
+
+	counter = mpw_wqe(g, pc, n, q, &pkts);
+	wqe = (GLOBAL uint8_t *)GL64(g, SQ) +
+	      ((counter & GL(g, SQ_MASK)) << KNOD_MLX5_WQEBB_SHIFT);
+	put128(wqe + offsetof(struct knod_mlx5_send_wqe, data) +
+	       s * sizeof(struct knod_mlx5_wqe_data_seg),
+	       (v4u){ bswap32(len), GL(g, TX_MKEY),
+		      bswap32(addr >> 32), bswap32(addr) });
+	if (s)
+		return;
+	put128(wqe, (v4u){ bswap32((counter & 0xffff) << 8 |
+				   KNOD_MLX5_OPCODE_ENHANCED_MPSW),
+			   bswap32(GL(g, SQN) << 8 | (2 + pkts)),
+			   r + pkts == n ?
+			   KNOD_MLX5_CTRL_CQ_UPDATE << CTRL_FM_CE_SE_SHIFT : 0,
+			   0 });
+	put128(wqe + offsetof(struct knod_mlx5_send_wqe, eth), (v4u){ 0 });
+	put32(g->ring + KNOD_PERSIST_RING_RQPOS_OFF +
+	      4 * (counter & GL(g, SQ_MASK)), pos);
+}
+
+/* Wave 0's, the round's WQEs out: the NOPs, holding the RQ from where the
+ * round's packets start, and the doorbell for the last WQE.  The SQ's
+ * producer after it.
+ */
+static INLINE uint32_t nic_tx_close(struct gda *g, uint32_t pc, uint32_t n)
+{
+	uint32_t qc, pad = mpw_pad(g, pc, n, &qc), pkts, last, at;
+
+	if (lane_id() < pad) {
+		at = pc + MPW_BBS * qc + lane_id();
+		put128((GLOBAL uint8_t *)GL64(g, SQ) +
+		       ((at & GL(g, SQ_MASK)) << KNOD_MLX5_WQEBB_SHIFT),
+		       (v4u){ bswap32((at & 0xffff) << 8 | KNOD_MLX5_OPCODE_NOP),
+			      bswap32(GL(g, SQN) << 8 | 1), 0, 0 });
+		put32(g->ring + KNOD_PERSIST_RING_RQPOS_OFF +
+		      4 * (at & GL(g, SQ_MASK)), GL(g, CI));
+	}
+	last = mpw_wqe(g, pc, n, (n - 1) / MPW_PKTS, &pkts);
+	pc = last + mpw_bbs(pkts);
+	if (!lane_id())
+		put32(g->ring + KNOD_PERSIST_RING_SQ_DB, bswap32(pc & 0xffff));
+	stores_out();
+	if (!lane_id())
+		put64((GLOBAL void *)GL64(g, DB),
+		      (uint64_t)bswap32(GL(g, SQN) << 8 | (2 + pkts)) << 32 |
+		      bswap32((last & 0xffff) << 8 |
+			      KNOD_MLX5_OPCODE_ENHANCED_MPSW));
+	return pc;
 }
 
 #endif /* KNOD_BLOB_NIC_MLX5_H */

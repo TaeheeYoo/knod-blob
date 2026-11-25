@@ -32,7 +32,9 @@
 #define KNOD_MLX5_CQE_SHIFT		6
 #define KNOD_MLX5_WQEBB_SHIFT		6
 
+#define KNOD_MLX5_OPCODE_NOP		0x00
 #define KNOD_MLX5_OPCODE_SEND		0x0a
+#define KNOD_MLX5_OPCODE_ENHANCED_MPSW	0x29
 #define KNOD_MLX5_CTRL_CQ_UPDATE	0x08	/* fm_ce_se: a completion */
 
 #ifndef __ASSEMBLY__
