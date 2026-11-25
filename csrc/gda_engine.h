@@ -32,8 +32,12 @@
  *   nic_load()		its state lanes, from the queue's entry
  *   nic_rx_post()	post every RQ entry, fresh rings
  *   nic_rx_poll()	whether the lane's completion is done
+ *   nic_rx_polled()	the wave's run of them the round takes
  *   nic_rx_read()	its length, flow and page, and lanes out of step
- *   nic_rx_csum()	what the NIC found of a passed packet's checksums
+ *   nic_rx_csum()	what the NIC found of passed packets' checksums, the
+ *			whole wave at once
+ *   nic_rx_retire()	the round's CQ entries done with, before wave 0
+ *			hands them back
  *   nic_rx_release()	wave 0: CQ and RQ entries back to the NIC
  *   nic_tx_reap()	what the NIC sent, off the TX CQ
  *   nic_tx_post()	one packet's send descriptor
@@ -1479,6 +1483,7 @@ static INLINE v16u gda_round_begin(ctl_t ctl, uint32_t queue, uint32_t wave,
 		/* Lane i polls completion ci + 64w + i. */
 		pos = GL(&g, CI) + 64 * g.wave + lane_id();
 		run = run_of(ballot(nic_rx_poll(&g, pos, &rx)));
+		run = nic_rx_polled(&g, run, &rx);
 		if (!lane_id())
 			g.meet->n[g.wave] = run;
 		htx = 0;
@@ -1803,7 +1808,7 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 	struct gda g = { .s = s, .packets = (uint64_t)pk_hi << 32 | pk_lo };
 	uint64_t live = (uint64_t)uniform32(hi) << 32 | uniform32(lo);
 	uint32_t pc, cc, left, ppc, pbase = 0, ptotal = 0, i, p, n, pos;
-	uint32_t room, pcc, slot, planned, t0 = gda_prof_t0();
+	uint32_t room, pcc, slot, planned, csum, t0 = gda_prof_t0();
 	int in = (live >> lane_id()) & 1;
 	uint64_t tx, pass, copy;
 	struct gda_share x;
@@ -1914,10 +1919,15 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 		       GL(&g, PAGE_SHIFT)) + from;
 		gda_copy(dst, src, to - from);
 	}
+	/* The checksums with the whole wave on them, as mlx5's sessions
+	 * want.
+	 */
+	csum = pass ? nic_rx_csum(&g, pos) : 0;
 	if (((pass >> lane_id()) & 1) && pbase + rank(pass) < room)
 		put64((GLOBAL uint64_t *)GL64(&g, PASS_RING) + slot,
-		      (uint64_t)(off | len << 16) << 32 | nic_rx_csum(&g, pos) |
+		      (uint64_t)(off | len << 16) << 32 | csum |
 		      (meta & ~GDA_PASS_STAGED));
+	nic_rx_retire(&g, pos);
 
 	/* The host's frames for after the round, as many as the SQ has room
 	 * for past the round's own.

@@ -53,6 +53,7 @@ static inline uint32_t wqe_counter(uint32_t tail)
 
 static INLINE void nic_load(struct gda *g, entry_t e)
 {
+	SET(g, CQE_COMP, get32(&e->cqe_comp));
 	SET(g, SQN, get32(&e->sqn));
 	SET(g, TX_MKEY, get32(&e->tx_mkey_be));
 }
@@ -76,51 +77,216 @@ static INLINE void nic_rx_post(struct gda *g)
 		put32(g->ring + KNOD_PERSIST_RING_RQ_DB, bswap32(size));
 }
 
-/* What a lane's CQE told nic_rx_poll(), for nic_rx_read(). */
-struct nic_rx {
-	GLOBAL struct knod_mlx5_cqe64 *c;
-	uint32_t tail;
-};
-
-/* Lane i's completion, of the one at @pos: whether the NIC is done with it.
- * Only its last dword: the WQE counter, the owner bit and the opcode.
+/* A compressed CQ's entries: one the NIC wrote on the pass round the ring
+ * @pos is on; one holding a session, and its mini CQEs.
  */
-static INLINE int nic_rx_poll(struct gda *g, uint32_t pos, struct nic_rx *rx)
-{
-	uint32_t log = GL(g, CQ_LOG);
+#define CQE_VALIDITY_SHIFT	(8 * (offsetof(struct knod_mlx5_cqe64, signature) - \
+				      offsetof(struct knod_mlx5_cqe64, wqe_counter)))
 
-	rx->c = cqe_at(g->ring + KNOD_PERSIST_RING_CQ_OFF, pos, log);
-	rx->tail = cqe_tail(rx->c);
-	return cqe_ours(rx->tail, pos, log);
+static inline int cqe_valid(uint32_t tail, uint32_t pos, uint32_t log)
+{
+	return ((tail >> CQE_VALIDITY_SHIFT) & 0xff) == ((pos >> log) & 0xff);
 }
 
-/* The rest of it, once ours: and the lanes whose CQE completes another RQ
- * entry than @pos is for.  The RQ entry is the page: entry i is page i.
- */
-static INLINE uint64_t nic_rx_read(struct gda *g, struct nic_rx *rx,
-				   uint32_t pos, int ordered, uint32_t *len,
-				   uint32_t *rss, uint32_t *page, uint32_t *kind)
+static inline int cqe_session(uint32_t tail)
 {
-	*kind = rx->tail >> CQE_OP_OWN_SHIFT;
-	*len = bswap32(get32(&rx->c->byte_cnt));
-	if (ordered)
-		*rss = get32(&rx->c->rss_hash_result);
-	*page = wqe_counter(rx->tail);
-	return ballot((pos & 0xffff) != *page);
+	return ((tail >> (CQE_OP_OWN_SHIFT + KNOD_MLX5_CQE_FORMAT_SHIFT)) &
+		KNOD_MLX5_CQE_FORMAT_MASK) == KNOD_MLX5_CQE_COMPRESSED;
 }
 
-/* Completion @pos's checksums: KNOD_PERSIST_PASS_CSUM_OK if the NIC found
- * the IP and L4 ones good.
- */
-static INLINE uint32_t nic_rx_csum(struct gda *g, uint32_t pos)
+static inline uint32_t cqe_minis(uint32_t tail)
 {
-	GLOBAL struct knod_mlx5_cqe64 *c =
-		cqe_at(g->ring + KNOD_PERSIST_RING_CQ_OFF, pos, GL(g, CQ_LOG));
+	return (tail >> (CQE_OP_OWN_SHIFT + KNOD_MLX5_CQE_OPCODE_SHIFT)) + 1;
+}
+
+/* A full CQE of a compressed CQ: one written this pass, not a session, and
+ * not the invalid one a fresh ring holds.
+ */
+static inline int cqe_full(uint32_t tail, uint32_t pos, uint32_t log)
+{
+	return cqe_valid(tail, pos, log) && !cqe_session(tail) &&
+	       (tail >> (CQE_OP_OWN_SHIFT + KNOD_MLX5_CQE_OPCODE_SHIFT)) !=
+	       KNOD_MLX5_CQE_INVALID;
+}
+
+/* KNOD_PERSIST_PASS_CSUM_OK if the NIC found a full CQE's IP and L4
+ * checksums good.
+ */
+static inline uint32_t cqe_csum(GLOBAL struct knod_mlx5_cqe64 *c)
+{
 	uint32_t ok = KNOD_MLX5_CQE_L3_OK | KNOD_MLX5_CQE_L4_OK;
 
 	_Static_assert(offsetof(struct knod_mlx5_cqe64, hds_ip_ext) % 4 == 0,
 		       "the low byte of a dword");
 	return (get32(&c->hds_ip_ext) & ok) == ok ? KNOD_PERSIST_PASS_CSUM_OK : 0;
+}
+
+/* What a lane's CQE told nic_rx_poll(), for nic_rx_read(): the entry and its
+ * last dword - for a packet in a session the session's, the packet @d into
+ * it - and whether it is a full CQE.
+ */
+struct nic_rx {
+	GLOBAL struct knod_mlx5_cqe64 *c;
+	uint32_t tail;
+	uint32_t d;
+	int full;
+};
+
+/* Lane i's completion, of the one at @pos: whether the NIC is done with it.
+ * Only the entries' last dwords: the WQE counter, the owner bit or validity
+ * byte, and op_own.  On a compressed CQ an entry the NIC skipped is done when
+ * the session before it covers it: one a lane below has, or for a wave's
+ * first lanes one in the wave before.  A round starts with a whole entry.
+ */
+static INLINE int nic_rx_poll(struct gda *g, uint32_t pos, struct nic_rx *rx)
+{
+	GLOBAL uint8_t *cq = g->ring + KNOD_PERSIST_RING_CQ_OFF;
+	uint32_t log = GL(g, CQ_LOG), j, d, tail;
+	uint64_t below;
+	int v;
+
+	rx->c = cqe_at(cq, pos, log);
+	rx->tail = cqe_tail(rx->c);
+	rx->d = 0;
+	if (!GL(g, CQE_COMP)) {
+		rx->full = cqe_ours(rx->tail, pos, log);
+		return rx->full;
+	}
+	rx->full = cqe_full(rx->tail, pos, log);
+	v = rx->full || (cqe_valid(rx->tail, pos, log) && cqe_session(rx->tail));
+	below = ballot(v) & lanes_below(lane_id());
+	j = below ? 63 - __builtin_clzll(below) : lane_id();
+	tail = bpermute(j, rx->tail);
+	if (v)
+		return 1;
+	d = lane_id() - j;
+	if (!below) {
+		for (d = lane_id() + 1; d < KNOD_MLX5_MINI_CQES_MAX; d++) {
+			tail = cqe_tail(cqe_at(cq, pos - d, log));
+			if (cqe_valid(tail, pos - d, log))
+				break;
+		}
+		if (d == KNOD_MLX5_MINI_CQES_MAX)
+			return 0;
+	}
+	if (!cqe_session(tail) || d >= cqe_minis(tail))
+		return 0;
+	rx->c = cqe_at(cq, pos - d, log);
+	rx->tail = tail;
+	rx->d = d;
+	return 1;
+}
+
+/* The run the wave takes: a round that would end inside a session ends
+ * before it, so the next starts with a whole entry.  And the wave's last full
+ * CQE's checksums, which the sessions after it share.
+ */
+static INLINE uint32_t nic_rx_polled(struct gda *g, uint32_t run,
+				     struct nic_rx *rx)
+{
+	uint32_t tail, d, t = 0;
+	uint64_t f;
+
+	if (!GL(g, CQE_COMP))
+		return run;
+	if (run == 64 && g->wave == GL(g, WAVES) - 1) {
+		tail = __builtin_amdgcn_readlane(rx->tail, 63);
+		d = __builtin_amdgcn_readlane(rx->d, 63);
+		if (!__builtin_amdgcn_readlane(rx->full, 63) &&
+		    d + 1 < cqe_minis(tail))
+			run -= d + 1;
+	}
+	f = ballot(rx->full) & lanes_below(run);
+	if (f)
+		t = 0x100 | cqe_csum(cqe_at(g->ring + KNOD_PERSIST_RING_CQ_OFF,
+					    GL(g, CI) + 64 * g->wave + 63 -
+					    __builtin_clzll(f), GL(g, CQ_LOG)));
+	if (!lane_id())
+		g->meet->t[g->wave] = t;
+	return run;
+}
+
+/* The rest of it, once ours: and the lanes whose CQE completes another RQ
+ * entry than @pos is for.  The RQ entry is the page: entry i is page i,
+ * which a mini CQE leaves to its place.
+ */
+static INLINE uint64_t nic_rx_read(struct gda *g, struct nic_rx *rx,
+				   uint32_t pos, int ordered, uint32_t *len,
+				   uint32_t *rss, uint32_t *page, uint32_t *kind)
+{
+	GLOBAL struct knod_mlx5_mini_cqe8 *m;
+
+	*kind = rx->tail >> CQE_OP_OWN_SHIFT;
+	if (!rx->full) {
+		m = (GLOBAL struct knod_mlx5_mini_cqe8 *)rx->c + rx->d;
+		*len = bswap32(get32(&m->byte_cnt));
+		if (ordered)
+			*rss = get32(&m->rx_hash_result);
+		*page = pos & 0xffff;
+	} else {
+		*len = bswap32(get32(&rx->c->byte_cnt));
+		if (ordered)
+			*rss = get32(&rx->c->rss_hash_result);
+		*page = wqe_counter(rx->tail);
+	}
+	return ballot((pos & 0xffff) != *page);
+}
+
+/* The full CQE last before wave @w's, this round's or a round before's: of
+ * the waves in the round, those before the first short one.
+ */
+static INLINE uint32_t mlx5_title(struct gda *g, uint32_t w)
+{
+	uint32_t t = GL(g, TITLE), n = GL(g, N), i;
+
+	for (i = 0; i < w && 64 * i < n; i++)
+		if (g->meet->t[i])
+			t = g->meet->t[i];
+	return t;
+}
+
+/* Completion @pos's checksums, every lane of the wave at once:
+ * KNOD_PERSIST_PASS_CSUM_OK if the NIC found the IP and L4 ones good.  A
+ * packet in a session has those of the full CQE before it: the NIC
+ * compresses only CQEs that match it.
+ */
+static INLINE uint32_t nic_rx_csum(struct gda *g, uint32_t pos)
+{
+	uint32_t log = GL(g, CQ_LOG), own, j;
+	GLOBAL struct knod_mlx5_cqe64 *c =
+		cqe_at(g->ring + KNOD_PERSIST_RING_CQ_OFF, pos, log);
+	uint64_t below;
+	int full;
+
+	own = cqe_csum(c);
+	if (!GL(g, CQE_COMP))
+		return own;
+	full = cqe_full(cqe_tail(c), pos, log);
+	below = ballot(full) & lanes_below(lane_id());
+	j = bpermute(below ? 63 - __builtin_clzll(below) : lane_id(), own);
+	if (full)
+		return own;
+	return below ? j : mlx5_title(g, g->wave) & 0xff;
+}
+
+/* Each wave's, the round's checksums read and before wave 0 hands its CQ
+ * entries back: they are left as of this pass round the ring, so none the
+ * NIC skips next pass still says it is on that one; and the full CQE last
+ * of the round is the next one's title.
+ */
+static INLINE void nic_rx_retire(struct gda *g, uint32_t pos)
+{
+	uint32_t log = GL(g, CQ_LOG);
+
+	if (!GL(g, CQE_COMP))
+		return;
+	if (64 * g->wave + lane_id() < GL(g, N))
+		put32(&cqe_at(g->ring + KNOD_PERSIST_RING_CQ_OFF, pos,
+			      log)->wqe_counter,
+		      KNOD_MLX5_CQE_INVALID << (CQE_OP_OWN_SHIFT +
+						KNOD_MLX5_CQE_OPCODE_SHIFT) |
+		      ((pos >> log) & 0xff) << CQE_VALIDITY_SHIFT);
+	SET(g, TITLE, mlx5_title(g, KNOD_PERSIST_GDA_WAVES_MAX));
 }
 
 /* Wave 0's: the CQ entries back up to @ci and the RQ ones up to @bound. */

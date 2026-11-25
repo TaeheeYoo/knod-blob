@@ -80,6 +80,9 @@ enum {
 	GL_IPSEC_SA_MASK = GL_IPSEC_SA + 2,
 	GL_HTX,			/* host TX buffer: zero for none */
 	GL_COUNT,
+	/* mlx5's, where bnxt's are */
+	GL_CQE_COMP = GL_CQ_TOLD,	/* RX CQEs may come compressed */
+	GL_TITLE = GL_TX_CQ_TOLD,	/* the last full RX CQE's checksums */
 };
 _Static_assert(GL_COUNT <= 64, "a lane each");
 
@@ -105,6 +108,7 @@ struct gda_meet {
 	uint32_t k[KNOD_PERSIST_GDA_WAVES_MAX];	/* ...its XDP_TX count */
 	uint32_t p[KNOD_PERSIST_GDA_WAVES_MAX];	/* ...its XDP_PASS count */
 	uint32_t c[KNOD_PERSIST_GDA_WAVES_MAX];	/* ...its claimed count */
+	uint32_t t[KNOD_PERSIST_GDA_WAVES_MAX];	/* ...its last GL_TITLE, or 0 */
 	/* The ordered engine's alone, past what the other has. */
 	uint32_t count;		/* packets this round */
 	uint32_t top[KNOD_PERSIST_GDA_WAVES_MAX];	/* ...its highest parked rank */
@@ -202,6 +206,12 @@ static inline void barrier(void)
 
 /* Keep the compiler from moving memory accesses across it. */
 #define ORDER()		__asm__ volatile("" ::: "memory")
+
+/* Lane @l's @v, for each lane its own @l. */
+static inline uint32_t bpermute(uint32_t l, uint32_t v)
+{
+	return __builtin_amdgcn_ds_bpermute(l << 2, v);
+}
 
 static inline uint64_t lanes_below(uint32_t n)
 {

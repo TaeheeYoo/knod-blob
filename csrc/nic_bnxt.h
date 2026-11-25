@@ -110,6 +110,13 @@ static INLINE int nic_rx_poll(struct gda *g, uint32_t pos, struct nic_rx *rx)
 	       bnxt_ours(w, 2 * pos + 1, log);
 }
 
+/* The run the wave takes: all of it. */
+static INLINE uint32_t nic_rx_polled(struct gda *g, uint32_t run,
+				     struct nic_rx *rx)
+{
+	return run;
+}
+
 /* The RX descriptor's opaque is its page.  Anything but a plain RX
  * completion, or another page than @pos is for, is the rings out of step.
  */
@@ -150,6 +157,10 @@ static INLINE uint32_t nic_rx_csum(struct gda *g, uint32_t pos)
 		return 0;
 	return KNOD_PERSIST_PASS_CSUM_OK |
 	       (flags & KNOD_BNXT_RX_T_L4_CS_CALC ? KNOD_PERSIST_PASS_CSUM_INNER : 0);
+}
+
+static INLINE void nic_rx_retire(struct gda *g, uint32_t pos)
+{
 }
 
 /*

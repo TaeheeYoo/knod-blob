@@ -6,7 +6,7 @@
  * The control block, and each queue's entry in it, which the host fills and
  * the engine in knod-blob's csrc/gda.c runs from.
  */
-#define KNOD_PERSIST_VERSION 0x4b50001f
+#define KNOD_PERSIST_VERSION 0x4b500020
 #define KNOD_PERSIST_MAX_QUEUES 32
 /* The crypto pool: a dispatch's workgroups that take the queues' rounds'
  * sealing and opening, up to so many, each with the control entry
@@ -26,7 +26,7 @@
 /* ...and what KNOD_BLOB_GDA_ENGINE_ORDERED's need: a 16-bit flow key and
  * two bits for each of a round's packets besides.
  */
-#define KNOD_PERSIST_GDA_ORDER_LDS_BYTES 720
+#define KNOD_PERSIST_GDA_ORDER_LDS_BYTES 736
 /* ...and what the crypto pool's workgroups need: the AES T-tables, past the
  * waves' meeting place, in KNOD_PERSIST_GDA_IPSEC_TTAB_COPIES copies a word
  * apart, a lane reading its own so that lanes meet in an LDS bank less; then
@@ -216,7 +216,10 @@ struct knod_persistent_gda {
 	__u32 tx_mkey_be;	/* already big endian */
 	__u32 tx_cq_log;
 	__u32 tx_gen;		/* as gen, for the SQ */
-	__u32 pad1;
+	/* mlx5: the RX CQ's completions may come compressed, the enhanced
+	 * layout with the RSS hash in each mini CQE.
+	 */
+	__u32 cqe_comp;
 	__u64 tx_packets;
 	__u64 tx_full;		/* XDP_TX dropped for want of SQ room */
 	/* The shader's: where the SQ and its CQ got to, and for which build. */

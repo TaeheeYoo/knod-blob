@@ -11,9 +11,20 @@
 #ifndef KNOD_BLOB_MLX5_H
 #define KNOD_BLOB_MLX5_H
 
-/* op_own: the CQE's owner bit low, its opcode in the high nibble. */
+/* op_own: the CQE's owner bit low, its format above it, its opcode in the
+ * high nibble.
+ */
 #define KNOD_MLX5_CQE_OWNER_MASK	0x01
+#define KNOD_MLX5_CQE_FORMAT_SHIFT	2
+#define KNOD_MLX5_CQE_FORMAT_MASK	0x03
 #define KNOD_MLX5_CQE_OPCODE_SHIFT	4
+/* A compressed session, in the enhanced layout: one CQ entry holding its
+ * mini CQEs, the opcode their count less one; the NIC moves past as many
+ * entries and writes none but the first.  Which entries the NIC wrote on a
+ * pass round the ring their validity byte says, the pass's count.
+ */
+#define KNOD_MLX5_CQE_COMPRESSED	3
+#define KNOD_MLX5_MINI_CQES_MAX		8
 #define KNOD_MLX5_CQE_REQ_ERR		0x0d
 #define KNOD_MLX5_CQE_INVALID		0x0f	/* what a fresh CQ holds */
 
@@ -40,8 +51,16 @@ struct knod_mlx5_cqe64 {
 	__be32	byte_cnt;
 	__u8	rsvd48[12];
 	__be16	wqe_counter;
-	__u8	signature;
+	__u8	signature;		/* compressed CQs: the validity byte */
 	__u8	op_own;
+};
+
+/* struct mlx5_mini_cqe8 in the hash format: a session's packet, the rest of
+ * its CQE as the last full one before the session has it.
+ */
+struct knod_mlx5_mini_cqe8 {
+	__be32	rx_hash_result;
+	__be32	byte_cnt;
 };
 
 /* struct mlx5_wqe_ctrl_seg */
