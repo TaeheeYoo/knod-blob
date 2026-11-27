@@ -10,9 +10,14 @@
 #include "gda.h"
 #include "mlx5.h"
 
-/* KNOD_PERSIST_FMT_MLX5_CQE_COMP's: the RX CQ compressed. */
+/* The RX CQ compressed, and XDP_TX in multi-packet WQEs: which of the
+ * KNOD_PERSIST_FMT_MLX5_* formats the engine is built for.
+ */
 #ifndef MLX5_CQE_COMP
 # define MLX5_CQE_COMP	0
+#endif
+#ifndef MLX5_TX_MPW
+# define MLX5_TX_MPW	0
 #endif
 
 /* op_own's place in a CQE's last dword, fm_ce_se's in a ctrl segment's
@@ -349,7 +354,7 @@ static INLINE void nic_tx_reap(struct gda *g, uint32_t pc)
 		 * free-running producer, never more than an SQ ahead.
 		 */
 		last = wqe_counter(__builtin_amdgcn_readlane(tail, n - 1));
-		last += wqe_bbs(g, last);
+		last += MLX5_TX_MPW ? wqe_bbs(g, last) : 1;
 		cc = pc - ((pc - last) & 0xffff);
 	}
 	SET(g, SQ_CC, cc);
@@ -403,6 +408,7 @@ static INLINE void nic_tx_ring(struct gda *g, uint32_t pc)
 			      KNOD_MLX5_OPCODE_SEND));
 }
 
+#if MLX5_TX_MPW
 /*
  * A round's XDP_TX goes in enhanced multi-packet send WQEs: up to
  * MPW_PKTS packets a WQE, a data segment each after the control and
@@ -524,5 +530,35 @@ static INLINE uint32_t nic_tx_close(struct gda *g, uint32_t pc, uint32_t n)
 			      KNOD_MLX5_OPCODE_ENHANCED_MPSW));
 	return pc;
 }
+#else
+/* A round's XDP_TX: a send WQE a packet. */
+static INLINE uint32_t nic_tx_fits(struct gda *g, uint32_t left)
+{
+	return left;
+}
+
+static INLINE uint32_t nic_tx_used(struct gda *g, uint32_t pc, uint32_t n)
+{
+	return n;
+}
+
+/* Packet @r of the round's @n, from @pc, and the RQ position it holds. */
+static INLINE void nic_tx_round(struct gda *g, uint32_t pc, uint32_t n,
+				uint32_t r, uint32_t page, uint32_t off,
+				uint32_t len, uint32_t pos)
+{
+	nic_tx_post(g, pc + r, page, off, len, r == n - 1);
+	put32(g->ring + KNOD_PERSIST_RING_RQPOS_OFF +
+	      4 * ((pc + r) & GL(g, SQ_MASK)), pos);
+}
+
+/* Wave 0's, the round's WQEs out: the doorbell, and the producer. */
+static INLINE uint32_t nic_tx_close(struct gda *g, uint32_t pc, uint32_t n)
+{
+	pc += n;
+	nic_tx_ring(g, pc);
+	return pc;
+}
+#endif
 
 #endif /* KNOD_BLOB_NIC_MLX5_H */

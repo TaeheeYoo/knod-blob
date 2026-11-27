@@ -76,6 +76,9 @@
  * each mini CQE.
  */
 #define KNOD_PERSIST_FMT_MLX5_CQE_COMP 4
+/* MLX5_CX5 and MLX5_CQE_COMP with XDP_TX in enhanced multi-packet WQEs. */
+#define KNOD_PERSIST_FMT_MLX5_MPW 5
+#define KNOD_PERSIST_FMT_MLX5_CQE_COMP_MPW 6
 /* db_key[]: what bnxt rings each of a queue's rings with, its index ORed in. */
 #define KNOD_PERSIST_DB_RQ 0
 #define KNOD_PERSIST_DB_RX_CQ 1

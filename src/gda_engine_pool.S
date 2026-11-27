@@ -46,6 +46,8 @@
 #define POOL_BNXT_P5	GDA_CAT(knod_gda_pool_f, KNOD_PERSIST_FMT_BNXT_P5)
 #define POOL_BNXT_P7	GDA_CAT(knod_gda_pool_f, KNOD_PERSIST_FMT_BNXT_P7)
 #define POOL_MLX5_CQE_COMP	GDA_CAT(knod_gda_pool_f, KNOD_PERSIST_FMT_MLX5_CQE_COMP)
+#define POOL_MLX5_CQE_COMP_MPW	GDA_CAT(knod_gda_pool_f, KNOD_PERSIST_FMT_MLX5_CQE_COMP_MPW)
+#define POOL_MLX5_MPW	GDA_CAT(knod_gda_pool_f, KNOD_PERSIST_FMT_MLX5_MPW)
 
 	GDA_POOL POOL_MLX5_CX5, mlx5_cx5_ipsec
 	CFN_BODY_gda_pool_mlx5_cx5_ipsec
@@ -62,3 +64,11 @@
 	GDA_POOL POOL_MLX5_CQE_COMP, mlx5_cqe_comp_ipsec
 	CFN_BODY_gda_pool_mlx5_cqe_comp_ipsec
 	GDA_POOL_END POOL_MLX5_CQE_COMP
+
+	GDA_POOL POOL_MLX5_MPW, mlx5_mpw_ipsec
+	CFN_BODY_gda_pool_mlx5_mpw_ipsec
+	GDA_POOL_END POOL_MLX5_MPW
+
+	GDA_POOL POOL_MLX5_CQE_COMP_MPW, mlx5_cqe_comp_mpw_ipsec
+	CFN_BODY_gda_pool_mlx5_cqe_comp_mpw_ipsec
+	GDA_POOL_END POOL_MLX5_CQE_COMP_MPW
