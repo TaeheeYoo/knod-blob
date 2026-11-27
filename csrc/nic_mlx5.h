@@ -10,9 +10,7 @@
 #include "gda.h"
 #include "mlx5.h"
 
-/* The RX CQ compressed, and XDP_TX in multi-packet WQEs: which of the
- * KNOD_PERSIST_FMT_MLX5_* formats the engine is built for.
- */
+/* Which KNOD_PERSIST_FMT_MLX5_* the engine is built for. */
 #ifndef MLX5_CQE_COMP
 # define MLX5_CQE_COMP	0
 #endif
@@ -86,9 +84,6 @@ static INLINE void nic_rx_post(struct gda *g)
 		put32(g->ring + KNOD_PERSIST_RING_RQ_DB, bswap32(size));
 }
 
-/* A compressed CQ's entries: one the NIC wrote on the pass round the ring
- * @pos is on; one holding a session, and its mini CQEs.
- */
 #define CQE_VALIDITY_SHIFT	(8 * (offsetof(struct knod_mlx5_cqe64, signature) - \
 				      offsetof(struct knod_mlx5_cqe64, wqe_counter)))
 
@@ -108,9 +103,6 @@ static inline uint32_t cqe_minis(uint32_t tail)
 	return (tail >> (CQE_OP_OWN_SHIFT + KNOD_MLX5_CQE_OPCODE_SHIFT)) + 1;
 }
 
-/* A full CQE of a compressed CQ: one written this pass, not a session, and
- * not the invalid one a fresh ring holds.
- */
 static inline int cqe_full(uint32_t tail, uint32_t pos, uint32_t log)
 {
 	return cqe_valid(tail, pos, log) && !cqe_session(tail) &&
@@ -118,9 +110,6 @@ static inline int cqe_full(uint32_t tail, uint32_t pos, uint32_t log)
 	       KNOD_MLX5_CQE_INVALID;
 }
 
-/* KNOD_PERSIST_PASS_CSUM_OK if the NIC found a full CQE's IP and L4
- * checksums good.
- */
 static inline uint32_t cqe_csum(GLOBAL struct knod_mlx5_cqe64 *c)
 {
 	uint32_t ok = KNOD_MLX5_CQE_L3_OK | KNOD_MLX5_CQE_L4_OK;
@@ -130,10 +119,7 @@ static inline uint32_t cqe_csum(GLOBAL struct knod_mlx5_cqe64 *c)
 	return (get32(&c->hds_ip_ext) & ok) == ok ? KNOD_PERSIST_PASS_CSUM_OK : 0;
 }
 
-/* What a lane's CQE told nic_rx_poll(), for nic_rx_read(): the entry and its
- * last dword - for a packet in a session the session's, the packet @d into
- * it - and whether it is a full CQE.
- */
+/* The lane's CQE, or for a mini CQE its session's and @d into it. */
 struct nic_rx {
 	GLOBAL struct knod_mlx5_cqe64 *c;
 	uint32_t tail;
@@ -141,13 +127,9 @@ struct nic_rx {
 	int full;
 };
 
-/* Lane i's completion, of the one at @pos: whether the NIC is done with it.
- * Only the entries' last dwords: the WQE counter, the owner bit or validity
- * byte, and op_own.  On a compressed CQ an entry the NIC skipped is done when
- * the session before it covers it: one a lane below has, or for a wave's
- * first lanes one in the wave before.  A round starts with a whole entry.
- * The session's entry is read again, not taken from its lane: in a wave64
- * ds_bpermute stays in its half of the wave.
+/* Whether the NIC is done with completion @pos.  A skipped entry is done when
+ * the session before it covers it; that session is read again from memory,
+ * as ds_bpermute stays within a half of a wave64.
  */
 static INLINE int nic_rx_poll(struct gda *g, uint32_t pos, struct nic_rx *rx)
 {
@@ -183,9 +165,8 @@ static INLINE int nic_rx_poll(struct gda *g, uint32_t pos, struct nic_rx *rx)
 	return 1;
 }
 
-/* The run the wave takes: a round that would end inside a session ends
- * before it, so the next starts with a whole entry.  And the wave's last full
- * CQE's checksums, which the sessions after it share.
+/* A round never ends inside a session: the next must start on a whole
+ * entry.  Also notes the wave's last full CQE, the sessions' title.
  */
 static INLINE uint32_t nic_rx_polled(struct gda *g, uint32_t run,
 				     struct nic_rx *rx)
@@ -213,8 +194,7 @@ static INLINE uint32_t nic_rx_polled(struct gda *g, uint32_t run,
 }
 
 /* The rest of it, once ours: and the lanes whose CQE completes another RQ
- * entry than @pos is for.  The RQ entry is the page: entry i is page i,
- * which a mini CQE leaves to its place.
+ * entry than @pos is for.  The RQ entry is the page: entry i is page i.
  */
 static INLINE uint64_t nic_rx_read(struct gda *g, struct nic_rx *rx,
 				   uint32_t pos, int ordered, uint32_t *len,
@@ -238,9 +218,7 @@ static INLINE uint64_t nic_rx_read(struct gda *g, struct nic_rx *rx,
 	return ballot((pos & 0xffff) != *page);
 }
 
-/* The full CQE last before wave @w's, this round's or a round before's: of
- * the waves in the round, those before the first short one.
- */
+/* The title before wave @w. */
 static INLINE uint32_t mlx5_title(struct gda *g, uint32_t w)
 {
 	uint32_t t = GL(g, TITLE), n = GL(g, N), i;
@@ -251,11 +229,7 @@ static INLINE uint32_t mlx5_title(struct gda *g, uint32_t w)
 	return t;
 }
 
-/* Completion @pos's checksums, every lane of the wave at once:
- * KNOD_PERSIST_PASS_CSUM_OK if the NIC found the IP and L4 ones good.  A
- * packet in a session has those of the full CQE before it: the NIC
- * compresses only CQEs that match it.
- */
+/* Called with the whole wave.  A mini CQE has its title's checksums. */
 static INLINE uint32_t nic_rx_csum(struct gda *g, uint32_t pos)
 {
 	GLOBAL uint8_t *cq = g->ring + KNOD_PERSIST_RING_CQ_OFF;
@@ -276,10 +250,8 @@ static INLINE uint32_t nic_rx_csum(struct gda *g, uint32_t pos)
 	return mlx5_title(g, g->wave) & 0xff;
 }
 
-/* Each wave's, the round's checksums read and before wave 0 hands its CQ
- * entries back: they are left as of this pass round the ring, so none the
- * NIC skips next pass still says it is on that one; and the full CQE last
- * of the round is the next one's title.
+/* Stamp the round's entries with this pass's count: one the NIC skips for
+ * 256 passes would otherwise look current again.
  */
 static INLINE void nic_rx_retire(struct gda *g, uint32_t pos)
 {
@@ -311,7 +283,7 @@ static INLINE void nic_rx_release(struct gda *g, uint32_t ci, uint32_t bound)
 	      bswap32((bound + GL(g, RQ_SIZE)) & 0xffff));
 }
 
-/* The WQEBBs of the WQE at SQ counter @counter, as its ds says. */
+/* WQEBBs of the WQE at @counter, from its ds. */
 static INLINE uint32_t wqe_bbs(struct gda *g, uint32_t counter)
 {
 	GLOBAL struct knod_mlx5_wqe_ctrl_seg *ctrl =
@@ -324,7 +296,7 @@ static INLINE uint32_t wqe_bbs(struct gda *g, uint32_t counter)
 /*
  * Take what the NIC has sent off the TX CQ: SQ_CC and TX_CI move.  One CQE
  * per round that sent, on its last WQE, so the run of new ones ends on a
- * round boundary: past it, by its size.  @pc is the producer.
+ * round boundary.  @pc is the producer.
  */
 static INLINE void nic_tx_reap(struct gda *g, uint32_t pc)
 {
@@ -409,13 +381,8 @@ static INLINE void nic_tx_ring(struct gda *g, uint32_t pc)
 }
 
 #if MLX5_TX_MPW
-/*
- * A round's XDP_TX goes in enhanced multi-packet send WQEs: up to
- * MPW_PKTS packets a WQE, a data segment each after the control and
- * Ethernet segments, MPW_BBS WQEBBs where a send WQE a packet took one.
- * The NIC reads a quarter of the bytes for them.  The last WQE of the round
- * is short, and the only one to ask for a completion.  A WQE does not wrap
- * round the SQ: one that would starts at its start, NOPs before it.
+/* Enhanced multi-packet WQEs of up to MPW_PKTS packets.  A WQE that would
+ * wrap the SQ is moved to its start, NOPs before it.
  */
 #define MPW_BBS		8
 #define MPW_PKTS	(MPW_BBS * 4 - 2)
@@ -425,7 +392,7 @@ static inline uint32_t mpw_bbs(uint32_t pkts)
 	return (pkts + 2 + 3) / 4;
 }
 
-/* Of a round of @n packets from SQ counter @pc: the NOPs before WQE @qc. */
+/* NOPs before WQE @qc of a round of @n from @pc. */
 static INLINE uint32_t mpw_pad(struct gda *g, uint32_t pc, uint32_t n,
 			       uint32_t *qc)
 {
@@ -439,7 +406,6 @@ static INLINE uint32_t mpw_pad(struct gda *g, uint32_t pc, uint32_t n,
 	return MPW_BBS * q + size > end ? end - MPW_BBS * q : 0;
 }
 
-/* WQE @q's counter and its packets. */
 static INLINE uint32_t mpw_wqe(struct gda *g, uint32_t pc, uint32_t n,
 			       uint32_t q, uint32_t *pkts)
 {
@@ -449,7 +415,7 @@ static INLINE uint32_t mpw_wqe(struct gda *g, uint32_t pc, uint32_t n,
 	return pc + MPW_BBS * q + (q >= qc ? pad : 0);
 }
 
-/* The packets @left free WQEBBs take, room for the NOPs kept. */
+/* Packets that fit in @left WQEBBs, NOP room kept. */
 static INLINE uint32_t nic_tx_fits(struct gda *g, uint32_t left)
 {
 	uint32_t l = left > MPW_BBS - 1 ? left - (MPW_BBS - 1) : 0;
@@ -458,7 +424,6 @@ static INLINE uint32_t nic_tx_fits(struct gda *g, uint32_t left)
 	return l / MPW_BBS * MPW_PKTS + (r ? 4 * r - 2 : 0);
 }
 
-/* The WQEBBs a round of @n packets from @pc takes. */
 static INLINE uint32_t nic_tx_used(struct gda *g, uint32_t pc, uint32_t n)
 {
 	uint32_t pkts, last;
@@ -469,10 +434,7 @@ static INLINE uint32_t nic_tx_used(struct gda *g, uint32_t pc, uint32_t n)
 	return last + mpw_bbs(pkts) - pc;
 }
 
-/* Packet @r of the round's @n, from @pc: its data segment, and the first of
- * a WQE its control and Ethernet segments and the RQ position the WQE holds
- * from.
- */
+/* Packet @r of @n; the WQE's first also writes its ctrl/eth and rqpos. */
 static INLINE void nic_tx_round(struct gda *g, uint32_t pc, uint32_t n,
 				uint32_t r, uint32_t page, uint32_t off,
 				uint32_t len, uint32_t pos)
@@ -501,10 +463,7 @@ static INLINE void nic_tx_round(struct gda *g, uint32_t pc, uint32_t n,
 	      4 * (counter & GL(g, SQ_MASK)), pos);
 }
 
-/* Wave 0's, the round's WQEs out: the NOPs, holding the RQ from where the
- * round's packets start, and the doorbell for the last WQE.  The SQ's
- * producer after it.
- */
+/* Wave 0: the NOPs and the doorbell; returns the new producer. */
 static INLINE uint32_t nic_tx_close(struct gda *g, uint32_t pc, uint32_t n)
 {
 	uint32_t qc, pad = mpw_pad(g, pc, n, &qc), pkts, last, at;
@@ -531,7 +490,6 @@ static INLINE uint32_t nic_tx_close(struct gda *g, uint32_t pc, uint32_t n)
 	return pc;
 }
 #else
-/* A round's XDP_TX: a send WQE a packet. */
 static INLINE uint32_t nic_tx_fits(struct gda *g, uint32_t left)
 {
 	return left;
@@ -542,7 +500,6 @@ static INLINE uint32_t nic_tx_used(struct gda *g, uint32_t pc, uint32_t n)
 	return n;
 }
 
-/* Packet @r of the round's @n, from @pc, and the RQ position it holds. */
 static INLINE void nic_tx_round(struct gda *g, uint32_t pc, uint32_t n,
 				uint32_t r, uint32_t page, uint32_t off,
 				uint32_t len, uint32_t pos)
@@ -552,7 +509,6 @@ static INLINE void nic_tx_round(struct gda *g, uint32_t pc, uint32_t n,
 	      4 * ((pc + r) & GL(g, SQ_MASK)), pos);
 }
 
-/* Wave 0's, the round's WQEs out: the doorbell, and the producer. */
 static INLINE uint32_t nic_tx_close(struct gda *g, uint32_t pc, uint32_t n)
 {
 	pc += n;

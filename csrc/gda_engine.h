@@ -34,16 +34,14 @@
  *   nic_rx_poll()	whether the lane's completion is done
  *   nic_rx_polled()	the wave's run of them the round takes
  *   nic_rx_read()	its length, flow and page, and lanes out of step
- *   nic_rx_csum()	what the NIC found of passed packets' checksums, the
- *			whole wave at once
- *   nic_rx_retire()	the round's CQ entries done with, before wave 0
- *			hands them back
+ *   nic_rx_csum()	what the NIC found of passed packets' checksums
+ *   nic_rx_retire()	the round's CQ entries done with
  *   nic_rx_release()	wave 0: CQ and RQ entries back to the NIC
  *   nic_tx_reap()	what the NIC sent, off the TX CQ
- *   nic_tx_fits()	the round's XDP_TX packets so many free SQ entries take
- *   nic_tx_used()	...and the SQ entries they do take
- *   nic_tx_round()	one of them out, and the RQ position it holds
- *   nic_tx_close()	wave 0: the round's out, the doorbell
+ *   nic_tx_fits()	XDP_TX packets that fit in so many SQ entries
+ *   nic_tx_used()	SQ entries a round's XDP_TX takes
+ *   nic_tx_round()	one XDP_TX packet out
+ *   nic_tx_close()	wave 0: the round's XDP_TX doorbell
  *   nic_tx_post()	one host frame's send descriptor
  *   nic_tx_ring()	wave 0: the SQ's doorbell
  */
@@ -1883,9 +1881,9 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 	left = GL(&g, SQ_MASK) + 1 - NIC_SQ_SPARE - (pc - cc);
 	x = gda_share(&g, nic_tx_fits(&g, left));
 
-	/* Each WQE says which RQ position its first packet came in on, so
-	 * that whatever WQE the NIC's completions stop at, the RQ is held from
-	 * the right place.  Only the round's last WQE asks for a completion.
+	/* Each WQE says which RQ position its packet came in on, so that
+	 * whatever WQE the NIC's completions stop at, the RQ is held from the
+	 * right place.  Only the round's last WQE asks for a completion.
 	 */
 	pos = GL(&g, CI) + 64 * g.wave + lane_id();
 	if (x.mine && ((tx >> lane_id()) & 1) && rank(tx) < x.mine)
@@ -1918,9 +1916,6 @@ v4u GDA_FN(gda_round_end)(ctl_t ctl, uint32_t queue, uint32_t wave,
 		       GL(&g, PAGE_SHIFT)) + from;
 		gda_copy(dst, src, to - from);
 	}
-	/* The checksums with the whole wave on them, as mlx5's sessions
-	 * want.
-	 */
 	csum = pass ? nic_rx_csum(&g, pos) : 0;
 	if (((pass >> lane_id()) & 1) && pbase + rank(pass) < room)
 		put64((GLOBAL uint64_t *)GL64(&g, PASS_RING) + slot,

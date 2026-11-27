@@ -18,11 +18,7 @@
 #define KNOD_MLX5_CQE_FORMAT_SHIFT	2
 #define KNOD_MLX5_CQE_FORMAT_MASK	0x03
 #define KNOD_MLX5_CQE_OPCODE_SHIFT	4
-/* A compressed session, in the enhanced layout: one CQ entry holding its
- * mini CQEs, the opcode their count less one; the NIC moves past as many
- * entries and writes none but the first.  Which entries the NIC wrote on a
- * pass round the ring their validity byte says, the pass's count.
- */
+/* Enhanced layout: opcode = mini CQEs - 1, the entries after it skipped. */
 #define KNOD_MLX5_CQE_COMPRESSED	3
 #define KNOD_MLX5_MINI_CQES_MAX		8
 #define KNOD_MLX5_CQE_REQ_ERR		0x0d
@@ -57,9 +53,7 @@ struct knod_mlx5_cqe64 {
 	__u8	op_own;
 };
 
-/* struct mlx5_mini_cqe8 in the hash format: a session's packet, the rest of
- * its CQE as the last full one before the session has it.
- */
+/* struct mlx5_mini_cqe8, hash format */
 struct knod_mlx5_mini_cqe8 {
 	__be32	rx_hash_result;
 	__be32	byte_cnt;

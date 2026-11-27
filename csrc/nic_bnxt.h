@@ -110,7 +110,6 @@ static INLINE int nic_rx_poll(struct gda *g, uint32_t pos, struct nic_rx *rx)
 	       bnxt_ours(w, 2 * pos + 1, log);
 }
 
-/* The run the wave takes: all of it. */
 static INLINE uint32_t nic_rx_polled(struct gda *g, uint32_t run,
 				     struct nic_rx *rx)
 {
@@ -274,7 +273,6 @@ static INLINE void nic_tx_ring(struct gda *g, uint32_t pc)
 			  bnxt_db_idx(pc, GL(g, SQ_MASK)));
 }
 
-/* A round's XDP_TX: a descriptor a packet. */
 static INLINE uint32_t nic_tx_fits(struct gda *g, uint32_t left)
 {
 	return left;
@@ -285,7 +283,6 @@ static INLINE uint32_t nic_tx_used(struct gda *g, uint32_t pc, uint32_t n)
 	return n;
 }
 
-/* Packet @r of the round's @n, from @pc, and the RQ position it holds. */
 static INLINE void nic_tx_round(struct gda *g, uint32_t pc, uint32_t n,
 				uint32_t r, uint32_t page, uint32_t off,
 				uint32_t len, uint32_t pos)
@@ -295,7 +292,6 @@ static INLINE void nic_tx_round(struct gda *g, uint32_t pc, uint32_t n,
 	      4 * ((pc + r) & GL(g, SQ_MASK)), pos);
 }
 
-/* Wave 0's, the round's descriptors out: the doorbell, and the producer. */
 static INLINE uint32_t nic_tx_close(struct gda *g, uint32_t pc, uint32_t n)
 {
 	pc += n;
