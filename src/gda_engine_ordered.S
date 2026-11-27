@@ -8,6 +8,9 @@
 #define MLX5_CX5	GDA_CAT(knod_gda_engine_ordered_f, KNOD_PERSIST_FMT_MLX5_CX5)
 #define BNXT_P5		GDA_CAT(knod_gda_engine_ordered_f, KNOD_PERSIST_FMT_BNXT_P5)
 #define BNXT_P7		GDA_CAT(knod_gda_engine_ordered_f, KNOD_PERSIST_FMT_BNXT_P7)
+#define MLX5_CQE_COMP	GDA_CAT(knod_gda_engine_ordered_f, KNOD_PERSIST_FMT_MLX5_CQE_COMP)
+#define MLX5_CQE_COMP_MPW	GDA_CAT(knod_gda_engine_ordered_f, KNOD_PERSIST_FMT_MLX5_CQE_COMP_MPW)
+#define MLX5_MPW	GDA_CAT(knod_gda_engine_ordered_f, KNOD_PERSIST_FMT_MLX5_MPW)
 
 	GDA_ENGINE MLX5_CX5, mlx5_cx5, 1
 	CFN_BODY_gda_init_mlx5_cx5
@@ -38,3 +41,33 @@
 	CFN_BODY_gda_host_seal_bnxt_p7
 	CFN_BODY_gda_host_tx_bnxt_p7
 	GDA_ENGINE_END BNXT_P7
+
+	GDA_ENGINE MLX5_CQE_COMP, mlx5_cqe_comp, 1
+	CFN_BODY_gda_init_mlx5_cqe_comp
+	CFN_BODY_gda_round_begin_ordered_mlx5_cqe_comp
+	CFN_BODY_gda_parked_mlx5_cqe_comp
+	CFN_BODY_gda_claimed_mlx5_cqe_comp
+	CFN_BODY_gda_round_end_mlx5_cqe_comp
+	CFN_BODY_gda_host_seal_mlx5_cqe_comp
+	CFN_BODY_gda_host_tx_mlx5_cqe_comp
+	GDA_ENGINE_END MLX5_CQE_COMP
+
+	GDA_ENGINE MLX5_MPW, mlx5_mpw, 1
+	CFN_BODY_gda_init_mlx5_mpw
+	CFN_BODY_gda_round_begin_ordered_mlx5_mpw
+	CFN_BODY_gda_parked_mlx5_mpw
+	CFN_BODY_gda_claimed_mlx5_mpw
+	CFN_BODY_gda_round_end_mlx5_mpw
+	CFN_BODY_gda_host_seal_mlx5_mpw
+	CFN_BODY_gda_host_tx_mlx5_mpw
+	GDA_ENGINE_END MLX5_MPW
+
+	GDA_ENGINE MLX5_CQE_COMP_MPW, mlx5_cqe_comp_mpw, 1
+	CFN_BODY_gda_init_mlx5_cqe_comp_mpw
+	CFN_BODY_gda_round_begin_ordered_mlx5_cqe_comp_mpw
+	CFN_BODY_gda_parked_mlx5_cqe_comp_mpw
+	CFN_BODY_gda_claimed_mlx5_cqe_comp_mpw
+	CFN_BODY_gda_round_end_mlx5_cqe_comp_mpw
+	CFN_BODY_gda_host_seal_mlx5_cqe_comp_mpw
+	CFN_BODY_gda_host_tx_mlx5_cqe_comp_mpw
+	GDA_ENGINE_END MLX5_CQE_COMP_MPW

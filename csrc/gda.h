@@ -80,6 +80,8 @@ enum {
 	GL_IPSEC_SA_MASK = GL_IPSEC_SA + 2,
 	GL_HTX,			/* host TX buffer: zero for none */
 	GL_COUNT,
+	/* mlx5's, where bnxt's is: the last full RX CQE's checksums */
+	GL_TITLE = GL_CQ_TOLD,
 };
 _Static_assert(GL_COUNT <= 64, "a lane each");
 
@@ -105,6 +107,7 @@ struct gda_meet {
 	uint32_t k[KNOD_PERSIST_GDA_WAVES_MAX];	/* ...its XDP_TX count */
 	uint32_t p[KNOD_PERSIST_GDA_WAVES_MAX];	/* ...its XDP_PASS count */
 	uint32_t c[KNOD_PERSIST_GDA_WAVES_MAX];	/* ...its claimed count */
+	uint32_t t[KNOD_PERSIST_GDA_WAVES_MAX];	/* ...its last GL_TITLE, or 0 */
 	/* The ordered engine's alone, past what the other has. */
 	uint32_t count;		/* packets this round */
 	uint32_t top[KNOD_PERSIST_GDA_WAVES_MAX];	/* ...its highest parked rank */

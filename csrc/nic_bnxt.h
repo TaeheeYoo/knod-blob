@@ -110,6 +110,12 @@ static INLINE int nic_rx_poll(struct gda *g, uint32_t pos, struct nic_rx *rx)
 	       bnxt_ours(w, 2 * pos + 1, log);
 }
 
+static INLINE uint32_t nic_rx_polled(struct gda *g, uint32_t run,
+				     struct nic_rx *rx)
+{
+	return run;
+}
+
 /* The RX descriptor's opaque is its page.  Anything but a plain RX
  * completion, or another page than @pos is for, is the rings out of step.
  */
@@ -150,6 +156,10 @@ static INLINE uint32_t nic_rx_csum(struct gda *g, uint32_t pos)
 		return 0;
 	return KNOD_PERSIST_PASS_CSUM_OK |
 	       (flags & KNOD_BNXT_RX_T_L4_CS_CALC ? KNOD_PERSIST_PASS_CSUM_INNER : 0);
+}
+
+static INLINE void nic_rx_retire(struct gda *g, uint32_t pos)
+{
 }
 
 /*
@@ -261,6 +271,32 @@ static INLINE void nic_tx_ring(struct gda *g, uint32_t pc)
 	if (!lane_id())
 		bnxt_ring(g, KNOD_PERSIST_DB_SQ,
 			  bnxt_db_idx(pc, GL(g, SQ_MASK)));
+}
+
+static INLINE uint32_t nic_tx_fits(struct gda *g, uint32_t left)
+{
+	return left;
+}
+
+static INLINE uint32_t nic_tx_used(struct gda *g, uint32_t pc, uint32_t n)
+{
+	return n;
+}
+
+static INLINE void nic_tx_round(struct gda *g, uint32_t pc, uint32_t n,
+				uint32_t r, uint32_t page, uint32_t off,
+				uint32_t len, uint32_t pos)
+{
+	nic_tx_post(g, pc + r, page, off, len, r == n - 1);
+	put32(g->ring + KNOD_PERSIST_RING_RQPOS_OFF +
+	      4 * ((pc + r) & GL(g, SQ_MASK)), pos);
+}
+
+static INLINE uint32_t nic_tx_close(struct gda *g, uint32_t pc, uint32_t n)
+{
+	pc += n;
+	nic_tx_ring(g, pc);
+	return pc;
 }
 
 #endif /* KNOD_BLOB_NIC_BNXT_H */

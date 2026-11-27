@@ -10,6 +10,14 @@
 #include "gda.h"
 #include "mlx5.h"
 
+/* Which KNOD_PERSIST_FMT_MLX5_* the engine is built for. */
+#ifndef MLX5_CQE_COMP
+# define MLX5_CQE_COMP	0
+#endif
+#ifndef MLX5_TX_MPW
+# define MLX5_TX_MPW	0
+#endif
+
 /* op_own's place in a CQE's last dword, fm_ce_se's in a ctrl segment's
  * third, and a send WQE's size in the 16-byte units the NIC counts.
  */
@@ -76,22 +84,113 @@ static INLINE void nic_rx_post(struct gda *g)
 		put32(g->ring + KNOD_PERSIST_RING_RQ_DB, bswap32(size));
 }
 
-/* What a lane's CQE told nic_rx_poll(), for nic_rx_read(). */
+#define CQE_VALIDITY_SHIFT	(8 * (offsetof(struct knod_mlx5_cqe64, signature) - \
+				      offsetof(struct knod_mlx5_cqe64, wqe_counter)))
+
+static inline int cqe_valid(uint32_t tail, uint32_t pos, uint32_t log)
+{
+	return ((tail >> CQE_VALIDITY_SHIFT) & 0xff) == ((pos >> log) & 0xff);
+}
+
+static inline int cqe_session(uint32_t tail)
+{
+	return ((tail >> (CQE_OP_OWN_SHIFT + KNOD_MLX5_CQE_FORMAT_SHIFT)) &
+		KNOD_MLX5_CQE_FORMAT_MASK) == KNOD_MLX5_CQE_COMPRESSED;
+}
+
+static inline uint32_t cqe_minis(uint32_t tail)
+{
+	return (tail >> (CQE_OP_OWN_SHIFT + KNOD_MLX5_CQE_OPCODE_SHIFT)) + 1;
+}
+
+static inline int cqe_full(uint32_t tail, uint32_t pos, uint32_t log)
+{
+	return cqe_valid(tail, pos, log) && !cqe_session(tail) &&
+	       (tail >> (CQE_OP_OWN_SHIFT + KNOD_MLX5_CQE_OPCODE_SHIFT)) !=
+	       KNOD_MLX5_CQE_INVALID;
+}
+
+static inline uint32_t cqe_csum(GLOBAL struct knod_mlx5_cqe64 *c)
+{
+	uint32_t ok = KNOD_MLX5_CQE_L3_OK | KNOD_MLX5_CQE_L4_OK;
+
+	_Static_assert(offsetof(struct knod_mlx5_cqe64, hds_ip_ext) % 4 == 0,
+		       "the low byte of a dword");
+	return (get32(&c->hds_ip_ext) & ok) == ok ? KNOD_PERSIST_PASS_CSUM_OK : 0;
+}
+
+/* The lane's CQE, or for a mini CQE its session's and @d into it. */
 struct nic_rx {
 	GLOBAL struct knod_mlx5_cqe64 *c;
 	uint32_t tail;
+	uint32_t d;
+	int full;
 };
 
-/* Lane i's completion, of the one at @pos: whether the NIC is done with it.
- * Only its last dword: the WQE counter, the owner bit and the opcode.
+/* Whether the NIC is done with completion @pos.  A skipped entry is done when
+ * the session before it covers it; that session is read again from memory,
+ * as ds_bpermute stays within a half of a wave64.
  */
 static INLINE int nic_rx_poll(struct gda *g, uint32_t pos, struct nic_rx *rx)
 {
-	uint32_t log = GL(g, CQ_LOG);
+	GLOBAL uint8_t *cq = g->ring + KNOD_PERSIST_RING_CQ_OFF;
+	uint32_t log = GL(g, CQ_LOG), d, tail = 0;
+	uint64_t below;
+	int v;
 
-	rx->c = cqe_at(g->ring + KNOD_PERSIST_RING_CQ_OFF, pos, log);
+	rx->c = cqe_at(cq, pos, log);
 	rx->tail = cqe_tail(rx->c);
-	return cqe_ours(rx->tail, pos, log);
+	rx->d = 0;
+	if (!MLX5_CQE_COMP) {
+		rx->full = cqe_ours(rx->tail, pos, log);
+		return rx->full;
+	}
+	rx->full = cqe_full(rx->tail, pos, log);
+	v = rx->full || (cqe_valid(rx->tail, pos, log) && cqe_session(rx->tail));
+	below = ballot(v) & lanes_below(lane_id());
+	if (v)
+		return 1;
+	d = below ? lane_id() - (63 - __builtin_clzll(below)) : lane_id() + 1;
+	for (; d < KNOD_MLX5_MINI_CQES_MAX; d++) {
+		tail = cqe_tail(cqe_at(cq, pos - d, log));
+		if (cqe_valid(tail, pos - d, log))
+			break;
+	}
+	if (d >= KNOD_MLX5_MINI_CQES_MAX || !cqe_session(tail) ||
+	    d >= cqe_minis(tail))
+		return 0;
+	rx->c = cqe_at(cq, pos - d, log);
+	rx->tail = tail;
+	rx->d = d;
+	return 1;
+}
+
+/* A round never ends inside a session: the next must start on a whole
+ * entry.  Also notes the wave's last full CQE, the sessions' title.
+ */
+static INLINE uint32_t nic_rx_polled(struct gda *g, uint32_t run,
+				     struct nic_rx *rx)
+{
+	uint32_t tail, d, t = 0;
+	uint64_t f;
+
+	if (!MLX5_CQE_COMP)
+		return run;
+	if (run == 64 && g->wave == GL(g, WAVES) - 1) {
+		tail = __builtin_amdgcn_readlane(rx->tail, 63);
+		d = __builtin_amdgcn_readlane(rx->d, 63);
+		if (!__builtin_amdgcn_readlane(rx->full, 63) &&
+		    d + 1 < cqe_minis(tail))
+			run -= d + 1;
+	}
+	f = ballot(rx->full) & lanes_below(run);
+	if (f)
+		t = 0x100 | cqe_csum(cqe_at(g->ring + KNOD_PERSIST_RING_CQ_OFF,
+					    GL(g, CI) + 64 * g->wave + 63 -
+					    __builtin_clzll(f), GL(g, CQ_LOG)));
+	if (!lane_id())
+		g->meet->t[g->wave] = t;
+	return run;
 }
 
 /* The rest of it, once ours: and the lanes whose CQE completes another RQ
@@ -101,26 +200,72 @@ static INLINE uint64_t nic_rx_read(struct gda *g, struct nic_rx *rx,
 				   uint32_t pos, int ordered, uint32_t *len,
 				   uint32_t *rss, uint32_t *page, uint32_t *kind)
 {
+	GLOBAL struct knod_mlx5_mini_cqe8 *m;
+
 	*kind = rx->tail >> CQE_OP_OWN_SHIFT;
-	*len = bswap32(get32(&rx->c->byte_cnt));
-	if (ordered)
-		*rss = get32(&rx->c->rss_hash_result);
-	*page = wqe_counter(rx->tail);
+	if (MLX5_CQE_COMP && !rx->full) {
+		m = (GLOBAL struct knod_mlx5_mini_cqe8 *)rx->c + rx->d;
+		*len = bswap32(get32(&m->byte_cnt));
+		if (ordered)
+			*rss = get32(&m->rx_hash_result);
+		*page = pos & 0xffff;
+	} else {
+		*len = bswap32(get32(&rx->c->byte_cnt));
+		if (ordered)
+			*rss = get32(&rx->c->rss_hash_result);
+		*page = wqe_counter(rx->tail);
+	}
 	return ballot((pos & 0xffff) != *page);
 }
 
-/* Completion @pos's checksums: KNOD_PERSIST_PASS_CSUM_OK if the NIC found
- * the IP and L4 ones good.
- */
+/* The title before wave @w. */
+static INLINE uint32_t mlx5_title(struct gda *g, uint32_t w)
+{
+	uint32_t t = GL(g, TITLE), n = GL(g, N), i;
+
+	for (i = 0; i < w && 64 * i < n; i++)
+		if (g->meet->t[i])
+			t = g->meet->t[i];
+	return t;
+}
+
+/* Called with the whole wave.  A mini CQE has its title's checksums. */
 static INLINE uint32_t nic_rx_csum(struct gda *g, uint32_t pos)
 {
-	GLOBAL struct knod_mlx5_cqe64 *c =
-		cqe_at(g->ring + KNOD_PERSIST_RING_CQ_OFF, pos, GL(g, CQ_LOG));
-	uint32_t ok = KNOD_MLX5_CQE_L3_OK | KNOD_MLX5_CQE_L4_OK;
+	GLOBAL uint8_t *cq = g->ring + KNOD_PERSIST_RING_CQ_OFF;
+	uint32_t log = GL(g, CQ_LOG);
+	GLOBAL struct knod_mlx5_cqe64 *c = cqe_at(cq, pos, log);
+	uint64_t below;
+	int full;
 
-	_Static_assert(offsetof(struct knod_mlx5_cqe64, hds_ip_ext) % 4 == 0,
-		       "the low byte of a dword");
-	return (get32(&c->hds_ip_ext) & ok) == ok ? KNOD_PERSIST_PASS_CSUM_OK : 0;
+	if (!MLX5_CQE_COMP)
+		return cqe_csum(c);
+	full = cqe_full(cqe_tail(c), pos, log);
+	below = ballot(full) & lanes_below(lane_id());
+	if (full)
+		return cqe_csum(c);
+	if (below)
+		return cqe_csum(cqe_at(cq, pos - lane_id() + 63 -
+				       __builtin_clzll(below), log));
+	return mlx5_title(g, g->wave) & 0xff;
+}
+
+/* Stamp the round's entries with this pass's count: one the NIC skips for
+ * 256 passes would otherwise look current again.
+ */
+static INLINE void nic_rx_retire(struct gda *g, uint32_t pos)
+{
+	uint32_t log = GL(g, CQ_LOG);
+
+	if (!MLX5_CQE_COMP)
+		return;
+	if (64 * g->wave + lane_id() < GL(g, N))
+		put32(&cqe_at(g->ring + KNOD_PERSIST_RING_CQ_OFF, pos,
+			      log)->wqe_counter,
+		      KNOD_MLX5_CQE_INVALID << (CQE_OP_OWN_SHIFT +
+						KNOD_MLX5_CQE_OPCODE_SHIFT) |
+		      ((pos >> log) & 0xff) << CQE_VALIDITY_SHIFT);
+	SET(g, TITLE, mlx5_title(g, KNOD_PERSIST_GDA_WAVES_MAX));
 }
 
 /* Wave 0's: the CQ entries back up to @ci and the RQ ones up to @bound. */
@@ -136,6 +281,16 @@ static INLINE void nic_rx_release(struct gda *g, uint32_t ci, uint32_t bound)
 	stores_out();
 	put32(g->ring + KNOD_PERSIST_RING_RQ_DB,
 	      bswap32((bound + GL(g, RQ_SIZE)) & 0xffff));
+}
+
+/* WQEBBs of the WQE at @counter, from its ds. */
+static INLINE uint32_t wqe_bbs(struct gda *g, uint32_t counter)
+{
+	GLOBAL struct knod_mlx5_wqe_ctrl_seg *ctrl =
+		(GLOBAL struct knod_mlx5_wqe_ctrl_seg *)GL64(g, SQ) +
+		((counter & GL(g, SQ_MASK)) << (KNOD_MLX5_WQEBB_SHIFT - 4));
+
+	return ((bswap32(get32(&ctrl->qpn_ds)) & 0x3f) + 3) / 4;
 }
 
 /*
@@ -170,7 +325,8 @@ static INLINE void nic_tx_reap(struct gda *g, uint32_t pc)
 		/* Everything up to the last one's WQE is sent: widen it to the
 		 * free-running producer, never more than an SQ ahead.
 		 */
-		last = wqe_counter(__builtin_amdgcn_readlane(tail, n - 1)) + 1;
+		last = wqe_counter(__builtin_amdgcn_readlane(tail, n - 1));
+		last += MLX5_TX_MPW ? wqe_bbs(g, last) : 1;
 		cc = pc - ((pc - last) & 0xffff);
 	}
 	SET(g, SQ_CC, cc);
@@ -223,5 +379,142 @@ static INLINE void nic_tx_ring(struct gda *g, uint32_t pc)
 		      bswap32(((pc - 1) & 0xffff) << 8 |
 			      KNOD_MLX5_OPCODE_SEND));
 }
+
+#if MLX5_TX_MPW
+/* Enhanced multi-packet WQEs of up to MPW_PKTS packets.  A WQE that would
+ * wrap the SQ is moved to its start, NOPs before it.
+ */
+#define MPW_BBS		8
+#define MPW_PKTS	(MPW_BBS * 4 - 2)
+
+static inline uint32_t mpw_bbs(uint32_t pkts)
+{
+	return (pkts + 2 + 3) / 4;
+}
+
+/* NOPs before WQE @qc of a round of @n from @pc. */
+static INLINE uint32_t mpw_pad(struct gda *g, uint32_t pc, uint32_t n,
+			       uint32_t *qc)
+{
+	uint32_t end = GL(g, SQ_MASK) + 1 - (pc & GL(g, SQ_MASK));
+	uint32_t nq = (n + MPW_PKTS - 1) / MPW_PKTS, q = end / MPW_BBS, size;
+
+	*qc = q;
+	if (q >= nq || MPW_BBS * q == end)
+		return 0;
+	size = q == nq - 1 ? mpw_bbs(n - MPW_PKTS * q) : MPW_BBS;
+	return MPW_BBS * q + size > end ? end - MPW_BBS * q : 0;
+}
+
+static INLINE uint32_t mpw_wqe(struct gda *g, uint32_t pc, uint32_t n,
+			       uint32_t q, uint32_t *pkts)
+{
+	uint32_t qc, pad = mpw_pad(g, pc, n, &qc);
+
+	*pkts = q == (n - 1) / MPW_PKTS ? n - MPW_PKTS * q : MPW_PKTS;
+	return pc + MPW_BBS * q + (q >= qc ? pad : 0);
+}
+
+/* Packets that fit in @left WQEBBs, NOP room kept. */
+static INLINE uint32_t nic_tx_fits(struct gda *g, uint32_t left)
+{
+	uint32_t l = left > MPW_BBS - 1 ? left - (MPW_BBS - 1) : 0;
+	uint32_t r = l % MPW_BBS;
+
+	return l / MPW_BBS * MPW_PKTS + (r ? 4 * r - 2 : 0);
+}
+
+static INLINE uint32_t nic_tx_used(struct gda *g, uint32_t pc, uint32_t n)
+{
+	uint32_t pkts, last;
+
+	if (!n)
+		return 0;
+	last = mpw_wqe(g, pc, n, (n - 1) / MPW_PKTS, &pkts);
+	return last + mpw_bbs(pkts) - pc;
+}
+
+/* Packet @r of @n; the WQE's first also writes its ctrl/eth and rqpos. */
+static INLINE void nic_tx_round(struct gda *g, uint32_t pc, uint32_t n,
+				uint32_t r, uint32_t page, uint32_t off,
+				uint32_t len, uint32_t pos)
+{
+	uint32_t q = r / MPW_PKTS, s = r % MPW_PKTS, pkts, counter;
+	uint64_t addr = gda_page_dma(g, page) + off;
+	GLOBAL uint8_t *wqe;
+
+	counter = mpw_wqe(g, pc, n, q, &pkts);
+	wqe = (GLOBAL uint8_t *)GL64(g, SQ) +
+	      ((counter & GL(g, SQ_MASK)) << KNOD_MLX5_WQEBB_SHIFT);
+	put128(wqe + offsetof(struct knod_mlx5_send_wqe, data) +
+	       s * sizeof(struct knod_mlx5_wqe_data_seg),
+	       (v4u){ bswap32(len), GL(g, TX_MKEY),
+		      bswap32(addr >> 32), bswap32(addr) });
+	if (s)
+		return;
+	put128(wqe, (v4u){ bswap32((counter & 0xffff) << 8 |
+				   KNOD_MLX5_OPCODE_ENHANCED_MPSW),
+			   bswap32(GL(g, SQN) << 8 | (2 + pkts)),
+			   r + pkts == n ?
+			   KNOD_MLX5_CTRL_CQ_UPDATE << CTRL_FM_CE_SE_SHIFT : 0,
+			   0 });
+	put128(wqe + offsetof(struct knod_mlx5_send_wqe, eth), (v4u){ 0 });
+	put32(g->ring + KNOD_PERSIST_RING_RQPOS_OFF +
+	      4 * (counter & GL(g, SQ_MASK)), pos);
+}
+
+/* Wave 0: the NOPs and the doorbell; returns the new producer. */
+static INLINE uint32_t nic_tx_close(struct gda *g, uint32_t pc, uint32_t n)
+{
+	uint32_t qc, pad = mpw_pad(g, pc, n, &qc), pkts, last, at;
+
+	if (lane_id() < pad) {
+		at = pc + MPW_BBS * qc + lane_id();
+		put128((GLOBAL uint8_t *)GL64(g, SQ) +
+		       ((at & GL(g, SQ_MASK)) << KNOD_MLX5_WQEBB_SHIFT),
+		       (v4u){ bswap32((at & 0xffff) << 8 | KNOD_MLX5_OPCODE_NOP),
+			      bswap32(GL(g, SQN) << 8 | 1), 0, 0 });
+		put32(g->ring + KNOD_PERSIST_RING_RQPOS_OFF +
+		      4 * (at & GL(g, SQ_MASK)), GL(g, CI));
+	}
+	last = mpw_wqe(g, pc, n, (n - 1) / MPW_PKTS, &pkts);
+	pc = last + mpw_bbs(pkts);
+	if (!lane_id())
+		put32(g->ring + KNOD_PERSIST_RING_SQ_DB, bswap32(pc & 0xffff));
+	stores_out();
+	if (!lane_id())
+		put64((GLOBAL void *)GL64(g, DB),
+		      (uint64_t)bswap32(GL(g, SQN) << 8 | (2 + pkts)) << 32 |
+		      bswap32((last & 0xffff) << 8 |
+			      KNOD_MLX5_OPCODE_ENHANCED_MPSW));
+	return pc;
+}
+#else
+static INLINE uint32_t nic_tx_fits(struct gda *g, uint32_t left)
+{
+	return left;
+}
+
+static INLINE uint32_t nic_tx_used(struct gda *g, uint32_t pc, uint32_t n)
+{
+	return n;
+}
+
+static INLINE void nic_tx_round(struct gda *g, uint32_t pc, uint32_t n,
+				uint32_t r, uint32_t page, uint32_t off,
+				uint32_t len, uint32_t pos)
+{
+	nic_tx_post(g, pc + r, page, off, len, r == n - 1);
+	put32(g->ring + KNOD_PERSIST_RING_RQPOS_OFF +
+	      4 * ((pc + r) & GL(g, SQ_MASK)), pos);
+}
+
+static INLINE uint32_t nic_tx_close(struct gda *g, uint32_t pc, uint32_t n)
+{
+	pc += n;
+	nic_tx_ring(g, pc);
+	return pc;
+}
+#endif
 
 #endif /* KNOD_BLOB_NIC_MLX5_H */
